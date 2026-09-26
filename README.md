@@ -23,7 +23,7 @@ dashboard.
 Requires Python 3.10+.
 
 ```sh
-git clone https://github.com/<username>/coms-board.git
+git clone https://github.com/ljlabs/coms-board.git
 cd coms-board
 python3 -m unittest discover -s tests
 ```
