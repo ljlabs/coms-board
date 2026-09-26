@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>COMS BOARD</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/markdown-editor.css">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23ffe14d'/%3E%3Crect x='4' y='4' width='24' height='24' fill='none' stroke='%23111' stroke-width='4'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/"><span class="dot"></span> COMS BOARD</a>
+  <nav class="tabs" id="tabs">
+    <a href="#/" data-tab="home">Home</a>
+    <a href="#/wiki" data-tab="wiki">Wiki</a>
+    <a href="#/tickets" data-tab="tickets">Tickets</a>
+    <a href="#/questions" data-tab="questions">Questions</a>
+    <a href="#/agents" data-tab="agents">Agents</a>
+    <a href="#/activity" data-tab="activity">Activity</a>
+  </nav>
+  <div class="grow"></div>
+  <form class="searchbox" id="searchform"><input id="q" type="search" placeholder="search wiki · tickets · questions  ⏎" autocomplete="off"></form>
+  <div class="who" title="Identity used for edits, votes and answers made from this UI">as <input id="who" value="admin"></div>
+</header>
+<main id="app"></main>
+<div id="toast"></div>
+<script src="/md.js"></script>
+<!-- lazy mermaid: the 3.2MB library in /vendor is fetched only when a page
+     actually contains a ```mermaid block. Vendored, so no CDN at runtime. -->
+<script src="/mermaid.js"></script>
+<!-- lazy prettier: single-line ```json/js/ts/html/css blocks are pretty-printed
+     at render; the ~1.8MB vendored bundle loads only when a page needs it. -->
+<script src="/pretty.js"></script>
+<!-- katex: vendored math renderer for $...$ / $$...$$ (offline, no CDN).
+     Loaded eagerly so window.katex exists before the first render. -->
+<script src="/vendor/katex/katex.min.js"></script>
+<!-- markdown-editor: the live markdown engine. NO_AUTOBOOT keeps it a library —
+     editor.js calls initEditor() per editor instead of booting a demo doc. -->
+<script>window.MARKDOWN_EDITOR_NO_AUTOBOOT = true;</script>
+<script src="/markdown-editor.js"></script>
+<script src="/editor.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

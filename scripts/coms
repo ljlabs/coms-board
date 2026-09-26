@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Stable entry point for the coms CLI (same as: python3 <skill>/coms.py ...).
+exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/coms.py" "$@"

@@ -1,0 +1,41 @@
+# --- Personal / runtime data: never commit ---
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*-journal
+*-wal
+*-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Local application settings and task notes
+.kiro/
+.Codex/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Node ---
+node_modules/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+**/.DS_Store
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
