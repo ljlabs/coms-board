@@ -1,0 +1,218 @@
+﻿/* Styles for the single-pane live markdown editor. Scoped to .mde-doc and
+ * uses the dashboard color variables from app.css. */
+
+.mde { border: var(--line); background: var(--paper-2); box-shadow: var(--shadow); display: flex; flex-direction: column; }
+
+/* ---------------- chrome: status bar only (Obsidian has no toolbar) ------- */
+
+.mde-bar {
+  display: flex; align-items: center; gap: .8rem;
+  border-bottom: var(--line); background: var(--paper);
+  padding: .35rem .7rem;
+  font-family: var(--mono); font-size: .7rem; font-weight: 700; color: var(--muted);
+}
+.mde-count { text-transform: uppercase; letter-spacing: .04em; }
+.mde-hint { margin-left: auto; opacity: .75; }
+.mde-save {
+  border: 2px solid var(--ink); background: var(--green);
+  font-family: var(--mono); font-weight: 800; font-size: .72rem;
+  padding: .2rem .8rem; cursor: pointer; box-shadow: 2px 2px 0 var(--ink);
+}
+.mde-save:hover { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--ink); }
+.mde-preview-btn {
+  border: 2px solid var(--ink); background: var(--paper-2);
+  font-family: var(--mono); font-weight: 800; font-size: .72rem;
+  padding: .2rem .8rem; cursor: pointer; text-transform: uppercase; letter-spacing: .04em;
+}
+.mde-preview-btn:hover { background: var(--cyan); }
+.mde-preview-btn.on { background: var(--ink); color: var(--paper-2); }
+
+/* ---------------- preview state ---------------- */
+/* The rendered result, produced by md.js and styled by app.css's .md rules —
+   i.e. exactly what the saved page will look like. Toggled by the PREVIEW
+   button; Esc comes back. */
+
+.mde-preview { display: none; }
+.mde[data-preview="1"] .mde-doc { display: none; }
+.mde[data-preview="1"] .mde-preview {
+  display: block;
+  min-height: var(--mde-min, 360px);
+  padding: 1.4rem 1.6rem 2rem;
+  background: var(--paper-2);
+  overflow-x: auto;
+}
+.mde[data-preview="1"] { outline: none; }
+.mde[data-preview="1"] .mde-bar { background: var(--cyan); }
+
+/* ---------------- the document ---------------- */
+
+.mde-doc {
+  min-height: var(--mde-min, 360px);
+  padding: 1.4rem 1.6rem 3rem;
+  outline: none;
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  caret-color: var(--ink);
+  cursor: text;
+  background: #fffdf5;
+  flex: 1;
+}
+
+/* placeholder: shown on the first line while the whole document is empty */
+.mde[data-empty="1"] .mde-doc > .line:first-child::after {
+  content: attr(data-placeholder);
+  color: var(--muted);
+  opacity: .65;
+  pointer-events: none;
+}
+.mde-doc > .line:first-child { position: relative; }
+
+/* ---------------- lines ---------------- */
+
+.mde-doc .line { min-height: 1.7em; padding: 0 .4rem; border-left: 4px solid transparent; }
+.mde-doc .line.active { background: rgba(99, 230, 255, .22); border-left: 4px solid var(--ink); }
+
+/* dimmed markdown syntax tokens, revealed on the active line only */
+.mde-doc .syn { color: var(--muted); opacity: .7; }
+
+/* ---------------- headings ---------------- */
+
+.mde-doc .line.h1, .mde-doc .line.h2, .mde-doc .line.h3,
+.mde-doc .line.h4, .mde-doc .line.h5, .mde-doc .line.h6 {
+  font-family: var(--mono); font-weight: 900; line-height: 1.25; letter-spacing: -.02em;
+}
+.mde-doc .line.h1 { font-size: 1.9rem; margin: .6em 0 .25em; border-bottom: 4px solid var(--ink); padding-bottom: .12em; }
+.mde-doc .line.h2 { font-size: 1.45rem; margin: .55em 0 .2em; border-bottom: 3px solid var(--ink); padding-bottom: .1em; }
+.mde-doc .line.h3 { font-size: 1.15rem; margin: .5em 0 .15em; }
+.mde-doc .line.h4 { font-size: 1.02rem; margin: .4em 0 .1em; }
+.mde-doc .line.h5 { font-size: .95rem; margin: .35em 0 .1em; text-transform: uppercase; letter-spacing: .04em; }
+.mde-doc .line.h6 { font-size: .9rem; margin: .3em 0 .1em; color: var(--muted); }
+.mde-doc .line.h1.active, .mde-doc .line.h2.active { border-left: 4px solid var(--ink); }
+
+/* ---------------- inline ---------------- */
+
+.mde-doc strong { font-weight: 800; }
+.mde-doc em { font-style: italic; }
+.mde-doc del { text-decoration: line-through 2px; }
+.mde-doc mark { background: var(--yellow); border: 1.5px solid var(--ink); padding: 0 3px; }
+.mde-doc code {
+  font-family: var(--mono); font-size: .88em;
+  background: var(--cyan); border: 1.5px solid var(--ink); padding: 0 4px;
+}
+.mde-doc a {
+  color: var(--ink); font-weight: 700;
+  text-decoration: underline 2.5px var(--ink); text-underline-offset: 3px;
+  background: var(--cyan); padding: 0 2px;
+}
+.mde-doc a:hover { background: var(--yellow); }
+.mde-doc a.wikilink { background: var(--violet); }
+.mde-doc a.wikilink-missing { background: var(--paper); border-bottom: 2px dashed var(--red); text-decoration: none; color: var(--red); }
+.mde-doc .linktext { font-weight: 700; text-decoration: underline 2.5px var(--ink); text-underline-offset: 3px; }
+
+/* ---------------- blockquote ---------------- */
+
+.mde-doc .line.quote {
+  background: var(--paper); border-left: 6px solid var(--ink);
+  padding-left: .9rem; font-style: italic;
+}
+.mde-doc .line.quote.active { border-left: 6px solid var(--ink); }
+
+/* ---------------- lists ---------------- */
+
+.mde-doc .line.bullet, .mde-doc .line.task { padding-left: calc(1.7rem + var(--ind, 0) * 1ch); position: relative; }
+.mde-doc .line.ordered { padding-left: calc(1.7rem + var(--ind, 0) * 1ch + var(--marker-w, 0) * .62ch); position: relative; }
+.mde-doc .line.bullet::before { content: "■"; position: absolute; left: calc(.5rem + var(--ind, 0) * 1ch); font-size: .7em; top: .35em; }
+.mde-doc .line.ordered::before {
+  content: attr(data-marker); position: absolute; left: calc(.35rem + var(--ind, 0) * 1ch);
+  font-weight: 800; font-family: var(--mono); font-size: .9em;
+}
+.mde-doc .line.task input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 17px; height: 17px; border: 2.5px solid var(--ink); background: var(--paper-2);
+  position: absolute; left: calc(.35rem + var(--ind, 0) * 1ch); top: .32em;
+  margin: 0; cursor: pointer; vertical-align: middle;
+}
+.mde-doc .line.task input[type="checkbox"]:checked { background: var(--green); box-shadow: inset 0 0 0 2px var(--paper-2); }
+.mde-doc .line.task.done { color: var(--muted); text-decoration: line-through 1.5px; }
+
+/* ---------------- code blocks ---------------- */
+
+.mde-doc .line.codeline, .mde-doc .line.fenceline {
+  font-family: var(--mono); font-size: .88em;
+  background: var(--paper); border-left: 4px solid var(--ink); border-right: 4px solid var(--ink);
+  padding-left: 1rem; padding-right: 1rem;
+}
+.mde-doc .line.fenceline { color: var(--muted); font-weight: 700; }
+.mde-doc .line.codeline.active, .mde-doc .line.fenceline.active { background: var(--cyan); }
+
+/* ---------------- horizontal rule ---------------- */
+
+.mde-doc .line.hr { position: relative; }
+.mde-doc .line.hr::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  height: 5px; background: var(--ink); pointer-events: none;
+}
+
+/* ---------------- tables ---------------- */
+
+.mde-doc .line.tablerow {
+  display: grid; grid-template-columns: repeat(var(--cols, 1), 1fr);
+  border-left: 3px solid var(--ink); border-right: 3px solid var(--ink); padding: 0;
+}
+.mde-doc .line.tablerow .cell {
+  padding: .3rem .7rem; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+  min-width: 0; overflow-wrap: break-word;
+}
+.mde-doc .line.tablerow .cell:last-child { border-right: none; }
+.mde-doc .line.tablehead { border-top: 3px solid var(--ink); background: var(--yellow); }
+.mde-doc .line.tablehead .cell { font-weight: 800; border-bottom: none; }
+.mde-doc .line.tablesep { min-height: 0; height: 5px; background: var(--ink); overflow: hidden; }
+.mde-doc .line.tablesep br { display: none; }
+.mde-doc .line.tablesrc, .mde-doc .line.tablerow.active { font-family: var(--mono); font-size: .9em; }
+
+/* ---------------- diagram / formula blocks ---------------- */
+/* .mermaid-box is used in THREE places, so it is deliberately not scoped to
+   .mde-doc: the live editor (engine-rendered, caret away = diagram), the
+   PREVIEW state, and the read views (both via web/mermaid.js). KaTeX is not
+   vendored, so $math$ still falls back to literal text. */
+
+.mde-doc .line.mdhidden { display: none; }
+.mermaid-box {
+  background: var(--paper-2); border: 3px solid var(--ink); box-shadow: var(--shadow-sm);
+  padding: 1rem; margin: .5rem 0; overflow-x: auto;
+}
+.mde-doc .mermaid-box { cursor: pointer; }
+.mde-doc .mermaid-box:hover { background: var(--cyan); }
+.mermaid-box svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.mermaid-box.mermaid-bad { font-family: var(--mono); font-size: .85em; background: #ffd9d9; }
+.mde-doc .line.mathblock { text-align: center; }
+.mde-doc .line.mathblock .math-display {
+  display: block; background: var(--paper); border: 3px solid var(--ink); box-shadow: var(--shadow-sm);
+  padding: .9rem 1rem; margin: .5rem 0; cursor: pointer; overflow-x: auto;
+}
+.mde-doc .math-src { font-family: var(--mono); font-size: .92em; background: var(--paper); }
+.mde-doc .math-bad { font-family: var(--mono); background: #ffd9d9; border: 1.5px solid var(--ink); padding: 0 3px; }
+.mde-doc code.math-raw { background: var(--paper); }
+
+/* ---------------- link hover tooltip (created on <body> by the engine) ---- */
+
+.linktip {
+  position: absolute; display: none; align-items: center; gap: .6rem;
+  background: var(--paper-2); border: 2.5px solid var(--ink); box-shadow: var(--shadow-sm);
+  padding: .35rem .6rem; font-family: var(--mono); font-size: .75rem; z-index: 50; max-width: 420px;
+}
+.linktip-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.linktip-edit {
+  font-family: var(--mono); font-size: .72rem; font-weight: 800;
+  background: var(--green); color: var(--ink); border: 2px solid var(--ink);
+  padding: .15rem .5rem; cursor: pointer; flex-shrink: 0;
+}
+.linktip-edit:hover { background: var(--yellow); }
+
+@media (max-width: 900px) {
+  .mde-doc { padding: 1rem .9rem 2.5rem; font-size: 15px; }
+  .mde-hint { display: none; }
+}
