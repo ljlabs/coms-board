@@ -250,10 +250,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_session ON orchestrator_messages(session_id,id)")
-    # Preserve conversations created by the first runner version.
-    from time import strftime, gmtime
-    ts = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
-    conn.execute("INSERT OR IGNORE INTO orchestrator_sessions(id,title,created_at,updated_at) VALUES('default','General chat',?,?)", (ts, ts))
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:

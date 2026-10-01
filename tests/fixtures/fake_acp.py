@@ -10,21 +10,32 @@ def send(message):
 
 
 server = None
+selected_model = os.environ.get('COMS_FAKE_MODEL', 'gpt-6-luna')
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get('method')
     params = msg.get('params', {})
     result = {}
     if method == 'initialize':
+        marker=os.environ.get('COMS_FAKE_PID_FILE')
+        if marker:
+            with open(marker,'a',encoding='utf-8') as f: f.write(str(os.getpid())+'\n')
         result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': False}, 'agentInfo': {'name': 'test-backend'}}
     elif method == 'session/new':
         assert os.getcwd() == params['cwd']
         assert isinstance(params['mcpServers'], list)
+        cwd_marker=os.environ.get('COMS_FAKE_CWD_FILE')
+        if cwd_marker:
+            with open(cwd_marker,'a',encoding='utf-8') as f: f.write(os.getcwd()+'\n')
         server = params['mcpServers'][0] if params['mcpServers'] else None
-        result = {'sessionId': 'fake-session'}
+        result = {'sessionId': 'fake-session', 'configOptions': [{'id':'model','name':'Model','category':'model','type':'select','currentValue':selected_model,'options':[{'value':'gpt-6-luna','name':'GPT 6 Luna'},{'value':'gpt-6.1-sol','name':'GPT 6.1 Sol'}]}]}
+    elif method == 'session/set_config_option':
+        assert params['configId']=='model'
+        assert params['value'] in ('gpt-6-luna','gpt-6.1-sol')
+        selected_model=params['value']
     elif method == 'session/prompt':
         text = params['prompt'][0]['text']
-        body = 'Private response is not a board deliverable.'
+        body = (os.environ.get('COMS_FAKE_BACKEND','fake')+' / '+selected_model) if os.environ.get('COMS_FAKE_IDENTITY') else 'Private response is not a board deliverable.'
         if 'performing the final review' in text:
             assert '--readonly' in server['args']
             body = '{"decision":"close","reason":"Verified board deliverable."}'

@@ -6,6 +6,7 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from tests import *  # noqa: F401,F403
 from coms import db
@@ -115,6 +116,36 @@ class TestServer(unittest.TestCase):
     def test_global_overview_still_works(self):
         ov = self.req("GET", "/api/overview")
         self.assertIn("tickets", ov)
+
+    def test_chat_and_project_deletion_preserve_unrelated_data(self):
+        project=self.req("POST","/api/runner/projects",{"name":"Delete me"})
+        chat=self.req("POST","/api/runner/sessions",{"title":"Keep this chat","project_id":project['id']})
+        other=self.req("POST","/api/runner/sessions",{"title":"Delete this chat"})
+        conn=db.connect()
+        conn.execute("INSERT INTO orchestrator_messages(session_id,role,kind,body,created_at) VALUES(?,?,?,?,?)",(chat['id'],'user','text','preserve me','now'))
+        conn.execute("INSERT INTO orchestrator_messages(session_id,role,kind,body,created_at) VALUES(?,?,?,?,?)",(other['id'],'user','text','remove me','now'))
+        conn.commit()
+
+        self.assertEqual(self.req('DELETE',f"/api/runner/projects/{project['id']}")['deleted'],project['id'])
+        preserved=self.req('GET',f"/api/runner/sessions/{chat['id']}")
+        self.assertIsNone(preserved['project_id'])
+        self.assertEqual([m['body'] for m in preserved['messages']],['preserve me'])
+
+        self.assertEqual(self.req('DELETE',f"/api/runner/sessions/{other['id']}")['deleted'],other['id'])
+        self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_messages WHERE session_id=?',(other['id'],)).fetchone()[0],0)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.req('GET',f"/api/runner/sessions/{other['id']}")
+        self.assertEqual(error.exception.code,404)
+
+        from coms.runner import RUNNER
+        with patch.object(RUNNER,'orchestrator_busy',True),patch.object(RUNNER,'orchestrator_session',chat['id']):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.req('DELETE',f"/api/runner/sessions/{chat['id']}")
+            self.assertEqual(error.exception.code,400)
+        self.assertEqual(self.req('DELETE',f"/api/runner/sessions/{chat['id']}")['deleted'],chat['id'])
+        self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_sessions').fetchone()[0],0)
+        db._migrate(conn)
+        self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_sessions').fetchone()[0],0)
 
     def test_invalid_json_shapes_and_parameters_are_client_errors(self):
         for body in [[], "text", 3, None]:

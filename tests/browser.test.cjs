@@ -25,7 +25,7 @@ before(async () => {
 });
 after(async () => {
   if (browser) await browser.close();
-  if (server) { server.kill(); await new Promise(resolve => server.once('exit', resolve)); }
+  if (server) { server.kill('SIGINT'); await new Promise(resolve => server.once('exit', resolve)); }
   if (temp) rmSync(temp, { recursive: true, force: true });
 });
 
@@ -165,5 +165,71 @@ test('typing and scrolling during a slow refresh are retained at commit time', a
     await page.waitForFunction(()=>!document.querySelector('#app').hasAttribute('aria-busy'));
     assert.equal(await page.locator('#runner-input').inputValue(),'Typed while data loads');
     assert.equal(await page.evaluate(()=>window.scrollY),700);
+  });
+});
+
+test('Codex model picker loads backend options and saves the selected model', async () => {
+  await pageFor('/runner', async page => {
+    await page.waitForFunction(() => document.querySelectorAll('#runner-model option').length >= 3 && /models available from codex/.test(document.querySelector('#model-note').textContent), { timeout: 15000 });
+    const labels = await page.locator('#runner-model option').allTextContents();
+    assert.ok(labels.includes('GPT 6 Luna'));
+    assert.ok(labels.includes('GPT 6.1 Sol'));
+    await page.locator('#runner-model').selectOption('gpt-6.1-sol');
+    const saved = page.waitForResponse(r => r.url().endsWith('/api/runner/settings') && r.request().method() === 'PUT');
+    await page.locator('#save-runner').click();
+    assert.equal((await saved).status(), 200);
+    const settings = await page.evaluate(() => fetch('/api/runner/settings').then(r => r.json()));
+    assert.equal(settings.active_backend, 'codex');
+    assert.equal(settings.model_codex, 'gpt-6.1-sol');
+  });
+});
+
+test('saving Runner settings is not blocked by slow model discovery and shows activity', async () => {
+  await pageFor('/runner', async page => {
+    let begin, release;
+    const started = new Promise(resolve => { begin=resolve; });
+    const held = new Promise(resolve => { release=resolve; });
+    await page.route('**/api/runner/models?backend=codex', async route => { begin(); await held; await route.continue(); });
+    await page.evaluate(() => { document.querySelector('#refresh-models').click(); });
+    await started;
+    assert.equal(await page.locator('.model-spinner').count(), 1);
+    assert.match(await page.locator('#model-note').textContent(), /Connecting to codex ACP/);
+    const saved = page.waitForResponse(r => r.url().endsWith('/api/runner/settings') && r.request().method() === 'PUT');
+    await page.locator('#save-runner').click();
+    assert.equal((await saved).status(), 200);
+    const settings = await page.evaluate(() => fetch('/api/runner/settings').then(r => r.json()));
+    assert.equal(settings.active_backend, 'codex');
+    assert.equal(settings.model_codex, 'gpt-6.1-sol');
+    release();
+  });
+});
+
+test('chat and project delete controls preserve chats and select a surviving chat', async () => {
+  await pageFor('/orchestrator?session=browser-chat', async page => {
+    page.on('dialog', dialog => dialog.accept());
+    await page.locator('#new-project').click();
+    await page.locator('#project-name').fill('Disposable project');
+    await page.locator('#save-project').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('.chat-project-head')].some(e => e.textContent.includes('Disposable project')));
+    const projectId=await page.locator('.chat-project').filter({hasText:'Disposable project'}).locator('[data-delete-project]').getAttribute('data-delete-project');
+
+    await page.locator('#new-chat').click();
+    await page.waitForFunction(() => location.hash.includes('session=') && document.querySelector('#move-project'));
+    const currentHash=await page.evaluate(()=>location.hash);
+    const currentId=new URLSearchParams(currentHash.split('?')[1]||'').get('session');
+    const moved=page.waitForResponse(r=>r.url().endsWith(`/api/runner/sessions/${currentId}`)&&r.request().method()==='PATCH');
+    await page.locator('#move-project').selectOption(projectId);
+    assert.equal((await moved).status(),200);
+    const projectDeleted=page.waitForResponse(r=>r.url().endsWith(`/api/runner/projects/${projectId}`)&&r.request().method()==='DELETE');
+    await page.locator(`[data-delete-project="${projectId}"]`).click();
+    assert.equal((await projectDeleted).status(),200);
+    await page.waitForFunction(() => ![...document.querySelectorAll('.chat-project-head')].some(e => e.textContent.includes('Disposable project')));
+    assert.ok(await page.locator('.chat-session-row').count() >= 2, 'project deletion keeps its chats');
+
+    const chatDeleted=page.waitForResponse(r=>r.url().endsWith(`/api/runner/sessions/${currentId}`)&&r.request().method()==='DELETE');
+    await page.locator(`[data-delete-chat="${currentId}"]`).click();
+    assert.equal((await chatDeleted).status(),200);
+    await page.waitForFunction(() => location.hash.includes('session=browser-chat'));
+    assert.equal(await page.locator('[data-delete-chat="browser-chat"]').count(),1);
   });
 });

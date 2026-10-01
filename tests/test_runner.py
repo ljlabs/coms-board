@@ -114,6 +114,49 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(detail['workspace'], str(self.workspace))
         self.assertFalse(detail['busy'])
 
+    def test_model_discovery_exposes_backend_select_options(self):
+        models=self.runner.discover_models('codex')
+        self.assertEqual(models['backend'],'codex')
+        self.assertEqual([m['value'] for m in models['models']],['gpt-6-luna','gpt-6.1-sol'])
+
+    def test_orchestrator_keeps_one_codex_process_and_overrides_stale_chat_backend(self):
+        self.conn.execute("INSERT INTO runner_settings(key,value) VALUES('model_codex','gpt-6.1-sol')")
+        self.conn.execute("INSERT INTO orchestrator_sessions(id,title,backend,acp_session_id,workspace,created_at,updated_at) VALUES('old-chat','Old chat','opencode','old-open-code-session',?,'now','now')",(str(self.workspace),))
+        self.conn.commit()
+        marker=Path(self.tmp.name)/'acp-pids'
+        with patch.dict(os.environ,{'COMS_FAKE_PID_FILE':str(marker),'COMS_FAKE_IDENTITY':'1','COMS_FAKE_BACKEND':'codex'}):
+            self.runner._warm_orchestrator()
+            live=self.runner.orchestrator_conn
+            self.assertTrue(live and live.alive)
+            self.runner._orchestrator_turn('First turn','old-chat',dict(self.conn.execute("SELECT * FROM orchestrator_sessions WHERE id='old-chat'").fetchone()))
+            self.runner._orchestrator_turn('Second turn','old-chat',dict(self.conn.execute("SELECT * FROM orchestrator_sessions WHERE id='old-chat'").fetchone()))
+            self.assertIs(self.runner.orchestrator_conn,live)
+            self.assertTrue(live.alive)
+            self.assertEqual(marker.read_text().splitlines(),[str(live.proc.pid)])
+        detail=self.runner.orchestrator_detail('old-chat')
+        self.assertEqual(detail['backend'],'codex')
+        assistant=[m['body'] for m in detail['messages'] if m['role']=='assistant']
+        self.assertEqual(assistant,['codex / gpt-6.1-sol','codex / gpt-6.1-sol'])
+
+    def test_orchestrator_restarts_only_after_model_change_and_closes_on_stop(self):
+        marker=Path(self.tmp.name)/'acp-pids'
+        with patch.dict(os.environ,{'COMS_FAKE_PID_FILE':str(marker)}):
+            self.runner._warm_orchestrator()
+            first=self.runner.orchestrator_conn
+            self.assertTrue(first and first.alive)
+            self.assertEqual(len(marker.read_text().splitlines()),1)
+            self.runner._orchestrator_connection('codex',str(self.workspace),self.runner.settings())
+            self.assertIs(self.runner.orchestrator_conn,first)
+            self.conn.execute("UPDATE runner_settings SET value='gpt-6.1-sol' WHERE key='model_codex'")
+            self.conn.commit()
+            self.runner._reset_orchestrator()
+            second=self.runner.orchestrator_conn
+            self.assertIsNot(second,first)
+            self.assertTrue(second and second.alive)
+            self.assertEqual(len(marker.read_text().splitlines()),2)
+            self.runner.stop()
+            self.assertFalse(second.alive)
+
     def test_review_tools_are_readonly(self):
         tools = mcp.dispatch({'id': 1, 'method': 'tools/list'}, readonly=True)['result']['tools']
         self.assertTrue(all(t['annotations']['readOnlyHint'] for t in tools))
@@ -134,17 +177,17 @@ class TestRunner(unittest.TestCase):
         self.conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,started_at) VALUES(?,'codex','running','old')", (t['id'],))
         self.conn.execute("INSERT INTO ticket_reviews(ticket_id,status,created_at) VALUES(?,'running','old')", (t['id'],))
         self.conn.commit()
-        self.runner.start()
+        self.runner.start(warm=False)
         self.runner.stop()
         self.assertEqual(self.conn.execute('SELECT status FROM agent_runs').fetchone()[0], 'failed')
         self.assertEqual(self.conn.execute('SELECT status FROM ticket_reviews').fetchone()[0], 'failed')
 
     def test_second_runner_cannot_recover_or_duplicate_live_runs(self):
-        self.runner.start()
+        self.runner.start(warm=False)
         other=Runner()
         try:
             with self.assertRaisesRegex(RuntimeError, 'already owns'):
-                other.start()
+                other.start(warm=False)
         finally: other.stop()
 
     def test_changed_human_assignment_is_rechecked_before_execution(self):

@@ -322,6 +322,13 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
             try: b["workspace"] = workspace_path(b)
             except ValueError as exc: raise api.BadRequest(str(exc))
         from .runner import RUNNER, backend_command
+        previous = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+        previous_backend=previous.get("active_backend","opencode")
+        new_backend=b.get("active_backend",previous_backend)
+        runtime_changed=(new_backend!=previous_backend
+            or ("workspace" in b and str(previous.get("workspace",str(DEFAULT_WORKSPACE)))!=str(b["workspace"]))
+            or ("model_"+new_backend in b and str(previous.get("model_"+new_backend,""))!=str(b["model_"+new_backend]))
+            or (new_backend+"_command" in b and str(previous.get(new_backend+"_command",""))!=str(b[new_backend+"_command"])))
         for backend in ("codex", "claude", "opencode"):
             if backend + "_command" in b:
                 if not isinstance(b[backend + "_command"], str): raise api.BadRequest("backend commands must be strings")
@@ -334,8 +341,14 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
             for key, value in b.items():
                 if key not in allowed: continue
                 conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)", (key, str(value)))
+            if runtime_changed:
+                current={r[0]:r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+                active_workspace=workspace_path(current)
+                conn.execute("UPDATE orchestrator_sessions SET backend=?,workspace=?,acp_session_id=''",(current.get("active_backend","opencode"),active_workspace))
             conn.commit()
-        threading.Thread(target=RUNNER._reset_and_warm_models, daemon=True, name="coms-model-warmup").start()
+        if runtime_changed and RUNNER.thread and RUNNER.thread.is_alive():
+            threading.Thread(target=RUNNER._reset_and_warm_models, daemon=True, name="coms-model-warmup").start()
+            threading.Thread(target=RUNNER._reset_orchestrator, daemon=True, name="coms-orchestrator-warmup").start()
         return {"saved": True}
 
 
@@ -413,6 +426,14 @@ def r_orchestrator_projects(conn, m, _mm, q, b, actor):
         except ValueError as e: raise api.BadRequest(str(e))
 
 
+def r_orchestrator_project(conn, m, mm, q, b, actor):
+    from .runner import RUNNER
+    project_id=int(mm.group(1))
+    if m=="DELETE":
+        if not RUNNER.delete_orchestrator_project(project_id): raise api.NotFound("project not found")
+        return {"deleted":project_id}
+
+
 def r_orchestrator_sessions(conn, m, _mm, q, b, actor):
     from .runner import RUNNER
     if m == "GET": return RUNNER.orchestrator_sessions()
@@ -431,6 +452,11 @@ def r_orchestrator_session(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         try: return RUNNER.update_orchestrator_session(sid, b.get("project_id"))
         except ValueError as e: raise api.BadRequest(str(e))
+    if m == "DELETE":
+        try: deleted=RUNNER.delete_orchestrator_session(sid)
+        except ValueError as e: raise api.BadRequest(str(e))
+        if not deleted: raise api.NotFound("chat session not found")
+        return {"deleted": sid}
 
 
 def r_orchestrator_messages(conn, m, mm, q, b, actor):
@@ -509,6 +535,7 @@ def r_question_comment(conn, m, _mm, q, b, actor):
 
 
 ROUTES = [
+    (r"/api/runner/projects/(\d+)", r_orchestrator_project),
     (r"/api/runner/projects", r_orchestrator_projects),
     (r"/api/runner/models", r_runner_models),
     (r"/api/runner/debug", r_runner_debug),
