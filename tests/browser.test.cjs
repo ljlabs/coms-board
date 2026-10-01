@@ -10,7 +10,7 @@ const readline = require('node:readline');
 let server, browser, base, temp;
 before(async () => {
   temp = mkdtempSync(path.join(tmpdir(), 'coms-browser-'));
-  server = spawn('python3', ['tests/fixtures/browser_server.py'], {
+  server = spawn(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'), ['tests/fixtures/browser_server.py'], {
     cwd: path.resolve(__dirname, '..'), env: { ...process.env, COMS_DB: path.join(temp, 'board.db') },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -25,7 +25,11 @@ before(async () => {
 });
 after(async () => {
   if (browser) await browser.close();
-  if (server) { server.kill('SIGINT'); await new Promise(resolve => server.once('exit', resolve)); }
+  if (server) {
+    const exited = new Promise(resolve => server.once('exit', resolve));
+    try { await fetch(base + '/__test_shutdown', {method:'POST'}); } catch (_) { server.kill(); }
+    await exited;
+  }
   if (temp) rmSync(temp, { recursive: true, force: true });
 });
 
@@ -105,6 +109,139 @@ test('same-route chat refresh disposes its old poller', async () => {
     const before = polls;
     await page.waitForTimeout(1700);
     assert.equal(polls, before, 'Old chat poller stopped after navigation');
+  });
+});
+
+test('completed tools use compact rows with keyboard expansion and a copyable shell panel', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    const tool=page.locator('.chat-tool'),call=tool.locator('.chat-tool-call');
+    assert.equal(await call.evaluate(el=>el.open),false);
+    assert.ok((await tool.boundingBox()).height<=42,'Collapsed tool occupies one activity row');
+    assert.equal(await tool.locator('.chat-tool-title').textContent(),'Ran ls');
+    const summary=call.locator(':scope > summary');
+    await summary.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await call.evaluate(el=>el.open),true);
+    assert.equal(await tool.locator('.chat-tool-panel-label').textContent(),'Shell');
+    assert.equal(await tool.locator('.chat-tool-command').textContent(),'$ ls');
+    assert.equal(await tool.locator('.chat-tool-output pre').textContent(),'src\n');
+    assert.equal(await tool.locator('.chat-tool-status').textContent(),'Success');
+    assert.equal(await tool.locator('.chat-tool-input').evaluate(el=>el.open),false);
+    assert.ok(!(await tool.innerText()).includes('Workspace:'),'Metadata is secondary');
+    await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:base});
+    await tool.getByRole('button',{name:'Copy command and output',exact:true}).click();
+    assert.equal((await page.evaluate(()=>navigator.clipboard.readText())).replace(/\r\n/g,'\n'),'$ ls\nsrc\n');
+    await tool.locator('.chat-tool-input > summary').click();
+    assert.match(await tool.locator('.chat-tool-workspace').innerText(),/Workspace:/);
+    await summary.focus();await page.keyboard.press('Enter');
+    assert.equal(await call.evaluate(el=>el.open),false);
+  });
+});
+
+test('tool rows remain in order and status-only updates preserve node identity and expansion', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    assert.deepEqual(await page.locator('#chat-messages > .chat-message').evaluateAll(nodes => nodes.map(n => n.dataset.kind)), ['text','text','tool_call','text','text','error']);
+    const tool = page.locator('.chat-tool');
+    const original = await tool.elementHandle();
+    await tool.locator('details').first().evaluate(el => { el.open = true; });
+    let polls = 0;
+    await page.route('**/api/runner/sessions/browser-tools', async route => {
+      const response = await route.fetch();
+      const detail = await response.json();
+      const entry = detail.messages.find(m => m.kind === 'tool_call');
+      entry.state = 'failed';
+      entry.data.status = 'failed';
+      entry.data.rawOutput = { stderr:'<img src=x onerror=alert(1)>', exitCode:1 };
+      entry.version += ++polls;
+      await route.fulfill({response,json:detail});
+    });
+    await page.waitForFunction(() => document.querySelector('.chat-tool .chat-tool-status')?.textContent === 'Failed');
+    assert.equal(await original.evaluate(el => el.isConnected), true);
+    assert.equal(await tool.locator('details').first().evaluate(el => el.open), true);
+    assert.equal(await tool.locator('img').count(), 0);
+    assert.match(await tool.innerText(), /Exit code: 1/);
+    assert.equal(await page.locator('.chat-error').count(), 1);
+    assert.match(await page.locator('#chat-workspace').innerText(), /workspace/);
+  });
+});
+
+test('running tools start expanded and keep a manual collapse during polling', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    await page.route('**/api/runner/sessions/browser-tools',async route=>{
+      const response=await route.fetch(),detail=await response.json();
+      const entry=detail.messages.find(m=>m.kind==='tool_call');
+      entry.state='in_progress';entry.data.status='in_progress';
+      delete entry.data.rawOutput;entry.version++;
+      await route.fulfill({response,json:detail});
+    });
+    await page.reload();
+    const call=page.locator('.chat-tool-call');
+    await call.waitFor();
+    assert.equal(await call.evaluate(el=>el.open),true);
+    assert.equal(await page.locator('.chat-tool-title').textContent(),'Running ls');
+    assert.equal(await page.locator('.chat-tool-output pre').textContent(),'Waiting for output…');
+    await call.locator(':scope > summary').click();
+    await page.waitForTimeout(1600);
+    assert.equal(await call.evaluate(el=>el.open),false);
+  });
+});
+
+test('real ACP send creates separate assistant and tool bubbles and survives reload', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    await page.locator('#new-chat').click();
+    await page.waitForFunction(() => document.querySelector('#chat-title')?.textContent === 'New chat');
+    await page.locator('#chat-input').fill('Run ls in your workspace');
+    const accepted = page.waitForResponse(r => r.url().endsWith('/messages') && r.request().method()==='POST');
+    await page.locator('#chat-form button').click();
+    const response = await (await accepted).json();
+    assert.ok(response.turn_id);
+    assert.ok(response.message.id);
+    await page.waitForFunction(() => document.querySelector('.chat-tool .chat-tool-status')?.textContent === 'Success' && document.querySelectorAll('.chat-message.assistant').length === 2);
+    assert.deepEqual(await page.locator('#chat-messages > .chat-message').evaluateAll(nodes => nodes.map(n => n.dataset.kind)), ['text','text','tool_call','text']);
+    assert.deepEqual(await page.locator('.chat-message.assistant .chat-text').allTextContents(), ['I’ll list the workspace.','Found src.']);
+    const ids = await page.locator('#chat-messages > .chat-message').evaluateAll(nodes => nodes.map(n => n.dataset.messageId));
+    await page.reload();
+    await page.waitForSelector('.chat-tool');
+    assert.deepEqual(await page.locator('#chat-messages > .chat-message').evaluateAll(nodes => nodes.map(n => n.dataset.messageId)), ids);
+    assert.equal(await page.locator('.chat-message.user').count(), 1);
+  });
+});
+
+test('empty and large tool output stays readable on mobile and selection survives polling', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    let mode='empty';
+    await page.route('**/api/runner/sessions/browser-tools', async route => {
+      const response=await route.fetch(),detail=await response.json();
+      const tool=detail.messages.find(m=>m.kind==='tool_call');
+      tool.data.rawOutput=mode==='empty'?'':mode==='large'?'result '.repeat(4000):'Changed output';
+      tool.version+=mode==='empty'?1:mode==='large'?2:3;
+      await route.fulfill({response,json:detail});
+    });
+    const output=page.locator('.chat-tool-output');
+    await page.locator('.chat-tool-call').evaluate(el=>{el.open=true;});
+    await page.waitForFunction(()=>document.querySelector('.chat-tool-output pre')?.textContent==='No output.');
+    mode='large';
+    await page.waitForFunction(()=>!document.querySelector('.chat-tool-output button').hidden);
+    await output.locator('button').click();
+    assert.equal((await output.locator('pre').textContent()).length,28000);
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await output.locator('pre').evaluate(el=>{const selection=getSelection(),range=document.createRange();range.selectNodeContents(el);selection.removeAllRanges();selection.addRange(range);});
+    mode='changed';
+    await page.waitForTimeout(1800);
+    assert.equal((await output.locator('pre').textContent()).length,28000);
+    await page.evaluate(()=>getSelection().removeAllRanges());
+    await page.waitForFunction(()=>document.querySelector('.chat-tool-output pre')?.textContent==='Changed output');
+  },{viewport:{width:390,height:844}});
+});
+
+test('recorded Codex formatted_output renders as command output without a missing-terminal warning', async () => {
+  await pageFor('/orchestrator?session=browser-codex', async page => {
+    const output=page.locator('.chat-tool-output');
+    await page.locator('.chat-tool-call').evaluate(el=>{el.open=true;});
+    assert.match(await output.locator('pre').first().textContent(),/README\.txt/);
+    assert.ok(!(await output.innerText()).includes('formatted_output'));
+    assert.ok(!(await output.innerText()).includes('output unavailable'));
+    assert.equal(await page.locator('.chat-message.assistant').count(),2);
   });
 });
 
@@ -229,7 +366,7 @@ test('chat and project delete controls preserve chats and select a surviving cha
     const chatDeleted=page.waitForResponse(r=>r.url().endsWith(`/api/runner/sessions/${currentId}`)&&r.request().method()==='DELETE');
     await page.locator(`[data-delete-chat="${currentId}"]`).click();
     assert.equal((await chatDeleted).status(),200);
-    await page.waitForFunction(() => location.hash.includes('session=browser-chat'));
+    await page.waitForFunction(id => location.hash.includes('session=') && !location.hash.includes('session='+id), currentId);
     assert.equal(await page.locator('[data-delete-chat="browser-chat"]').count(),1);
   });
 });

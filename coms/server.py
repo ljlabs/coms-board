@@ -446,7 +446,7 @@ def r_orchestrator_session(conn, m, mm, q, b, actor):
     from .runner import RUNNER
     sid = mm.group(1)
     if m == "GET":
-        detail = RUNNER.orchestrator_detail(sid)
+        detail = RUNNER.orchestrator_detail(sid,include_logs=q.get('include_logs')=='1')
         if not detail: raise api.NotFound("chat session not found")
         return detail
     if m in ("PATCH", "PUT", "POST"):

@@ -139,6 +139,13 @@ CREATE TABLE IF NOT EXISTS orchestrator_sessions (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_orch_sessions_project ON orchestrator_sessions(project_id,updated_at);
+CREATE TABLE IF NOT EXISTS orchestrator_turns (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_message_id INTEGER,
+  backend TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', workspace TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running', stop_reason TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_orch_turns_session ON orchestrator_turns(session_id,started_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS ticket_fts USING fts4(title, body, tags, result);
 
@@ -228,6 +235,13 @@ MIGRATIONS = [
     ("tickets", "agent_template_id", "INTEGER"),
     ("orchestrator_messages", "session_id", "TEXT NOT NULL DEFAULT 'default'"),
     ("orchestrator_sessions", "workspace", "TEXT NOT NULL DEFAULT ''"),
+    ("orchestrator_messages", "turn_id", "TEXT"),
+    ("orchestrator_messages", "acp_message_id", "TEXT"),
+    ("orchestrator_messages", "tool_call_id", "TEXT"),
+    ("orchestrator_messages", "metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("orchestrator_messages", "state", "TEXT NOT NULL DEFAULT 'completed'"),
+    ("orchestrator_messages", "updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("orchestrator_messages", "version", "INTEGER NOT NULL DEFAULT 0"),
     ("ticket_reviews", "ticket_version", "TEXT NOT NULL DEFAULT ''"),
 ]
 
@@ -250,6 +264,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_session ON orchestrator_messages(session_id,id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_turn ON orchestrator_messages(session_id,turn_id,id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_orch_tool_identity ON orchestrator_messages(session_id,turn_id,tool_call_id)")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:

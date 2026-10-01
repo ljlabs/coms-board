@@ -3,10 +3,19 @@ from __future__ import annotations
 import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from . import db
-from .acp import AcpConnection
-from .workspace import workspace_path
+from .acp import AcpConnection, AcpError
+from .workspace import DEFAULT_WORKSPACE, workspace_path
+from .orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _release_acp_db():
+    """Callback threads must release SQLite handles, especially on Windows."""
+    if threading.current_thread().name.startswith('acp-'):
+        conn=getattr(db._local,'conn',None)
+        if conn: conn.close()
+        db._local.__dict__.clear()
 
 
 def board_servers(actor, ticket_id=None, run_id=None, readonly=False):
@@ -89,6 +98,7 @@ class Runner:
                 conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error='Server stopped before this run finished; update the ticket to retry.' WHERE status IN ('queued','running')",(now(),))
                 conn.execute("UPDATE ticket_reviews SET status='failed',reason='Server stopped before review finished.',finished_at=? WHERE status IN ('queued','running')",(now(),))
                 conn.commit()
+                recover_turns(conn)
             except Exception:
                 lease.close(); self._lease=None
                 raise
@@ -127,7 +137,7 @@ class Runner:
             else: respond({'outcome':{'outcome':'cancelled'}})
         cmd=backend_command(backend, self.settings())
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'agent-runner'}, mcp_servers=board_servers('agent-runner',ticket_id,run_id))
+        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'agent-runner'}, mcp_servers=board_servers('agent-runner',ticket_id,run_id))
         try:
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,self.settings()); return c
         except Exception:
@@ -312,7 +322,7 @@ class Runner:
                 conn.execute("UPDATE ticket_reviews SET status='superseded',reason='Ticket changed while review was starting.',finished_at=? WHERE id=?",(now(),review_id)); conn.commit(); return
             backend=settings.get('active_backend','opencode'); cwd=workspace_path(settings); cmd=backend_command(backend,settings)
             if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator-review'},mcp_servers=board_servers('orchestrator-review',readonly=True))
+            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator-review'},mcp_servers=board_servers('orchestrator-review',readonly=True))
             with self.lock: self.review_conns[tid]=c
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
             comments=current.get('comments') or []
@@ -378,13 +388,26 @@ class Runner:
         if project_id is not None and not conn.execute('SELECT 1 FROM orchestrator_projects WHERE id=?',(project_id,)).fetchone(): raise ValueError('project not found')
         conn.execute('INSERT INTO orchestrator_sessions(id,title,project_id,created_at,updated_at) VALUES(?,?,?,?,?)',(sid,title.strip() or 'New chat',project_id,ts,ts)); conn.commit()
         return dict(conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone())
-    def orchestrator_detail(self,sid):
+    def orchestrator_detail(self,sid,*,include_logs=False):
         conn=db.connect(); row=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
         if not row: return None
-        out=dict(row); out['messages']=[dict(r) for r in conn.execute('SELECT * FROM orchestrator_messages WHERE session_id=? ORDER BY id',(sid,))]
+        out=dict(row)
+        out['messages']=[message_dict(r) for r in conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND kind!='log' ORDER BY id",(sid,))]
+        out['logs']=[message_dict(r) for r in conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND kind='log' ORDER BY id",(sid,))] if include_logs else []
+        out['log_count']=conn.execute("SELECT count(*) FROM orchestrator_messages WHERE session_id=? AND kind='log'",(sid,)).fetchone()[0]
+        out['turns']=[dict(r) for r in conn.execute('SELECT * FROM orchestrator_turns WHERE session_id=? ORDER BY started_at,id',(sid,))]
         settings=self.settings(); backend=settings.get('active_backend','opencode')
         out['backend']=backend; out['model']=settings.get('model_'+backend) or 'ACP default'
-        with self.lock: out['busy']=self.orchestrator_busy and self.orchestrator_session==sid
+        try:
+            out['workspace']=workspace_path(settings,create_default=False); out['workspace_error']=''
+        except ValueError as exc:
+            out['workspace']=settings.get('workspace',str(DEFAULT_WORKSPACE.resolve())); out['workspace_error']=str(exc)
+        with self.lock:
+            out['busy']=self.orchestrator_busy and self.orchestrator_session==sid
+            out['runner_busy']=self.orchestrator_busy
+        active=next((t for t in reversed(out['turns']) if t['status']=='running'),None)
+        out['active_turn_id']=active['id'] if active else None
+        out['state']='running' if out['busy'] else out['turns'][-1]['status'] if out['turns'] else 'ready'
         return out
     def delete_orchestrator_session(self,sid):
         with self.lock:
@@ -393,6 +416,7 @@ class Runner:
             conn=db.connect()
             if not conn.execute('SELECT 1 FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone(): return False
             conn.execute('DELETE FROM orchestrator_messages WHERE session_id=?',(sid,))
+            conn.execute('DELETE FROM orchestrator_turns WHERE session_id=?',(sid,))
             conn.execute('DELETE FROM orchestrator_sessions WHERE id=?',(sid,)); conn.commit()
             return True
     def update_orchestrator_session(self,sid,project_id):
@@ -410,22 +434,28 @@ class Runner:
             if c is not None and (self.orchestrator_conn_key!=key or not c.alive):
                 c.close(); self.orchestrator_conn=None; self.orchestrator_conn_key=None; c=None
             if c is None:
-                def add(role,kind,body):
-                    sid=self.orchestrator_context.get('sid')
-                    if sid:
-                        conn=db.connect(); conn.execute('INSERT INTO orchestrator_messages(role,kind,body,created_at,session_id) VALUES(?,?,?,?,?)',(role,kind,body,now(),sid)); conn.commit()
-                def log(line): add('system','log',line)
-                def notification(msg):
+                def context(params=None):
                     ctx=self.orchestrator_context
-                    if not ctx.get('stream_enabled'): return
-                    p=msg.get('params') or {}; u=p.get('update') or {}; content=u.get('content') or {}; body=content.get('text') if isinstance(content,dict) else None
-                    if body and u.get('sessionUpdate')=='agent_message_chunk' and ctx.get('stream_id'):
-                        conn=db.connect(); conn.execute('UPDATE orchestrator_messages SET body=body||? WHERE id=?',(body,ctx['stream_id'])); conn.commit()
-                    elif u: log(json.dumps(u,ensure_ascii=False))
+                    if ctx.get('connection') is not c or not ctx.get('stream_enabled'): return None
+                    if params is not None and params.get('sessionId')!=ctx.get('acp_session_id'): return None
+                    return ctx.get('transcript')
+                def log(line):
+                    transcript=context()
+                    if transcript: transcript.log(line)
+                def notification(msg):
+                    if msg.get('method')!='session/update': return
+                    p=msg.get('params') or {}
+                    transcript=context(p)
+                    if transcript: transcript.apply(p.get('update'))
                 def request(msg,respond):
-                    options=(msg.get('params') or {}).get('options') or []; opt=next((x.get('optionId') for x in options if x.get('kind') in ('allow_once','allow_always','allow')),None)
+                    if msg.get('method')!='session/request_permission': raise AcpError('Method not found',code=-32601)
+                    params=msg.get('params') or {}
+                    transcript=context(params)
+                    options=params.get('options') or []
+                    opt=next((x.get('optionId') for x in options if isinstance(x,dict) and x.get('kind') in ('allow_once','allow_always','allow')),None) if transcript else None
+                    if transcript: transcript.permission(params,opt or 'cancelled')
                     respond({'outcome':{'outcome':'selected','optionId':opt}} if opt else {'outcome':{'outcome':'cancelled'}})
-                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator'},mcp_servers=board_servers('orchestrator'))
+                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator'},mcp_servers=board_servers('orchestrator'))
                 try:
                     c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
                 except Exception:
@@ -443,27 +473,37 @@ class Runner:
             self.orchestrator_conn=None; self.orchestrator_conn_key=None
         self._warm_orchestrator()
     def orchestrate(self, text, sid='default'):
+        if not isinstance(text,str): raise ValueError('message must be text')
         text=text.strip()
         if not text: raise ValueError('message required')
         with self.lock:
             if self.orchestrator_busy: raise ValueError('The orchestrator is still responding; wait for its reply.')
-            self.orchestrator_busy=True; self.orchestrator_session=sid
-        conn=db.connect(); session=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
-        if not session:
-            with self.lock: self.orchestrator_busy=False
-            raise ValueError('session not found')
-        ts=now(); conn.execute('INSERT INTO orchestrator_messages(role,kind,body,created_at,session_id) VALUES(?,?,?,?,?)',('user','text',text,ts,sid))
-        if session['title']=='New chat': conn.execute('UPDATE orchestrator_sessions SET title=?,updated_at=? WHERE id=?',(text[:60],ts,sid))
-        else: conn.execute('UPDATE orchestrator_sessions SET updated_at=? WHERE id=?',(ts,sid))
-        conn.commit()
-        threading.Thread(target=self._orchestrator_turn,args=(text,sid,dict(session)),daemon=True).start()
-        return {'accepted':True}
-    def _orchestrator_turn(self,text,sid,session):
-        c=None; restored=False
-        try:
+            conn=db.connect(); session=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
+            if not session: raise ValueError('session not found')
             settings=self.settings(); backend=settings.get('active_backend','opencode')
-            cwd=workspace_path(settings); c=self._orchestrator_connection(backend,cwd,settings)
-            self.orchestrator_context={'sid':sid,'stream_id':None,'stream_enabled':False}
+            cwd=workspace_path(settings)
+            turn,user=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
+            self.orchestrator_busy=True; self.orchestrator_session=sid
+            try:
+                threading.Thread(target=self._orchestrator_turn,args=(text,sid,dict(session),turn['id']),daemon=True).start()
+            except Exception as exc:
+                Transcript(sid,turn['id']).finish(error=str(exc))
+                self.orchestrator_busy=False; self.orchestrator_session=None
+                raise
+        return {'accepted':True,'turn_id':turn['id'],'message':user}
+    def _orchestrator_turn(self,text,sid,session,turn_id=None):
+        c=None; restored=False; transcript=None
+        try:
+            if turn_id is not None: transcript=Transcript(sid,turn_id)
+            settings=self.settings(); backend=settings.get('active_backend','opencode')
+            cwd=workspace_path(settings)
+            if turn_id is None:
+                turn,_=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
+                turn_id=turn['id']
+            transcript=Transcript(sid,turn_id)
+            # Loading a session replays old messages; local rows are canonical.
+            self.orchestrator_context={}
+            c=self._orchestrator_connection(backend,cwd,settings)
             if session.get('backend')==backend and session.get('acp_session_id') and session.get('workspace')==cwd and c.supports('loadSession'):
                 try: c.session_load(session['acp_session_id'],cwd=cwd); restored=True
                 except Exception as exc:
@@ -475,27 +515,31 @@ class Runner:
             selected_model=settings.get('model_'+backend) or 'ACP default'
             guide=(f"You are the Coms Board main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
                    "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
+                   "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
                    "Use the attached coms-board MCP tools for all board operations. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; do not write board records to local files. "
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
-            x=db.connect(); cur=x.execute('INSERT INTO orchestrator_messages(role,kind,body,created_at,session_id) VALUES(?,?,?,?,?)',('assistant','text','',now(),sid)); stream_id=cur.lastrowid; x.commit()
-            self.orchestrator_context={'sid':sid,'stream_id':stream_id,'stream_enabled':True}
-            # If this is a legacy transcript without an ACP session id, restore
-            # its prior turns as context so reopening it remains conversational.
-            transcript=x.execute('SELECT role,body FROM orchestrator_messages WHERE session_id=? AND role IN (\'user\',\'assistant\') ORDER BY id',(sid,)).fetchall()
-            prior=transcript[:-2]
-            context='\n'.join(('User: ' if row['role']=='user' else 'Orchestrator: ')+row['body'] for row in prior if row['body'])
+            self.orchestrator_context={'sid':sid,'connection':c,'acp_session_id':c.session_id,
+                                       'transcript':transcript,'stream_enabled':True}
+            context=history_before(sid,transcript.user_id) if not restored else ''
             first_turn=not restored
             prefix=guide+'\n\nWorkspace: '+cwd+'\n\n'
             if context and first_turn: prefix+='Previous conversation (restored from Coms Board history):\n'+context+'\n\n'
-            c.prompt(prefix+'User: '+text,timeout=3600)
+            result=c.prompt(prefix+'User: '+text,timeout=3600)
+            transcript.finish((result or {}).get('stopReason',''))
         except Exception as e:
-            conn=db.connect(); conn.execute('INSERT INTO orchestrator_messages(role,kind,body,created_at,session_id) VALUES(?,?,?,?,?)',('system','error',str(e),now(),sid)); conn.commit()
+            if transcript: transcript.finish(error=str(e))
+            else: logging.exception('Could not begin orchestrator turn')
         finally:
-            self.orchestrator_context={'sid':sid,'stream_id':None,'stream_enabled':False}
+            self.orchestrator_context={}
             if c and not c.alive:
                 with self.orchestrator_conn_lock:
                     c.close(); self.orchestrator_conn=None; self.orchestrator_conn_key=None
             with self.lock: self.orchestrator_busy=False; self.orchestrator_session=None
+            conn=getattr(db._local,'conn',None)
+            # Direct callers/tests retain their connection; background workers
+            # release the per-thread database handle when the turn is finished.
+            if conn and threading.current_thread() is not threading.main_thread():
+                conn.close(); db._local.__dict__.clear()
 
 RUNNER=Runner()

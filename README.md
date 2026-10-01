@@ -74,6 +74,19 @@ after a server restart. Open **Runner** to choose an ACP backend, set the
 maximum parallel agent count, choose a model advertised by that backend, and
 create agent templates. The selected model is applied to new orchestrator and
 ticket sessions.
+
+Orchestrator responses appear as an ordered conversation: assistant commentary,
+tool calls, and the final answer each keep their own entry. Completed tools
+appear as compact activity rows. Expand a row to see the command and output
+together in a shell panel, with copy and status controls. Workspace and raw
+input are available under **Details**; nonzero exit codes remain visible.
+Errors and interrupted turns appear in the conversation;
+raw diagnostics are available under **Debug logs**. The header shows the
+resolved workspace before sending a message. Tool updates preserve reading
+position and expanded cards, and reopening a chat restores the stored entries.
+Older responses that were already merged into one bubble remain as stored;
+their original message boundaries and tool details cannot be reconstructed.
+
 The orchestrator creates prioritized tickets; each ticket remains out of the
 execution queue until **Ready for agent execution** is enabled on that ticket.
 Human assignees and tickets tagged `human` are always excluded. Ticket chat

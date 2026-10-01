@@ -98,6 +98,7 @@ class AcpConnection:
         env: Optional[Dict[str, str]] = None,
         command_args: Optional[List[str]] = None,
         mcp_servers: Optional[List[Dict[str, Any]]] = None,
+        on_thread_exit: Optional[Callable[[], None]] = None,
     ) -> None:
         self.binary = binary
         self.cwd = cwd
@@ -105,6 +106,7 @@ class AcpConnection:
         self.on_request = on_request
         self.on_close = on_close
         self.log = logger or (lambda _m: None)
+        self.on_thread_exit = on_thread_exit or (lambda: None)
         self.extra_env = env or {}
         self.command_args = list(command_args) if command_args is not None else ["acp"]
         self.mcp_servers = list(mcp_servers or [])
@@ -304,6 +306,7 @@ class AcpConnection:
                     self.on_close(f"process exited (rc={rc})")
                 except Exception as exc:
                     self.log(f"on_close error: {exc}")
+            self.on_thread_exit()
 
     def _dispatch(self, msg: Dict[str, Any]) -> None:
         method = msg.get("method")
@@ -330,10 +333,14 @@ class AcpConnection:
             def runner(_p=params, _r=respond, _j=reject) -> None:
                 try:
                     self.on_request(msg, _r)
+                except AcpError as exc:
+                    _j(exc.code or -32603,str(exc))
                 except Exception as exc:
                     self.log(f"on_request({method}) failed: {exc}")
                     # Never leave the agent hanging: fall back to a clean reject.
                     _j(-32603, f"internal error handling {method}: {exc}")
+                finally:
+                    self.on_thread_exit()
 
             threading.Thread(target=runner, daemon=True,
                              name=f"acp-req-{method}").start()
@@ -364,6 +371,8 @@ class AcpConnection:
                     self.log(f"[stderr] {text[:500]}")
         except Exception:
             pass
+        finally:
+            self.on_thread_exit()
 
     # ------------------------------------------------------- ACP operations
     def _mcp(self) -> List[Dict[str, Any]]:

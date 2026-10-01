@@ -46,8 +46,12 @@ class TestRunner(unittest.TestCase):
         for path in [APP_ROOT, APP_ROOT.parent, APP_ROOT / 'data', Path('/'), Path('relative')]:
             with self.subTest(path=path), self.assertRaises(ValueError): workspace_path({'workspace': str(path)})
         alias = Path(self.tmp.name) / 'alias'
-        alias.symlink_to(APP_ROOT, target_is_directory=True)
-        with self.assertRaises(ValueError): workspace_path({'workspace': str(alias)})
+        try:
+            alias.symlink_to(APP_ROOT, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc,'winerror',None) != 1314: raise
+        else:
+            with self.assertRaises(ValueError): workspace_path({'workspace': str(alias)})
         self.assertEqual(workspace_path({'workspace': str(self.workspace)}), str(self.workspace))
         with self.assertRaises(ValueError): workspace_path({'workspace': str(self.workspace / 'missing')})
 
@@ -118,6 +122,58 @@ class TestRunner(unittest.TestCase):
         models=self.runner.discover_models('codex')
         self.assertEqual(models['backend'],'codex')
         self.assertEqual([m['value'] for m in models['models']],['gpt-6-luna','gpt-6.1-sol'])
+
+    def test_orchestrator_tool_timeline_and_fallback_context(self):
+        session = self.runner.create_orchestrator_session()
+        prompts = Path(self.tmp.name) / 'prompts.jsonl'
+        with patch.dict(os.environ, {'COMS_FAKE_MODE':'chat-tools','COMS_FAKE_PROMPT_FILE':str(prompts)}):
+            self.runner._orchestrator_turn('List workspace', session['id'], session)
+            detail = self.runner.orchestrator_detail(session['id'])
+            self.assertEqual([m['role'] for m in detail['messages']], ['user','assistant','tool','assistant'])
+            self.assertEqual([m['body'] for m in detail['messages'] if m['role']=='assistant'], ['I’ll list the workspace.','Found src.'])
+            tool = detail['messages'][2]
+            self.assertEqual(tool['state'], 'completed')
+            self.assertEqual(tool['data']['rawInput']['cwd'], str(self.workspace))
+            self.assertEqual(detail['turns'][0]['status'], 'completed')
+            self.runner._orchestrator_turn('Next prompt',session['id'],dict(self.conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(session['id'],)).fetchone()))
+        second_prompt = json.loads(prompts.read_text(encoding='utf-8').splitlines()[1])
+        self.assertIn('I’ll list the workspace.', second_prompt)
+        self.assertIn('Found src.', second_prompt)
+        self.assertIn('"stdout": "src\\n"', second_prompt)
+        self.assertEqual(second_prompt.count('User: Next prompt'), 1)
+        self.assertNotIn('Wrong session', second_prompt)
+
+    def test_orchestrator_error_is_visible_and_replay_does_not_duplicate(self):
+        session = self.runner.create_orchestrator_session()
+        with patch.dict(os.environ, {'COMS_FAKE_MODE':'chat-error'}):
+            self.runner._orchestrator_turn('List workspace',session['id'],session)
+        detail = self.runner.orchestrator_detail(session['id'])
+        self.assertEqual(detail['messages'][-1]['kind'], 'error')
+        self.assertIn('Command transport failed', detail['messages'][-1]['body'])
+        self.assertEqual(detail['messages'][2]['state'], 'interrupted')
+        self.runner._reset_orchestrator()
+        with patch.dict(os.environ, {'COMS_FAKE_LOAD':'1'}):
+            self.runner._reset_orchestrator()
+            self.runner._orchestrator_turn('First', session['id'], {})
+            saved=dict(self.conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(session['id'],)).fetchone())
+            self.runner._orchestrator_turn('Second',session['id'],saved)
+        self.assertNotIn('Replayed old response', '\n'.join(m['body'] for m in self.runner.orchestrator_detail(session['id'])['messages']))
+
+    def test_permission_request_with_colliding_rpc_id_finishes_the_same_tool(self):
+        session=self.runner.create_orchestrator_session()
+        with patch.dict(os.environ,{'COMS_FAKE_MODE':'chat-permission'}):
+            self.runner._orchestrator_turn('List workspace',session['id'],session)
+        detail=self.runner.orchestrator_detail(session['id'])
+        self.assertEqual([m['role'] for m in detail['messages']],['user','assistant','tool','assistant'])
+        self.assertEqual(detail['messages'][2]['data']['permission'],'allow-once')
+        self.assertEqual(detail['turns'][0]['status'],'completed')
+
+    def test_streaming_reuses_the_reader_database_connection_until_shutdown(self):
+        session=self.runner.create_orchestrator_session()
+        with patch.dict(os.environ,{'COMS_FAKE_MODE':'chat-tools'}), patch.object(db.sqlite3,'connect',wraps=db.sqlite3.connect) as connect:
+            self.runner._orchestrator_turn('List workspace',session['id'],session)
+            self.assertLessEqual(connect.call_count,2,'Every chunk must not reinitialize SQLite schema/migrations')
+        self.runner.stop()
 
     def test_orchestrator_keeps_one_codex_process_and_overrides_stale_chat_backend(self):
         self.conn.execute("INSERT INTO runner_settings(key,value) VALUES('model_codex','gpt-6.1-sol')")

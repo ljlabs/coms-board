@@ -159,6 +159,28 @@ class TestServer(unittest.TestCase):
             self.req("GET", "/api/overview?ticket=invalid")
         self.assertEqual(error.exception.code, 400)
 
+    def test_structured_chat_api_keeps_errors_visible_and_logs_opt_in(self):
+        from coms.orchestrator_transcript import Transcript, begin_turn
+        chat = self.req('POST','/api/runner/sessions',{'title':'Structured API chat'})
+        try:
+            turn, user = begin_turn(chat['id'],'List files','codex','model','/workspace')
+            transcript = Transcript(chat['id'],turn['id'])
+            transcript.apply({'sessionUpdate':'tool_call','toolCallId':'ls','title':'List files'})
+            transcript.apply({'sessionUpdate':'tool_call_update','toolCallId':'ls','status':'completed','rawOutput':''})
+            transcript.apply({'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'private'}})
+            transcript.finish(error='Backend disconnected')
+            detail = self.req('GET',f"/api/runner/sessions/{chat['id']}")
+            self.assertEqual([m['kind'] for m in detail['messages']],['text','tool_call','error'])
+            self.assertEqual(detail['messages'][0]['id'],user['id'])
+            self.assertEqual(detail['messages'][1]['data']['rawOutput'],'')
+            self.assertEqual(detail['turns'][0]['status'],'failed')
+            self.assertEqual(detail['logs'],[])
+            logs = self.req('GET',f"/api/runner/sessions/{chat['id']}?include_logs=1")['logs']
+            self.assertEqual(len(logs),1)
+        finally:
+            self.req('DELETE',f"/api/runner/sessions/{chat['id']}")
+        self.assertEqual(db.connect().execute('SELECT count(*) FROM orchestrator_turns WHERE session_id=?',(chat['id'],)).fetchone()[0],0)
+
     def test_cross_origin_and_untrusted_host_rejected(self):
         for headers in [{"Host": "evil.example"}, {"Origin": "https://evil.example"},
                         {"Sec-Fetch-Site": "cross-site"}, {"Host": "["}]:
