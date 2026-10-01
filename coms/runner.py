@@ -56,7 +56,7 @@ class Runner:
         self._lease = None
         self.thread = None
         if start: self.start()
-    def start(self):
+    def start(self, workspace=None):
         with self.lock:
             if self.thread and self.thread.is_alive(): return
             lease=open(str(db.db_path().resolve())+'.runner.lock','a+b')
@@ -72,10 +72,19 @@ class Runner:
                 lease.close()
                 raise RuntimeError('Another Coms Board runner already owns this database. Stop that server before starting another.')
             self._lease=lease
-            conn=db.connect()
-            conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error='Server stopped before this run finished; update the ticket to retry.' WHERE status IN ('queued','running')",(now(),))
-            conn.execute("UPDATE ticket_reviews SET status='failed',reason='Server stopped before review finished.',finished_at=? WHERE status IN ('queued','running')",(now(),))
-            conn.commit()
+            try:
+                if workspace is not None:
+                    path=workspace_path({'workspace':workspace},create_default=False)
+                    conn=db.connect()
+                    conn.execute('INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)',('workspace',path))
+                    conn.commit()
+                conn=db.connect()
+                conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error='Server stopped before this run finished; update the ticket to retry.' WHERE status IN ('queued','running')",(now(),))
+                conn.execute("UPDATE ticket_reviews SET status='failed',reason='Server stopped before review finished.',finished_at=? WHERE status IN ('queued','running')",(now(),))
+                conn.commit()
+            except Exception:
+                lease.close(); self._lease=None
+                raise
             self.stopping.clear()
             self.thread = threading.Thread(target=self._loop, daemon=True, name='coms-agent-runner'); self.thread.start()
     def stop(self):

@@ -45,6 +45,17 @@ Start the dashboard (or `bash scripts/serve.sh` on systems with bash):
 python3 -m coms.server
 ```
 
+Choose the agent workspace at startup with `-ws` or `--workspace`. The path
+must be absolute, already exist, and be outside the application directory and
+its parents. The chosen path is saved in runner settings and shown in the
+Runner page. For example:
+
+```sh
+python3 -m coms.server --workspace /absolute/path/to/workspace
+# or
+bash scripts/serve.sh -ws /absolute/path/to/workspace
+```
+
 Open `http://127.0.0.1:8765/`. Run `python3 coms.py --help` for the full CLI.
 
 ## Configuration

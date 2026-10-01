@@ -4,10 +4,11 @@
 # Stop it with Ctrl+C.
 #
 #   bash scripts/serve.sh
-#   COMS_PORT=8763 bash scripts/serve.sh
+#   bash scripts/serve.sh --workspace /path/to/workspace
+#   COMS_PORT=8763 bash scripts/serve.sh -ws /path/to/workspace
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${COMS_PORT:-8765}"
 
 cd "$ROOT"
-exec python3 -m coms.server --host 127.0.0.1 --port "$PORT"
+exec python3 -m coms.server --host 127.0.0.1 --port "$PORT" "$@"

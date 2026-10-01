@@ -550,6 +550,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("-ws", "--workspace", metavar="PATH",
+                   help="set and save the absolute agent workspace directory")
     a = p.parse_args(argv)
     if a.host != "localhost":
         try: local = ipaddress.ip_address(a.host).is_loopback
@@ -558,10 +560,11 @@ def main(argv=None) -> int:
     db.connect()  # ensure schema exists before first request
     from .runner import RUNNER  # start the durable ready-ticket poller
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    try: RUNNER.start()
-    except RuntimeError as exc:
+    try: RUNNER.start(workspace=a.workspace)
+    except (RuntimeError, ValueError) as exc:
         srv.server_close(); p.error(str(exc))
-    print(f"coms-board dashboard: http://{a.host}:{a.port}/   db={db.db_path()}", flush=True)
+    workspace=RUNNER.settings().get('workspace')
+    print(f"coms-board dashboard: http://{a.host}:{a.port}/   db={db.db_path()}   workspace={workspace or 'default'}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
