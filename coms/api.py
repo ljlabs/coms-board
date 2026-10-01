@@ -32,7 +32,23 @@ class BadRequest(Exception):
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _execution_flag(value):
+    if type(value) is bool: return int(value)
+    if type(value) is int and value in (0, 1): return value
+    raise BadRequest("ready_for_execution must be a boolean")
+
+
+def _template_id(conn, value):
+    if value in (None, ""): return None
+    if type(value) is not int and not (isinstance(value, str) and value.isdigit()): raise BadRequest("invalid agent template")
+    try: tid = int(value)
+    except (ValueError, TypeError): raise BadRequest("invalid agent template")
+    if not conn.execute("SELECT 1 FROM agent_templates WHERE id=? AND enabled=1", (tid,)).fetchone():
+        raise BadRequest("agent template must exist and be enabled")
+    return tid
 
 
 def slugify(text: str) -> str:
@@ -552,6 +568,11 @@ def link_ticket(conn, tid: int, kind: str, ref: str, actor: str, note: str = "")
             raise BadRequest(f"ticket #{ref} not found")
         if int(ref) == tid:
             raise BadRequest("a ticket cannot link to itself")
+    elif kind == "url":
+        from urllib.parse import urlsplit
+        url = urlsplit(ref)
+        if url.scheme.lower() not in ("http", "https") or not url.hostname:
+            raise BadRequest("URL links must use http or https and include a hostname")
     cur = conn.execute(
         "INSERT OR IGNORE INTO ticket_links(ticket_id, kind, ref, note, created_by, created_at) "
         "VALUES (?,?,?,?,?,?)", (tid, kind, ref, note or "", actor or "", now()))
@@ -578,7 +599,8 @@ def unlink_ticket(conn, tid: int, kind: str, ref: str, actor: str) -> dict:
 def create_ticket(conn, title: str, body: str, requester: str, type_: str = "task",
                   priority: str = "p2", department: str = "", assignee: str = "",
                   tags=None, due_at: str | None = None,
-                  parent_id: int | None = None) -> dict:
+                  parent_id: int | None = None, ready_for_execution: bool = False,
+                  agent_template_id: int | None = None) -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -587,12 +609,15 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
         raise BadRequest(f"priority must be one of {PRIORITIES}")
     if parent_id is not None:
         _check_parent(conn, None, parent_id)
+    ready_for_execution = _execution_flag(ready_for_execution)
+    agent_template_id = _template_id(conn, agent_template_id)
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "
-        "tags, due_at, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "tags, due_at, parent_id, ready_for_execution, agent_template_id, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title.strip(), body or "", type_, "open", priority, department or "", assignee or "",
-         requester or "", _tags(tags), due_at, parent_id, ts, ts),
+         requester or "", _tags(tags), due_at, parent_id, ready_for_execution, agent_template_id, ts, ts),
     )
     tid = cur.lastrowid
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
@@ -609,14 +634,18 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if not t:
         raise NotFound(f"ticket #{tid} not found")
     allowed = {"title", "body", "type", "status", "priority", "department", "assignee",
-               "tags", "result", "due_at", "parent_id"}
-    data = {k: v for k, v in fields.items() if k in allowed and v is not None}
+               "tags", "result", "due_at", "parent_id", "ready_for_execution", "agent_template_id"}
+    data = {k: v for k, v in fields.items() if k in allowed and (v is not None or k == "agent_template_id")}
     if "status" in data and data["status"] not in TICKET_STATUSES:
         raise BadRequest(f"status must be one of {TICKET_STATUSES}")
     if "priority" in data and data["priority"] not in PRIORITIES:
         raise BadRequest(f"priority must be one of {PRIORITIES}")
     if "type" in data and data["type"] not in TICKET_TYPES:
         raise BadRequest(f"type must be one of {TICKET_TYPES}")
+    if "ready_for_execution" in data:
+        data["ready_for_execution"] = _execution_flag(data["ready_for_execution"])
+    if "agent_template_id" in data:
+        data["agent_template_id"] = _template_id(conn, data["agent_template_id"])
     if "parent_id" in data:
         pid = data["parent_id"]
         if pid in ("", "none", "null", 0, "0"):

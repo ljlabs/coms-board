@@ -11,6 +11,7 @@
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+*.runner.lock
 
 # Local application settings and task notes
 .kiro/

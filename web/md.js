@@ -9,6 +9,11 @@
 
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const slugify = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const safeURL = (url) => {
+    const clean = url.replace(/[\u0000-\u0020\u007f]/g, '');
+    if (/^[a-z][a-z0-9+.-]*:/i.test(clean) && !/^(https?:|mailto:|tel:)/i.test(clean)) return '#';
+    return url;
+  };
 
   // languages whose SINGLE-LINE fenced blocks get pretty-printed at render
   // time (so table rows can stay one line in the editor). json is formatted
@@ -40,7 +45,7 @@
     text = text.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
     text = esc(text);
     // images ![alt](src)
-    text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, a, s) => `<img alt="${a}" src="${s}">`);
+    text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, a, s) => `<img alt="${a}" src="${safeURL(s)}">`);
     // wikilinks [[slug|label]] / [[slug]]
     text = text.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, t, l) => {
       const slug = slugify(t.trim());
@@ -49,7 +54,7 @@
     // links [text](url)
     text = text.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, t, u) => {
       const ext = /^https?:\/\//i.test(u) ? ' target="_blank" rel="noopener"' : '';
-      return `<a href="${u}"${ext}>${t}</a>`;
+      return `<a href="${safeURL(u)}"${ext}>${t}</a>`;
     });
     // autolinks
     text = text.replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g, (_, p, u) => `${p}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);

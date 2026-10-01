@@ -97,6 +97,49 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
 );
 CREATE INDEX IF NOT EXISTS ix_tc_ticket ON ticket_comments(ticket_id);
 
+CREATE TABLE IF NOT EXISTS agent_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+  prompt TEXT NOT NULL DEFAULT '', backend TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runner_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, template_id INTEGER,
+  backend TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
+  started_at TEXT, finished_at TEXT, error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_agent_runs_ticket ON agent_runs(ticket_id, id);
+CREATE TABLE IF NOT EXISTS ticket_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL,
+  source_run_id INTEGER NOT NULL DEFAULT 0, backend TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued', decision TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '', ticket_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '',
+  UNIQUE(ticket_id, source_run_id)
+);
+CREATE INDEX IF NOT EXISTS ix_ticket_reviews_status ON ticket_reviews(status, ticket_id);
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, run_id INTEGER,
+  role TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text', body TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_agent_messages_ticket ON agent_messages(ticket_id, id);
+CREATE TABLE IF NOT EXISTS orchestrator_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text',
+  body TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT 'default'
+);
+CREATE TABLE IF NOT EXISTS orchestrator_projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orchestrator_sessions (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New chat', project_id INTEGER,
+  backend TEXT NOT NULL DEFAULT '', acp_session_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_orch_sessions_project ON orchestrator_sessions(project_id,updated_at);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS ticket_fts USING fts4(title, body, tags, result);
 
 -- Structured attachments: context a ticket carries so a re-pickup needs no
@@ -181,6 +224,11 @@ def db_path() -> Path:
 MIGRATIONS = [
     ("tickets", "parent_id", "INTEGER"),  # ticket hierarchy: story > job > task
     ("wiki_pages", "folder", "TEXT NOT NULL DEFAULT ''"),  # wiki folders: slash path, '' = unfiled
+    ("tickets", "ready_for_execution", "INTEGER NOT NULL DEFAULT 0"),
+    ("tickets", "agent_template_id", "INTEGER"),
+    ("orchestrator_messages", "session_id", "TEXT NOT NULL DEFAULT 'default'"),
+    ("orchestrator_sessions", "workspace", "TEXT NOT NULL DEFAULT ''"),
+    ("ticket_reviews", "ticket_version", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -201,6 +249,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_session ON orchestrator_messages(session_id,id)")
+    # Preserve conversations created by the first runner version.
+    from time import strftime, gmtime
+    ts = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
+    conn.execute("INSERT OR IGNORE INTO orchestrator_sessions(id,title,created_at,updated_at) VALUES('default','General chat',?,?)", (ts, ts))
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:

@@ -11,6 +11,7 @@ The acting identity for write calls comes from the X-Coms-Agent header
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import mimetypes
 import re
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from coms import api, db  # noqa: E402
+from coms.workspace import DEFAULT_WORKSPACE, workspace_path
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 
@@ -36,32 +38,68 @@ for _ext, _mime in ((".woff2", "font/woff2"), (".woff", "font/woff"), (".ttf", "
 class Handler(BaseHTTPRequestHandler):
     server_version = "coms-board/1.0"
 
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        super().end_headers()
+
     # ---------------------------------------------------------------- helpers
     def _json(self, status: int, data) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Browsers routinely cancel an in-flight poll during navigation.
+            # The response cannot be delivered, so don't turn it into a second
+            # (also undeliverable) 500 response in _dispatch.
+            return
 
     def _body(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
+        try: n = int(self.headers.get("Content-Length") or 0)
+        except ValueError: raise api.BadRequest("invalid Content-Length")
+        if n < 0 or n > 2 * 1024 * 1024:
+            raise api.BadRequest("JSON body must be at most 2 MiB")
         if not n:
             return {}
+        if self.headers.get_content_type() != "application/json":
+            raise api.BadRequest("Content-Type must be application/json")
         try:
-            return json.loads(self.rfile.read(n).decode() or "{}")
-        except json.JSONDecodeError as e:
+            body = json.loads(self.rfile.read(n).decode() or "{}")
+            if not isinstance(body, dict): raise api.BadRequest("JSON body must be an object")
+            return body
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise api.BadRequest(f"invalid JSON body: {e}")
+
+    def _trusted_request(self):
+        # Local services are otherwise vulnerable to DNS rebinding and
+        # cross-origin requests from websites opened in the same browser.
+        host = self.headers.get("Host", "")
+        try:
+            authority = urlsplit("//" + host)
+            local = authority.hostname == "localhost" or ipaddress.ip_address(authority.hostname).is_loopback
+            trusted = local and authority.port == self.server.server_port
+        except ValueError: trusted = False
+        origin = self.headers.get("Origin")
+        if origin and origin != "http://" + host: trusted = False
+        if self.headers.get("Sec-Fetch-Site") == "cross-site": trusted = False
+        if not trusted:
+            self._json(403, {"error": "request must come from this local dashboard"})
+        return trusted
 
     def _actor(self, body: dict | None = None) -> str:
         return (body or {}).get("actor") or self.headers.get("X-Coms-Agent") or api.ADMIN_ACTOR
 
     def _static(self, path: str) -> None:
         rel = path.lstrip("/") or "index.html"
-        f = (WEB / rel).resolve()
-        if not str(f).startswith(str(WEB)) or not f.is_file():
+        f = (WEB / unquote(rel)).resolve()
+        if not f.is_relative_to(WEB.resolve()) or not f.is_file():
             f = WEB / "index.html"   # SPA fallback
         ctype = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
@@ -79,16 +117,20 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------------- routing
     def do_GET(self):
+        if not self._trusted_request(): return
         u = urlsplit(self.path)
         if not u.path.startswith("/api/"):
             return self._static(u.path)
         self._dispatch("GET", u.path, parse_qs(u.query, keep_blank_values=True), {})
 
     def do_POST(self):
+        if not self._trusted_request(): return
         u = urlsplit(self.path)
         try:
             body = self._body()
         except api.BadRequest as e:
+            return self._json(400, {"error": str(e)})
+        except (ValueError, TypeError, KeyError) as e:
             return self._json(400, {"error": str(e)})
         self._dispatch("POST", u.path, parse_qs(u.query, keep_blank_values=True), body)
 
@@ -112,9 +154,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": str(e)})
         except api.BadRequest as e:
             return self._json(400, {"error": str(e)})
+        except (ValueError, TypeError, KeyError) as e:
+            return self._json(400, {"error": str(e)})
         except Exception as e:  # pragma: no cover
             traceback.print_exc()
-            return self._json(500, {"error": f"{type(e).__name__}: {e}"})
+            return self._json(500, {"error": "Internal server error; see server logs."})
         finally:
             # ThreadingHTTPServer hands each request its own thread, and
             # db.connect() caches one sqlite3 connection per thread. Close it
@@ -242,7 +286,9 @@ def r_tickets(conn, m, _mm, q, b, actor):
         return api.create_ticket(conn, b.get("title", ""), b.get("body", ""), actor,
                                  b.get("type", "task"), b.get("priority", "p2"), b.get("department", ""),
                                  b.get("assignee", ""), b.get("tags"), b.get("due_at"),
-                                 parent_id=int(pid) if pid not in (None, "") else None)
+                                 parent_id=int(pid) if pid not in (None, "") else None,
+                                 ready_for_execution=b.get("ready_for_execution", False),
+                                 agent_template_id=b.get("agent_template_id"))
 
 
 def r_ticket(conn, m, mm, q, b, actor):
@@ -252,7 +298,144 @@ def r_ticket(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id")})
+            "tags", "result", "due_at", "parent_id", "ready_for_execution", "agent_template_id") if k in b})
+
+
+def r_runner_settings(conn, m, _mm, q, b, actor):
+    if m == "GET":
+        values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+        values.setdefault("active_backend", "opencode"); values.setdefault("parallel_agents", "2")
+        values.setdefault("workspace", str(DEFAULT_WORKSPACE))
+        try: workspace_path(values); values["workspace_error"] = ""
+        except ValueError as exc: values["workspace_error"] = str(exc)
+        from .runner import backend_command
+        values["backends"] = [{"id": x, "available": bool(__import__('shutil').which(backend_command(x, values)[0]))} for x in ("codex", "claude", "opencode")]
+        return values
+    if m in ("PUT", "PATCH", "POST"):
+        allowed = {"active_backend", "parallel_agents", "workspace", "codex_command", "claude_command", "opencode_command", "model_codex", "model_claude", "model_opencode"}
+        if "active_backend" in b and b["active_backend"] not in ("codex", "claude", "opencode"):
+            raise api.BadRequest("active_backend must be codex, claude, or opencode")
+        if "parallel_agents" in b and not 1 <= int(b["parallel_agents"]) <= 16:
+            raise api.BadRequest("parallel_agents must be between 1 and 16")
+        if "workspace" in b:
+            try: b["workspace"] = workspace_path(b)
+            except ValueError as exc: raise api.BadRequest(str(exc))
+        from .runner import RUNNER, backend_command
+        for backend in ("codex", "claude", "opencode"):
+            if backend + "_command" in b:
+                if not isinstance(b[backend + "_command"], str): raise api.BadRequest("backend commands must be strings")
+                backend_command(backend, b)  # validate shell quoting before saving
+        with RUNNER.lock:
+            if RUNNER.active or RUNNER.orchestrator_busy:
+                raise api.BadRequest("Wait for active agents to finish before changing runner settings.")
+            for c in RUNNER.conns.values(): c.close()
+            RUNNER.conns.clear()
+            for key, value in b.items():
+                if key not in allowed: continue
+                conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)", (key, str(value)))
+            conn.commit()
+        return {"saved": True}
+
+
+def r_runner_models(conn, m, _mm, q, b, actor):
+    if m == "GET":
+        from .runner import RUNNER
+        try: return RUNNER.discover_models(q.get("backend", ""))
+        except ValueError as e: raise api.BadRequest(str(e))
+        except Exception as e: raise api.BadRequest(f"ACP model discovery failed: {e}")
+
+
+def r_runner_debug(conn, m, _mm, q, b, actor):
+    if m != "GET": return None
+    where=""; args=[]
+    if q.get("ticket"):
+        where="WHERE r.ticket_id=?"; args.append(int(q["ticket"]))
+    rows=conn.execute("SELECT r.*,t.title AS ticket_title,t.priority,t.status AS ticket_status FROM agent_runs r JOIN tickets t ON t.id=r.ticket_id "+where+" ORDER BY r.id DESC LIMIT 100",args).fetchall()
+    runs=[]
+    for row in rows:
+        item=dict(row)
+        item['messages']=[dict(x) for x in conn.execute("SELECT id,role,kind,body,created_at FROM agent_messages WHERE run_id=? ORDER BY id LIMIT 2000",(row['id'],))]
+        item['reviews']=[dict(x) for x in conn.execute("SELECT id,status,decision,reason,backend,created_at,finished_at FROM ticket_reviews WHERE ticket_id=? AND source_run_id=? ORDER BY id",(row['ticket_id'],row['id']))]
+        runs.append(item)
+    misc="WHERE run_id IS NULL"; margs=[]
+    if q.get("ticket"):
+        misc += " AND ticket_id=?"; margs.append(int(q['ticket']))
+    loose=[dict(x) for x in conn.execute("SELECT id,ticket_id,role,kind,body,created_at FROM agent_messages "+misc+" ORDER BY id DESC LIMIT 500",margs)]
+    reviews_where="WHERE tr.ticket_id=?" if q.get("ticket") else ""
+    reviews_args=[int(q['ticket'])] if q.get('ticket') else []
+    reviews=[dict(x) for x in conn.execute("SELECT tr.*,t.title AS ticket_title FROM ticket_reviews tr JOIN tickets t ON t.id=tr.ticket_id "+reviews_where+" ORDER BY tr.id DESC LIMIT 200",reviews_args)]
+    return {"runs":runs,"unattached_messages":loose,"reviews":reviews}
+
+
+def r_templates(conn, m, _mm, q, b, actor):
+    if m == "GET": return [dict(r) for r in conn.execute("SELECT * FROM agent_templates ORDER BY name")]
+    if m == "POST":
+        name = (b.get("name") or "").strip()
+        if not name: raise api.BadRequest("template name required")
+        ts = api.now()
+        if b.get("backend", "") not in ("", "codex", "claude", "opencode"): raise api.BadRequest("invalid template backend")
+        values=(b.get("prompt", ""),b.get("backend", ""),int(_bool(b.get("enabled", True))),ts,name)
+        exists=conn.execute("SELECT id FROM agent_templates WHERE name=?",(name,)).fetchone()
+        if exists:
+            conn.execute("UPDATE agent_templates SET prompt=?,backend=?,enabled=?,updated_at=? WHERE name=?",values)
+        else:
+            conn.execute("INSERT INTO agent_templates(prompt,backend,enabled,updated_at,name,created_at) VALUES(?,?,?,?,?,?)",values+(ts,))
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM agent_templates WHERE name=?",(name,)).fetchone())
+
+
+def r_runner_ticket(conn, m, mm, q, b, actor):
+    tid = int(mm.group(1)); api.get_ticket(conn, tid)
+    if m == "GET":
+        return {"messages":[dict(r) for r in conn.execute("SELECT * FROM agent_messages WHERE ticket_id=? AND role='user' AND kind='text' ORDER BY id",(tid,))],
+                "runs":[dict(r) for r in conn.execute("SELECT * FROM agent_runs WHERE ticket_id=? ORDER BY id DESC",(tid,))]}
+    if m == "POST":
+        from .runner import RUNNER
+        try: return RUNNER.chat(tid, b.get("body", ""))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator(conn, m, _mm, q, b, actor):
+    from .runner import RUNNER
+    if m == "GET": return {"projects": RUNNER.orchestrator_projects(), "sessions": RUNNER.orchestrator_sessions()}
+    if m == "POST":
+        try: return RUNNER.orchestrate(b.get("body", ""), b.get("session_id", "default"))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator_projects(conn, m, _mm, q, b, actor):
+    from .runner import RUNNER
+    if m == "GET": return RUNNER.orchestrator_projects()
+    if m == "POST":
+        try: return RUNNER.create_orchestrator_project(b.get("name", ""))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator_sessions(conn, m, _mm, q, b, actor):
+    from .runner import RUNNER
+    if m == "GET": return RUNNER.orchestrator_sessions()
+    if m == "POST":
+        try: return RUNNER.create_orchestrator_session(b.get("title", "New chat"), b.get("project_id"))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator_session(conn, m, mm, q, b, actor):
+    from .runner import RUNNER
+    sid = mm.group(1)
+    if m == "GET":
+        detail = RUNNER.orchestrator_detail(sid)
+        if not detail: raise api.NotFound("chat session not found")
+        return detail
+    if m in ("PATCH", "PUT", "POST"):
+        try: return RUNNER.update_orchestrator_session(sid, b.get("project_id"))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator_messages(conn, m, mm, q, b, actor):
+    if m == "POST":
+        from .runner import RUNNER
+        try: return RUNNER.orchestrate(b.get("body", ""), mm.group(1))
+        except ValueError as e: raise api.BadRequest(str(e))
 
 
 def r_ticket_tree(conn, m, mm, q, b, actor):
@@ -324,6 +507,16 @@ def r_question_comment(conn, m, _mm, q, b, actor):
 
 
 ROUTES = [
+    (r"/api/runner/projects", r_orchestrator_projects),
+    (r"/api/runner/models", r_runner_models),
+    (r"/api/runner/debug", r_runner_debug),
+    (r"/api/runner/sessions", r_orchestrator_sessions),
+    (r"/api/runner/sessions/([^/]+)/messages", r_orchestrator_messages),
+    (r"/api/runner/sessions/([^/]+)", r_orchestrator_session),
+    (r"/api/runner/orchestrator", r_orchestrator),
+    (r"/api/runner/settings", r_runner_settings),
+    (r"/api/runner/templates", r_templates),
+    (r"/api/tickets/(\d+)/runner", r_runner_ticket),
     (r"/api/overview", r_overview),
     (r"/api/search", r_search),
     (r"/api/activity", r_activity),
@@ -358,13 +551,24 @@ def main(argv=None) -> int:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     a = p.parse_args(argv)
+    if a.host != "localhost":
+        try: local = ipaddress.ip_address(a.host).is_loopback
+        except ValueError: local = False
+        if not local: p.error("This unauthenticated dashboard must bind to a loopback address.")
     db.connect()  # ensure schema exists before first request
+    from .runner import RUNNER  # start the durable ready-ticket poller
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    try: RUNNER.start()
+    except RuntimeError as exc:
+        srv.server_close(); p.error(str(exc))
     print(f"coms-board dashboard: http://{a.host}:{a.port}/   db={db.db_path()}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        RUNNER.stop()
+        srv.server_close()
     return 0
 
 

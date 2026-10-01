@@ -116,6 +116,65 @@ class TestServer(unittest.TestCase):
         ov = self.req("GET", "/api/overview")
         self.assertIn("tickets", ov)
 
+    def test_invalid_json_shapes_and_parameters_are_client_errors(self):
+        for body in [[], "text", 3, None]:
+            # A JSON null body is distinct from no body.
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/tickets", method="POST",
+                                       data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            with self.subTest(body=body), self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(r)
+            self.assertEqual(error.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.req("GET", "/api/overview?ticket=invalid")
+        self.assertEqual(error.exception.code, 400)
+
+    def test_cross_origin_and_untrusted_host_rejected(self):
+        for headers in [{"Host": "evil.example"}, {"Origin": "https://evil.example"},
+                        {"Sec-Fetch-Site": "cross-site"}, {"Host": "["}]:
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/overview", headers=headers)
+            with self.subTest(headers=headers), self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(r)
+            self.assertEqual(error.exception.code, 403)
+
+    def test_workspace_settings_reject_app_and_accept_separate_directory(self):
+        from coms.workspace import APP_ROOT
+        for workspace in [str(APP_ROOT), str(APP_ROOT.parent), str(APP_ROOT / "data"), "relative", ""]:
+            with self.subTest(workspace=workspace), self.assertRaises(urllib.error.HTTPError) as error:
+                self.req("PUT", "/api/runner/settings", {"workspace": workspace})
+            self.assertEqual(error.exception.code, 400)
+        with tempfile.TemporaryDirectory() as folder:
+            self.req("PUT", "/api/runner/settings", {"workspace": folder})
+            settings = self.req("GET", "/api/runner/settings")
+            self.assertEqual(settings["workspace"], folder)
+            self.assertEqual(settings["workspace_error"], "")
+
+    def test_template_edits_preserve_id_and_can_be_cleared(self):
+        first = self.req("POST", "/api/runner/templates", {"name": "HTTP template", "prompt": "First"})
+        t = self.req("POST", "/api/tickets", {"title": "Templated work", "agent_template_id": first["id"]})
+        second = self.req("POST", "/api/runner/templates", {"name": "HTTP template", "prompt": "Second"})
+        self.assertEqual(first["id"], second["id"])
+        self.req("PATCH", f"/api/tickets/{t['id']}", {"priority": "p1"})
+        self.assertEqual(self.req("GET", f"/api/tickets/{t['id']}")["agent_template_id"], first["id"])
+        cleared = self.req("PATCH", f"/api/tickets/{t['id']}", {"agent_template_id": None})
+        self.assertIsNone(cleared["agent_template_id"])
+
+    def test_execution_gate_requires_boolean_and_links_reject_script_urls(self):
+        for ready in ["false", "true", [], 2]:
+            with self.subTest(ready=ready), self.assertRaises(urllib.error.HTTPError) as error:
+                self.req("POST", "/api/tickets", {"title": "Bad gate", "ready_for_execution": ready})
+            self.assertEqual(error.exception.code, 400)
+        t = self.req("POST", "/api/tickets", {"title": "URL test"})
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.req("POST", f"/api/tickets/{t['id']}/links", {"kind": "url", "ref": "javascript:alert(1)"})
+        self.assertEqual(error.exception.code, 400)
+
+    def test_static_security_headers_and_encoded_traversal(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/") as response:
+            self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+            self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/%2e%2e/coms/server.py") as response:
+            self.assertIn(b"<!doctype html>", response.read().lower())
+
 
 if __name__ == "__main__":
     unittest.main()

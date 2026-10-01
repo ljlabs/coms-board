@@ -32,6 +32,18 @@
   }
 
   class MdEditor {
+    static sweep() { sweep(); }
+    static drafts() { return [...LIVE].filter(ed => ed.el.isConnected && ed.el.id).map(ed => [ed.el.id, ed.value]); }
+    static restoreDrafts(drafts) {
+      for (const [id, value] of drafts) {
+        const ed = [...LIVE].find(item => item.el.isConnected && item.el.id === id);
+        if (ed && ed.value !== value) ed.setValue(value);
+      }
+    }
+    static clearDraft(id) {
+      const ed = [...LIVE].find(item => item.el.isConnected && item.el.id === id);
+      if (ed) ed.setValue('');
+    }
     constructor(el, opts = {}) {
       sweep();
       this.el = el;

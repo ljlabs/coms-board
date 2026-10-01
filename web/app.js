@@ -1,8 +1,9 @@
-﻿/* app.js — COMS BOARD single-page app (hash routing, no framework). */
+/* app.js — COMS BOARD single-page app (hash routing, no framework). */
 (function () {
   'use strict';
   const $ = (sel, root = document) => root.querySelector(sel);
   const app = $('#app');
+  let view = { controller: new AbortController(), hash: null, cleanup: [] };
   const esc = MD.esc;
   const who = () => ($('#who').value || 'admin').trim();
   $('#who').value = localStorage.getItem('coms.who') || 'admin';
@@ -10,11 +11,14 @@
 
   // ------------------------------------------------------------ api
   async function api(method, path, body) {
+    const owner = view;
     const res = await fetch(path, {
       method, headers: { 'Content-Type': 'application/json', 'X-Coms-Agent': who() },
       body: body ? JSON.stringify(body) : undefined,
+      signal: method === 'GET' ? owner.controller.signal : undefined,
     });
     const data = await res.json().catch(() => ({}));
+    if (owner !== view || owner.controller.signal.aborted) throw new DOMException('View changed', 'AbortError');
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
   }
@@ -24,7 +28,47 @@
     const t = document.createElement('div'); t.className = 't' + (err ? ' err' : ''); t.textContent = msg;
     $('#toast').appendChild(t); setTimeout(() => t.remove(), err ? 6000 : 2500);
   }
-  const fail = (e) => { console.error(e); toast(e.message || String(e), true); };
+  const fail = (e) => { if (e.name === 'AbortError') return; console.error(e); toast(e.message || String(e), true); };
+
+  // Dispose polls on every render, including a refresh of the same URL.
+  // A slow request must finish before the next poll can start.
+  function poll(fn, delay) {
+    const owner = view;
+    let timer;
+    const tick = async () => {
+      if (owner !== view || owner.controller.signal.aborted) return;
+      try { if (!document.hidden) await fn(); } catch (e) { if (e.name !== 'AbortError') console.error(e); }
+      if (owner === view && !owner.controller.signal.aborted) timer = setTimeout(tick, delay);
+    };
+    timer = setTimeout(tick, delay);
+    owner.cleanup.push(() => clearTimeout(timer));
+  }
+  const scrollState = box => ({ top: box.scrollTop, follow: box.scrollHeight - box.scrollTop - box.clientHeight < 24 });
+  const hasSelection = node => {
+    const selection=window.getSelection();
+    return selection && !selection.isCollapsed && selection.rangeCount && selection.getRangeAt(0).intersectsNode(node);
+  };
+  function restoreScroll(box, state) {
+    const selecting = hasSelection(box);
+    box.scrollTop = state.follow && !selecting ? box.scrollHeight : state.top;
+  }
+
+  function paint(html) {
+    // Snapshot at commit time: the user can keep typing or scrolling while
+    // a refresh request is still loading.
+    if (view.same && !view.snapshot) {
+      const active=document.activeElement;
+      view.snapshot = {
+        position: { x: window.scrollX, y: window.scrollY },
+        drafts: window.MdEditor ? MdEditor.drafts() : [],
+        inputs: [...app.querySelectorAll('textarea[id], #lk-ref, #lk-note, #project-name')].map(el => [el.id, el.value]),
+        nested: [...app.querySelectorAll('[id]')].filter(el => el.scrollHeight > el.clientHeight && el.scrollTop).map(el => [el.id, el.scrollTop]),
+        focus: active && app.contains(active) && active.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null,
+      };
+    }
+    app.classList.toggle('wide', Boolean(view.wide));
+    app.innerHTML = html;
+  }
 
   // ------------------------------------------------------------ helpers
   const ago = (iso) => {
@@ -47,7 +91,7 @@
   //   layout({ nav, body, aside, id, collapsible })  -> html
   //   wireAside(id, storeKey)                        -> attaches the ⇥ Panel button (#toggleside) if present
   const layout = ({ nav = '', body = '', aside = '', id = 'layout' } = {}) => {
-    app.classList.add('wide');
+    view.wide = true;
     return `<div class="layout" id="${esc(id)}">${nav ? `<div class="layout-nav">${nav}</div>` : ''}<div class="layout-body">${body}</div>${aside ? `<div class="layout-aside">${aside}</div>` : ''}</div>`;
   };
   // the standard "⇥ Panel" action button; pair with wireAside() after rendering
@@ -74,7 +118,7 @@
   const PR = ['p0', 'p1', 'p2', 'p3'];
   let AGENTS = [], DEPTS = [];
   async function loadRefs() {
-    try { [AGENTS, DEPTS] = await Promise.all([GET('/api/agents'), GET('/api/departments')]); } catch (e) { /* ignore */ }
+    try { [AGENTS, DEPTS] = await Promise.all([GET('/api/agents'), GET('/api/departments')]); } catch (e) { if (e.name === 'AbortError') throw e; }
   }
   const agentOpts = (cur) => `<option value="">— nobody —</option>` + AGENTS.map((a) => `<option value="${a.slug}"${a.slug === cur ? ' selected' : ''}>${esc(a.slug)}</option>`).join('');
   const deptOpts = (cur) => `<option value="">— none —</option>` + DEPTS.map((d) => `<option value="${d.slug}"${d.slug === cur ? ' selected' : ''}>${esc(d.name)}</option>`).join('');
@@ -84,22 +128,46 @@
   const route = (re, fn) => routes.push([re, fn]);
   async function render() {
     const hash = location.hash || '#/';
+    const same = hash === view.hash;
+    view.controller.abort();
+    view.cleanup.forEach(fn => fn());
+    const owner = view = { controller: new AbortController(), hash, same, cleanup: [] };
     const path = hash.slice(1).split('?')[0];
     for (const [re, fn] of routes) {
       const m = re.exec(path);
       if (m) {
-        app.innerHTML = '<div class="empty">loading…</div>';
-        app.classList.remove('wide');   // routes opt back in (wiki read view does)
-        try { await fn(...m.slice(1).map((x) => x && decodeURIComponent(x))); } catch (e) { app.innerHTML = `<div class="card tint-p"><h2>Error</h2><p class="mono">${esc(e.message)}</p></div>`; console.error(e); }
+        // Keep the page height and existing content stable while data loads.
+        app.setAttribute('aria-busy', 'true');
+        if (!app.firstElementChild) paint('<div class="empty">loading…</div>');
+        try { await fn(...m.slice(1).map((x) => x && decodeURIComponent(x))); } catch (e) {
+          if (owner !== view || e.name === 'AbortError') return;
+          if (same) fail(e);
+          else paint(`<div class="card tint-p"><h2>Error</h2><p class="mono">${esc(e.message)}</p></div>`);
+        }
+        if (owner !== view) return;
+        app.removeAttribute('aria-busy');
+        if (window.MdEditor) MdEditor.sweep();
+        const snapshot=owner.snapshot;
+        if (snapshot) {
+          if (window.MdEditor) MdEditor.restoreDrafts(snapshot.drafts);
+          snapshot.inputs.forEach(([id, value]) => { const el = document.getElementById(id); if (el) el.value = value; });
+          snapshot.nested.forEach(([id, top]) => { const el = document.getElementById(id); if (el) el.scrollTop = top; });
+          if (snapshot.focus) {
+            const el=document.getElementById(snapshot.focus.id);
+            if (el) { el.focus({preventScroll:true}); if (el.setSelectionRange && snapshot.focus.start != null) el.setSelectionRange(snapshot.focus.start,snapshot.focus.end); }
+          }
+        }
         // one central place to turn rendered ```mermaid blocks into diagrams
         if (window.MMD && MMD.has(app)) MMD.upgrade(app).catch(() => {});
         // …and to pretty-print single-line code blocks (see pretty.js)
         if (window.PRETTY && PRETTY.has(app)) PRETTY.upgrade(app).catch(() => {});
-        window.scrollTo(0, 0);
+        window.scrollTo(snapshot ? snapshot.position.x : 0, snapshot ? snapshot.position.y : 0);
         return;
       }
     }
-    app.innerHTML = '<div class="empty">404 — no such page</div>';
+    paint('<div class="empty">404 — no such page</div>');
+    app.removeAttribute('aria-busy');
+    if (window.MdEditor) MdEditor.sweep();
   }
   window.addEventListener('hashchange', render);
   $('#searchform').addEventListener('submit', (e) => { e.preventDefault(); location.hash = `#/search?q=${encodeURIComponent($('#q').value)}`; });
@@ -109,7 +177,7 @@
     setTab('home');
     const o = await GET('/api/overview');
     const [qs_, tix] = await Promise.all([GET('/api/questions?unanswered=1'), GET('/api/tickets?unassigned=1')]);
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><h1>Dashboard</h1><div class="sub">${esc(o.generated_at)} · ${o.agents} agents · ${o.departments} departments</div></div>
       <div class="stats">
         <a class="stat y" href="#/wiki"><div class="n">${o.wiki_pages}</div><div class="l">wiki pages</div></a>
@@ -126,7 +194,7 @@
             ${qs_.length ? `<div class="list">${qs_.slice(0, 8).map(questionItem).join('')}</div>` : '<div class="empty">everything is answered</div>'}</div>`,
         aside: `
           <div class="card tint-y"><h3>Top agents</h3>${o.top_agents.map((a) => `<div style="display:flex;justify-content:space-between;padding:.2rem 0">${chip(a.slug)}<b class="mono">${a.reputation} rep</b></div>`).join('') || '<span class="muted">no agents yet</span>'}</div>
-          <div class="card"><h3>Recent activity</h3><div class="feed">${o.recent_activity.map(ev).join('') || '<span class="muted">quiet</span>'}</div><p><a href="#/activity" class="small mono">full feed →</a></p></div>` })}`;
+          <div class="card"><h3>Recent activity</h3><div class="feed">${o.recent_activity.map(ev).join('') || '<span class="muted">quiet</span>'}</div><p><a href="#/activity" class="small mono">full feed →</a></p></div>` })}`);
   });
   const ev = (a) => `<div class="ev"><span class="ts" title="${esc(a.created_at)}">${ago(a.created_at)} · ${esc(a.actor || '?')}</span><span><a href="${refLink(a.ref)}">${esc(a.summary)}</a></span></div>`;
 
@@ -180,10 +248,10 @@ coms wiki get &lt;slug&gt;
 coms wiki put &lt;slug&gt; --title … --folder a/b --file note.md
 coms wiki mv &lt;slug&gt; a/b
 coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1>Wiki</h1><div class="sub">long-term agent notes — how-tos, gotchas, verified procedures${inFolder ? ` · <span class="mono">${folderCrumb(q.folder, q.folder)}</span>` : ''}</div></div>
         <div class="actions"><input id="wf" class="mono" placeholder="filter…" style="border:3px solid #111;padding:.4rem .6rem">${asideToggleBtn()}<a class="btn primary" href="#/wiki/new${inFolder && q.folder ? `?folder=${encodeURIComponent(q.folder)}` : ''}">+ New page</a></div></div>
-      ${layout({ id: 'wikiindex', nav: folderTree(tree, inFolder ? q.folder : undefined), body: table, aside })}`;
+      ${layout({ id: 'wikiindex', nav: folderTree(tree, inFolder ? q.folder : undefined), body: table, aside })}`);
     wireAside('wikiindex', 'coms.wikiside');
     $('#wf').addEventListener('input', (e) => { const v = e.target.value.toLowerCase(); document.querySelectorAll('#wt tbody tr').forEach((tr) => tr.classList.toggle('hidden', !(tr.dataset.k || '').includes(v))); });
   });
@@ -193,11 +261,11 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   route(/^\/wiki\/([^/]+)\/history$/, async (slug) => {
     setTab('wiki');
     const [p, revs] = await Promise.all([GET(`/api/wiki/${encodeURIComponent(slug)}`), GET(`/api/wiki/${encodeURIComponent(slug)}/revisions`)]);
-    app.innerHTML = `<div class="pagehead"><div><h1>History</h1><div class="sub"><a href="#/wiki/${p.slug}">${esc(p.title)}</a></div></div></div>
+    paint(`<div class="pagehead"><div><h1>History</h1><div class="sub"><a href="#/wiki/${p.slug}">${esc(p.title)}</a></div></div></div>
       <table class="grid"><thead><tr><th>Rev</th><th>Saved</th><th>By</th><th>Title</th><th>Size</th><th></th></tr></thead><tbody>
       <tr><td class="mono">current</td><td class="ts">${esc(p.updated_at)}</td><td>${chip(p.updated_by)}</td><td>${esc(p.title)}</td><td class="mono">${p.body.length}</td><td></td></tr>
       ${revs.map((r) => `<tr><td class="mono">#${r.id}</td><td class="ts">${esc(r.created_at)}</td><td>${chip(r.author)}</td><td>${esc(r.title)}</td><td class="mono">${r.size}</td><td><button class="btn sm" data-rev="${r.id}">view</button> <button class="btn sm pink" data-restore="${r.id}">restore</button></td></tr>`).join('')}
-      </tbody></table><div id="revview"></div>`;
+      </tbody></table><div id="revview"></div>`);
     app.addEventListener('click', async (e) => {
       const v = e.target.dataset.rev, r = e.target.dataset.restore;
       if (v) { const rev = await GET(`/api/wiki-revisions/${v}`); $('#revview').innerHTML = `<div class="card"><h3>Revision #${v}</h3><div class="md">${MD.render(rev.body)}</div></div>`; if (window.MMD) MMD.upgrade($('#revview')).catch(() => {}); if (window.PRETTY) PRETTY.upgrade($('#revview')).catch(() => {}); }
@@ -209,19 +277,19 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     setTab('wiki');
     let p;
     try { p = await GET(`/api/wiki/${encodeURIComponent(slug)}`); } catch (e) {
-      app.innerHTML = `<div class="card tint-p"><h2>No page “${esc(slug)}”</h2><p>This page does not exist yet.</p><a class="btn primary" href="#/wiki/new?slug=${encodeURIComponent(slug)}">Create it</a></div>`; return;
+      paint(`<div class="card tint-p"><h2>No page “${esc(slug)}”</h2><p>This page does not exist yet.</p><a class="btn primary" href="#/wiki/new?slug=${encodeURIComponent(slug)}">Create it</a></div>`); return;
     }
     const all = await GET('/api/wiki');
     const known = new Set(all.map((x) => x.slug));
     const toc = MD.outline(p.body).filter((h) => h.level <= 3).map((h) => `<a class="l${h.level}" href="#/wiki/${p.slug}#${h.id}" data-anchor="${h.id}">${esc(h.text)}</a>`).join('');
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1>${esc(p.title)}</h1><div class="sub"><span class="mono">${folderCrumb(p.folder, p.folder || '')}</span> · ${esc(p.slug)} · updated ${ago(p.updated_at)} by ${esc(p.updated_by)} · created ${p.created_at.slice(0, 10)} by ${esc(p.author)}</div></div>
         <div class="actions">${asideToggleBtn()}<a class="btn" href="#/wiki/${p.slug}/history">History (${p.revision_count})</a><a class="btn primary" href="#/wiki/${p.slug}/edit">Edit</a><button class="btn danger" id="del">Delete</button></div></div>
       ${layout({ id: 'wikiread',
         body: `<div class="card"><div class="md" id="body">${MD.render(p.body)}</div></div>`,
         aside: `<div class="card"><h3>Meta</h3><dl class="kv"><dt>folder</dt><dd><span class="mono small">${p.folder ? esc(p.folder) : '<span class="muted">(unfiled)</span>'}</span> <button class="btn sm ghost" id="mv" title="move to another folder">move</button></dd><dt>tags</dt><dd>${tags(p.tags, '#/wiki') || '—'}</dd><dt>dept</dt><dd>${esc(p.department || '—')}</dd><dt>author</dt><dd>${chip(p.author)}</dd></dl></div>
           ${toc ? `<div class="card"><h3>Contents</h3><div class="toc">${toc}</div></div>` : ''}
-          <div class="card tint-c"><h3>Backlinks</h3>${p.backlinks.map((b) => `<div><a href="#/wiki/${b.slug}">${esc(b.title)}</a></div>`).join('') || '<span class="muted small">none link here yet</span>'}</div>` })}`;
+          <div class="card tint-c"><h3>Backlinks</h3>${p.backlinks.map((b) => `<div><a href="#/wiki/${b.slug}">${esc(b.title)}</a></div>`).join('') || '<span class="muted small">none link here yet</span>'}</div>` })}`);
     wireAside('wikiread', 'coms.wikiside');
     wireWikilinks($('#body'), known);
     document.querySelectorAll('.toc a').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); const el = document.getElementById(a.dataset.anchor); if (el) el.scrollIntoView({ behavior: 'smooth' }); }));
@@ -236,7 +304,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   function wikiEditor(p) {
     const q = qs();
     const isNew = !p;
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1>${isNew ? 'New page' : 'Edit page'}</h1><div class="sub">${isNew ? 'markdown · [[wikilinks]] resolve to other pages' : esc(p.slug)}</div></div>
         <div class="actions"><a class="btn" href="${isNew ? '#/wiki' : `#/wiki/${p.slug}`}">Cancel</a><button class="btn ok" id="save">Save</button></div></div>
       <div class="card flat form" style="margin-bottom:1rem">
@@ -248,7 +316,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <div class="grid-3">${field('Department', `<select id="dept">${deptOpts(p ? p.department : '')}</select>`)}
           ${field('Folder (slash path; empty = unfiled)', `<input id="folder" class="mono" list="folders" value="${esc(p ? (p.folder || '') : (q.folder || ''))}" placeholder="folder-a/folder-b/folder-c"><datalist id="folders"></datalist>`)}</div>
       </div>
-      <div id="ed"></div>`;
+      <div id="ed"></div>`);
     const ed = new MdEditor($('#ed'), { value: p ? p.body : '', onSave: save, minHeight: '60vh', placeholder: '# Title\n\nWhat this note lets an agent do, the exact commands, the gotchas, and where the evidence lives (source deep links).' });
     // resolve [[links]] against the real page list so missing ones show as missing
     GET('/api/wiki').then((all) => ed.setKnownSlugs(new Set(all.map((x) => x.slug)))).catch(() => {});
@@ -286,8 +354,8 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     if (q.dept) params.set('dept', q.dept); if (q.type) params.set('type', q.type);
     let tix = await GET(`/api/tickets?${params}`);
     if (q.tag) tix = tix.filter((t) => t.tags.split(',').includes(q.tag));
-    const link = (k, v) => { const n = { ...q }; if (v === undefined) delete n[k]; else n[k] = v; delete n.view; return `#/tickets?${new URLSearchParams(n)}`; };
-    app.innerHTML = `
+    const link = (k, v) => { const n = { ...q }; if (v === undefined) delete n[k]; else n[k] = v; return `#/tickets?${new URLSearchParams(n)}`; };
+    paint(`
       <div class="pagehead"><div><h1>Tickets</h1><div class="sub">research tasks, chores and bugs for the agent team</div></div>
         <div class="actions"><button class="btn ${view === 'list' ? 'primary' : ''}" id="vl">List</button><button class="btn ${view === 'board' ? 'primary' : ''}" id="vb">Board</button><a class="btn ok" href="#/tickets/new">+ New ticket</a></div></div>
       <div class="filters">
@@ -300,9 +368,9 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <select id="ft"><option value="">type: any</option>${TT.map((t) => `<option value="${t}"${q.type === t ? ' selected' : ''}>${t}</option>`).join('')}</select>
         ${q.tag ? `<span class="chip on">tag: ${esc(q.tag)}</span> <a class="btn sm ghost" href="${link('tag', undefined)}">×</a>` : ''}
         <span class="muted mono small">${tix.length} tickets</span></div>
-      ${view === 'board' ? kanban(tix) : (tix.length ? `<div class="list">${tix.map(ticketItem).join('')}</div>` : '<div class="empty">no tickets match</div>')}`;
-    $('#vl').onclick = () => { localStorage.setItem('coms.tview', 'list'); location.hash = link('view', 'list'); render(); };
-    $('#vb').onclick = () => { localStorage.setItem('coms.tview', 'board'); location.hash = link('view', 'board'); render(); };
+      ${view === 'board' ? kanban(tix) : (tix.length ? `<div class="list">${tix.map(ticketItem).join('')}</div>` : '<div class="empty">no tickets match</div>')}`);
+    $('#vl').onclick = () => { localStorage.setItem('coms.tview', 'list'); const hash=link('view', 'list'); if(location.hash!==hash)location.hash=hash; };
+    $('#vb').onclick = () => { localStorage.setItem('coms.tview', 'board'); const hash=link('view', 'board'); if(location.hash!==hash)location.hash=hash; };
     $('#fa').onchange = (e) => location.hash = link('assignee', e.target.value || undefined);
     $('#fd').onchange = (e) => location.hash = link('dept', e.target.value || undefined);
     $('#ft').onchange = (e) => location.hash = link('type', e.target.value || undefined);
@@ -314,19 +382,21 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
 
   route(/^\/tickets\/new$/, async () => {
     setTab('tickets'); await loadRefs();
+    let templates = []; try { templates = await GET('/api/runner/templates'); } catch (e) { if(e.name==='AbortError')throw e; }
     const q = qs();
-    app.innerHTML = `<div class="pagehead"><h1>New ticket</h1></div>
+    paint(`<div class="pagehead"><h1>New ticket</h1></div>
       <div class="card form" style="max-width:1000px">
         ${field('Title', `<input id="title" placeholder="Research: …">`)}
         <div class="grid-3">${field('Type', `<select id="type">${opts(TT, q.type || 'research')}</select>`)}${field('Priority', `<select id="prio">${opts(PR, 'p2')}</select>`)}${field('Department', `<select id="dept">${deptOpts(q.dept || (DEPTS[0] && DEPTS[0].slug))}</select>`)}</div>
         <div class="grid-2">${field('Assignee', `<select id="assignee">${agentOpts(q.assignee || '')}</select>`)}${field('Tags', `<input id="tags" placeholder="topic, area">`)}</div>
+        <div class="grid-2">${field('Agent template', `<select id="template"><option value="">Use default runner</option>${templates.filter(x=>x.enabled).map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>`)}${field('Execution gate', '<label class="small"><input id="ready" type="checkbox"> Ready for agent execution</label>')}</div>
         <div class="grid-2">${field('Parent ticket id (optional) — story &gt; job &gt; task', `<input id="parent" type="number" min="1" value="${esc(q.parent || '')}" placeholder="e.g. 42">`)}</div>
         ${field('Body (markdown) — what to find out, what "done" looks like, where to start', '<div id="ed"></div>')}
-        <div class="form-actions"><a class="btn" href="#/tickets">Cancel</a><button class="btn ok" id="save">Create</button></div></div>`;
+        <div class="form-actions"><a class="btn" href="#/tickets">Cancel</a><button class="btn ok" id="save">Create</button></div></div>`);
     const ed = new MdEditor($('#ed'), { onSave: save, minHeight: '300px', placeholder: '## Goal\n\n## Definition of done\n\n## Starting points\n- link to source…' });
     $('#save').onclick = () => save(ed.value);
     async function save(body) {
-      const payload = { title: $('#title').value, body, type: $('#type').value, priority: $('#prio').value, department: $('#dept').value, assignee: $('#assignee').value, tags: $('#tags').value };
+      const payload = { title: $('#title').value, body, type: $('#type').value, priority: $('#prio').value, department: $('#dept').value, assignee: $('#assignee').value, tags: $('#tags').value, ready_for_execution: $('#ready').checked, agent_template_id: $('#template').value || null };
       const p = $('#parent').value.trim(); if (p) payload.parent_id = +p;
       try { const t = await api('POST', '/api/tickets', payload); toast(`ticket #${t.id} created`); location.hash = `#/tickets/${t.id}`; } catch (e) { fail(e); }
     }
@@ -335,9 +405,9 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
 
   route(/^\/tickets\/(\d+)$/, async (id) => {
     setTab('tickets'); await loadRefs();
-    const t = await GET(`/api/tickets/${id}`);
+    const [t, runnerData, templates] = await Promise.all([GET(`/api/tickets/${id}`), GET(`/api/tickets/${id}/runner`), GET('/api/runner/templates').catch(e=>{if(e.name==='AbortError')throw e;return [];})]);
     const known = new Set((await GET('/api/wiki')).map((x) => x.slug));
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div>${t.parent ? `<div class="crumb small mono" style="margin-bottom:.3rem">↑ parent <a href="#/tickets/${t.parent.id}">#${t.parent.id} ${esc(t.parent.title)}</a> ${badge(t.parent.type)}${badge(t.parent.status)}</div>` : ''}<h1>#${t.id} <span id="ttl">${esc(t.title)}</span></h1><div class="sub">opened ${ago(t.created_at)} by ${esc(t.requester || '?')} · updated ${ago(t.updated_at)}${t.closed_at ? ` · closed ${t.closed_at.slice(0, 10)}` : ''}</div></div>
         <div class="actions"><a class="btn" href="#/tickets/${t.id}/tree">🌲 Tree</a>${t.status === 'open' && !t.assignee ? `<button class="btn pink" id="claim">Claim as ${esc(who())}</button>` : ''}<button class="btn" id="editbody">Edit body</button><button class="btn ok" id="editresult">${t.result ? 'Edit result' : 'Write result'}</button></div></div>
       ${layout({ id: 'ticket', body: `
@@ -349,6 +419,12 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
             <div class="meta">${ln.note ? `<span>${esc(ln.note)}</span>` : ''}<span class="ts">${chip(ln.created_by || '?')}</span><button class="btn sm ghost" data-unlink="${esc(ln.kind)}|${esc(ln.ref)}" title="remove link">×</button></div></div></div>`).join('')}</div>` : '<div class="muted small">no attached context — link the wiki notes and questions this work rests on (<code>coms ticket link</code>)</div>'}
           <div class="actions" style="margin-top:.6rem"><select id="lk-kind"><option value="wiki">wiki</option><option value="question">question</option><option value="ticket">ticket</option><option value="url">url</option></select><input id="lk-ref" placeholder="slug / id / url" style="max-width:200px"><input id="lk-note" placeholder="note (optional)" style="max-width:180px"><button class="btn sm" id="lk-add">+ link</button></div></div>
         <div class="card ${t.result ? 'tint-g' : ''}" id="resultcard"><div class="card-title"><h3>Result</h3></div><div class="md" id="result">${t.result ? MD.render(t.result) : '<span class="muted">nothing delivered yet — the assignee records the outcome here (<code>coms ticket done</code>)</span>'}</div></div>
+        <div class="card" id="runner-chat"><div class="card-title"><h3>Agent runner chat</h3><span class="badge ${t.ready_for_execution?'in_progress':'blocked'}">${t.ready_for_execution?'ready gate open':'awaiting orchestration'}</span></div>
+          <div class="mono small muted">Your prompts stay here. ACP responses and tool output are in <a href="#/debug?ticket=${t.id}">Debug</a>; only comments the agent deliberately publishes appear in the ticket Comments timeline.</div>
+          <div id="runner-messages" class="runner-messages">${runnerData.messages.filter(m=>m.role==='user'&&m.kind==='text').map(m=>`<div class="runner-msg user" data-message-id="${m.id}"><b>You</b><pre>${esc(m.body)}</pre><span class="ts">${esc(m.created_at)}</span></div>`).join('') || '<div class="empty">No chat messages yet.</div>'}</div>
+          <form id="runner-form" class="runner-form"><textarea id="runner-input" placeholder="Message the ticket agent…" rows="3"></textarea><button class="btn primary">Send to agent</button></form>
+          <div class="mono small muted">${runnerData.runs.map(r=>`Run #${r.id}: ${esc(r.status)} · ${esc(r.backend)}${r.error?` · ${esc(r.error)}`:''}`).join('<br>') || 'Queue starts only after Ready for agent execution is enabled and the ticket is not assigned/tagged for a human.'}</div>
+        </div>
         <div class="card"><h3>Timeline</h3><div class="timeline">${t.comments.map((c) => `<div class="tl ${c.kind}"><div><div class="who">${chip(c.author)}</div><div class="ts">${ago(c.created_at)}</div></div><div class="txt ${c.kind === 'comment' ? 'md' : ''}">${c.kind === 'comment' ? MD.render(c.body) : esc(c.body)}</div></div>`).join('') || '<span class="muted small">no comments</span>'}</div>
           <div style="margin-top:1rem"><div id="ced"></div><div class="form-actions" style="margin-top:.5rem"><button class="btn" id="cmt">Comment</button></div></div></div>`,
         aside: `
@@ -359,12 +435,30 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           <label>Assignee<select id="f-assignee">${agentOpts(t.assignee)}</select></label>
           <label>Department<select id="f-department">${deptOpts(t.department)}</select></label>
           <label>Tags<input id="f-tags" value="${esc(t.tags)}"></label>
+          <label>Execution template<select id="f-template"><option value="">Use active backend</option>${templates.map(x=>`<option value="${x.id}"${String(x.id)===String(t.agent_template_id)?' selected':''}>${esc(x.name)}</option>`).join('')}</select></label>
+          <label><input id="f-ready" type="checkbox"${t.ready_for_execution?' checked':''}> Ready for agent execution</label>
           <label>Title<input id="f-title" value="${esc(t.title)}"></label>
         </div><div class="form-actions" style="margin-top:.8rem"><button class="btn primary" id="savef">Save fields</button></div></div>
-        <div class="card tint-y small"><b class="mono">quick moves</b><div class="actions" style="margin-top:.5rem">${TS.filter((s) => s !== t.status).map((s) => `<button class="btn sm" data-mv="${s}">${s.replace('_', ' ')}</button>`).join('')}</div></div>` })}`;
+        <div class="card tint-y small"><b class="mono">quick moves</b><div class="actions" style="margin-top:.5rem">${TS.filter((s) => s !== t.status).map((s) => `<button class="btn sm" data-mv="${s}">${s.replace('_', ' ')}</button>`).join('')}</div></div>` })}`);
     wireWikilinks(app, known);
     const patch = async (data, msg) => { try { const r = await api('PATCH', `/api/tickets/${id}`, data); toast(msg || 'saved'); if (r && r.open_children_warning && r.open_children_warning.length) { toast(`⚠ ${r.open_children_warning.length} open child ticket(s): ${r.open_children_warning.map((c) => '#' + c.id).join(', ')}`, true); } render(); } catch (e) { fail(e); } };
-    $('#savef').onclick = () => patch({ status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value });
+    $('#savef').onclick = () => patch({ status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value, ready_for_execution: $('#f-ready').checked, agent_template_id: $('#f-template').value || null });
+    $('#runner-form').onsubmit = async (e) => { e.preventDefault(); const input=$('#runner-input'), body=input.value.trim(); if(!body)return; try { await api('POST', `/api/tickets/${id}/runner`, {body}); input.value=''; await refreshRunner(); } catch(err){fail(err);} };
+    async function refreshRunner() {
+      const d=await GET(`/api/tickets/${id}/runner`), box=$('#runner-messages');
+      if(!box)return;
+      const messages=d.messages.filter(m=>m.role==='user'&&m.kind==='text'), scroll=scrollState(box);
+      let empty=box.querySelector('.empty');
+      if(messages.length)empty?.remove();
+      else if(!empty){empty=document.createElement('div');empty.className='empty';empty.textContent='No chat messages yet.';box.appendChild(empty);}
+      for(const m of messages){
+        if(box.querySelector(`[data-message-id="${m.id}"]`))continue;
+        const node=document.createElement('div');node.className='runner-msg user';node.dataset.messageId=m.id;
+        node.innerHTML=`<b>You</b><pre>${esc(m.body)}</pre><span class="ts">${esc(m.created_at)}</span>`;box.appendChild(node);
+      }
+      restoreScroll(box,scroll);
+    }
+    poll(refreshRunner,2000);
     document.querySelectorAll('[data-mv]').forEach((b) => b.onclick = () => patch({ status: b.dataset.mv }, `→ ${b.dataset.mv}`));
     if ($('#claim')) $('#claim').onclick = async () => { try { await api('POST', `/api/tickets/${id}/claim`); toast('claimed'); render(); } catch (e) { fail(e); } };
     $('#lk-add').onclick = async () => {
@@ -377,7 +471,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     });
     const ced = new MdEditor($('#ced'), { placeholder: 'add a comment (markdown)…', onSave: comment, minHeight: '110px', knownSlugs: known });
     $('#cmt').onclick = () => comment(ced.value);
-    async function comment(body) { if (!body.trim()) return; try { await api('POST', `/api/tickets/${id}/comments`, { body }); toast('comment added'); render(); } catch (e) { fail(e); } }
+    async function comment(body) { if (!body.trim()) return; try { await api('POST', `/api/tickets/${id}/comments`, { body }); toast('comment added'); ced.setValue(''); render(); } catch (e) { fail(e); } }
     $('#editbody').onclick = () => inlineEdit('#bodycard', t.body, (body) => patch({ body }, 'body saved'));
     $('#editresult').onclick = () => inlineEdit('#resultcard', t.result, (result) => patch({ result, status: t.status === 'done' ? 'done' : $('#markdone') && $('#markdone').checked ? 'done' : undefined }, 'result saved'), true);
   });
@@ -392,9 +486,9 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <span class="meta">${badge(n.type)}${badge(n.status)}${badge(n.priority)} ${n.assignee ? chip(n.assignee) : '<b>unassigned</b>'}</span></div>`;
       return row + (n.children || []).map((c) => node(c, depth + 1)).join('');
     };
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1>Tree · #${focus}</h1><div class="sub">story &gt; job &gt; task hierarchy · <a href="#/tickets/${focus}">back to ticket</a></div></div></div>
-      <div class="card"><div class="tree">${node(data.root, 0)}</div></div>`;
+      <div class="card"><div class="tree">${node(data.root, 0)}</div></div>`);
   });
 
   function inlineEdit(sel, value, onSave, withDone) {
@@ -416,19 +510,19 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const params = new URLSearchParams(); if (q.status) params.set('status', q.status); if (q.tag) params.set('tag', q.tag); if (q.unanswered) params.set('unanswered', '1'); if (q.dept) params.set('dept', q.dept);
     const list = await GET(`/api/questions?${params}`);
     const link = (k, v) => { const n = { ...q }; if (v === undefined) delete n[k]; else n[k] = v; return `#/questions?${new URLSearchParams(n)}`; };
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1>Questions</h1><div class="sub">questions from agents · answers from any agent · votes decide</div></div><div class="actions"><a class="btn ok" href="#/questions/ask">+ Ask question</a></div></div>
       <div class="filters"><a class="chip ${!q.status && !q.unanswered ? 'on' : ''}" href="#/questions">all</a><a class="chip ${q.unanswered ? 'on' : ''}" href="${link('unanswered', '1')}">unanswered</a>${['open', 'answered', 'closed'].map((s) => `<a class="chip ${q.status === s ? 'on' : ''}" href="${link('status', s)}">${s}</a>`).join('')}${q.tag ? `<span class="chip on">tag: ${esc(q.tag)}</span> <a class="btn sm ghost" href="${link('tag', undefined)}">×</a>` : ''}<span class="muted mono small">${list.length} questions</span></div>
-      ${list.length ? `<div class="list">${list.map(questionItem).join('')}</div>` : '<div class="empty">no questions match</div>'}`;
+      ${list.length ? `<div class="list">${list.map(questionItem).join('')}</div>` : '<div class="empty">no questions match</div>'}`);
   });
 
   route(/^\/questions\/ask$/, async () => {
     setTab('questions'); await loadRefs();
-    app.innerHTML = `<div class="pagehead"><h1>Ask a question</h1></div>
+    paint(`<div class="pagehead"><h1>Ask a question</h1></div>
       <div class="card form" style="max-width:1000px">${field('Title — be specific, e.g. "How do I write a good reproduction note?"', '<input id="title">')}
         <div class="grid-2">${field('Tags', '<input id="tags" placeholder="topic, area, howto">')}${field('Department', `<select id="dept">${deptOpts(DEPTS[0] && DEPTS[0].slug)}</select>`)}</div>
         ${field('Body (markdown) — context, what you already checked, why it matters', '<div id="ed"></div>')}
-        <div class="form-actions"><a class="btn" href="#/questions">Cancel</a><button class="btn ok" id="save">Post question</button></div></div>`;
+        <div class="form-actions"><a class="btn" href="#/questions">Cancel</a><button class="btn ok" id="save">Post question</button></div></div>`);
     const ed = new MdEditor($('#ed'), { onSave: save, placeholder: '## Context\n\n## What I already checked\n\n## Why it matters' });
     $('#save').onclick = () => save(ed.value);
     async function save(body) { try { const r = await api('POST', '/api/questions', { title: $('#title').value, body, tags: $('#tags').value, department: $('#dept').value }); toast('posted'); location.hash = `#/questions/${r.id}`; } catch (e) { fail(e); } }
@@ -448,13 +542,13 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         ${p.comments.length ? `<div class="comments">${p.comments.map((c) => `<div class="c">${MD.inline(c.body)} — <span class="mono">${esc(c.author)}</span> <span class="ts">${ago(c.created_at)}</span></div>`).join('')}</div>` : ''}
         <div class="cform hidden inline-form"><input placeholder="add a comment…"><button class="btn sm">post</button></div>
       </div></div>`;
-    app.innerHTML = `
+    paint(`
       <div class="pagehead"><div><h1 style="text-transform:none;font-family:var(--sans);font-size:1.6rem">${esc(q.title)}</h1><div class="sub">${badge(q.status)} · asked ${ago(q.created_at)} · viewed ${q.views}× · ${q.answers.length} answers ${tags(q.tags, '#/questions')}</div></div>
         <div class="actions">${q.status !== 'closed' ? '<button class="btn" id="close">Close</button>' : '<button class="btn" id="reopen">Reopen</button>'}</div></div>
       <div class="card">${post('question', q)}</div>
       <h2>${q.answers.length} Answer${q.answers.length === 1 ? '' : 's'}</h2>
       <div class="card">${q.answers.map((a) => post('answer', a)).join('') || '<div class="empty">no answers yet — be the first</div>'}</div>
-      ${q.status !== 'closed' ? `<div class="card"><h3>Your answer</h3><div id="aed"></div><div class="form-actions" style="margin-top:.6rem"><button class="btn ok" id="post">Post answer as ${esc(who())}</button></div></div>` : ''}`;
+      ${q.status !== 'closed' ? `<div class="card"><h3>Your answer</h3><div id="aed"></div><div class="form-actions" style="margin-top:.6rem"><button class="btn ok" id="post">Post answer as ${esc(who())}</button></div></div>` : ''}`);
     wireWikilinks(app, known);
     const vote = async (kind, tid, cur, val) => { try { await api('POST', '/api/questions/vote', { target_type: kind, target_id: +tid, value: cur === val ? 0 : val }); render(); } catch (e) { fail(e); } };
     app.querySelectorAll('.post').forEach((el) => {
@@ -481,7 +575,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     if ($('#close')) $('#close').onclick = async () => { await api('PATCH', `/api/questions/${id}`, { status: 'closed' }).catch(fail); render(); };
     if ($('#reopen')) $('#reopen').onclick = async () => { await api('PATCH', `/api/questions/${id}`, { status: q.accepted_answer_id ? 'answered' : 'open' }).catch(fail); render(); };
     if ($('#aed')) { const aed = new MdEditor($('#aed'), { onSave: postAnswer, minHeight: '260px', knownSlugs: known, placeholder: 'Answer with evidence: source deep links, wiki [[pages]], what you verified vs. inferred.' }); $('#post').onclick = () => postAnswer(aed.value); }
-    async function postAnswer(body) { try { await api('POST', `/api/questions/${id}/answers`, { body }); toast('answer posted'); render(); } catch (e) { fail(e); } }
+    async function postAnswer(body) { try { await api('POST', `/api/questions/${id}/answers`, { body }); toast('answer posted'); MdEditor.clearDraft('aed'); render(); } catch (e) { fail(e); } }
   });
 
   // ------------------------------------------------------------ AGENTS
@@ -491,11 +585,11 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     for (const a of AGENTS) (byDept[a.department || ''] ||= []).push(a);
     const deptName = (s) => (DEPTS.find((d) => d.slug === s) || {}).name || (s || 'Unassigned');
     const deptDesc = (s) => (DEPTS.find((d) => d.slug === s) || {}).description || '';
-    app.innerHTML = `<div class="pagehead"><div><h1>Agents</h1><div class="sub">${AGENTS.length} agents · ${DEPTS.length} department${DEPTS.length === 1 ? '' : 's'} · reputation = SE-style score from votes & accepted answers</div></div></div>
+    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub">${AGENTS.length} agents · ${DEPTS.length} department${DEPTS.length === 1 ? '' : 's'} · reputation = SE-style score from votes & accepted answers</div></div></div>
       ${Object.keys(byDept).sort().map((d) => `<div class="dept-head"><h2>${esc(deptName(d))}</h2><span class="d">${esc(deptDesc(d))}</span></div>
         <div class="agent-grid">${byDept[d].sort((a, b) => (a.role === 'lead' ? -1 : 1) - (b.role === 'lead' ? -1 : 1) || a.name.localeCompare(b.name)).map((a) => `<div class="agent-card"><span class="rep" title="reputation">${a.reputation}</span><h3><a href="#/agents/${a.slug}">${esc(a.name)}</a></h3>${badge(a.role)} <span class="mono small muted">${esc(a.slug)}</span><p class="small" style="margin:.5rem 0">${esc(a.description)}</p>
           <div class="cb">${a.codebases ? 'pkgs: ' + esc(a.codebases) : ''}</div>
-          <div class="meta mono small muted" style="margin-top:.5rem">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen) || 'never'}</div></div>`).join('')}</div>`).join('') || '<div class="empty">No agents registered.</div>'}`;
+          <div class="meta mono small muted" style="margin-top:.5rem">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen) || 'never'}</div></div>`).join('')}</div>`).join('') || '<div class="empty">No agents registered.</div>'}`);
   });
 
   route(/^\/agents\/([^/]+)$/, async (slug) => {
@@ -503,7 +597,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const a = await GET(`/api/agents/${encodeURIComponent(slug)}`);
     const inbox = await GET(`/api/agents/${encodeURIComponent(slug)}/inbox`);
     const pages = (await GET('/api/wiki')).filter((p) => p.author === slug || p.updated_by === slug);
-    app.innerHTML = `<div class="pagehead"><div><h1 style="text-transform:none;font-family:var(--sans)">${esc(a.name)}</h1><div class="sub">${badge(a.role)} <span class="mono">${esc(a.slug)}</span> · dept ${esc(a.department || '—')} · rep <b>${a.reputation}</b> · last seen ${ago(a.last_seen) || 'never'}</div></div>
+    paint(`<div class="pagehead"><div><h1 style="text-transform:none;font-family:var(--sans)">${esc(a.name)}</h1><div class="sub">${badge(a.role)} <span class="mono">${esc(a.slug)}</span> · dept ${esc(a.department || '—')} · rep <b>${a.reputation}</b> · last seen ${ago(a.last_seen) || 'never'}</div></div>
         <div class="actions"><a class="btn" href="#/tickets/new?assignee=${encodeURIComponent(slug)}&dept=${encodeURIComponent(a.department)}">+ Ticket for ${esc(slug)}</a></div></div>
       ${layout({ id: 'agent', body: `
         <div class="card"><p>${esc(a.description)}</p><dl class="kv"><dt>codebases</dt><dd>${esc(a.codebases || '—')}</dd><dt>reads first</dt><dd>${esc(a.wiki_pages || '—')}</dd><dt>agent file</dt><dd>${esc(a.agent_file || '—')}</dd></dl></div>
@@ -511,7 +605,107 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <div class="card"><h3>Inbox preview (what it sees on wake)</h3><div class="mono small">claimable: ${inbox.claimable_tickets.length} · unanswered Qs in dept: ${inbox.unanswered_questions.length}</div></div>`,
         aside: `
         <div class="card tint-y"><h3>Wiki pages</h3>${pages.map((p) => `<div><a href="#/wiki/${p.slug}">${esc(p.title)}</a></div>`).join('') || '<span class="muted">none yet</span>'}</div>
-        <div class="card"><h3>Activity</h3><div class="feed">${a.activity.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>` })}`;
+        <div class="card"><h3>Activity</h3><div class="feed">${a.activity.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>` })}`);
+  });
+
+  route(/^\/orchestrator$/, async () => {
+    setTab('orchestrator');
+    const projects = await GET('/api/runner/projects');
+    let sessions = await GET('/api/runner/sessions');
+    let activeId = qs().session || (sessions[0] && sessions[0].id);
+    if (!activeId) { const created=await api('POST','/api/runner/sessions',{title:'New chat'}); activeId=created.id; sessions=await GET('/api/runner/sessions'); }
+    let detail = await GET(`/api/runner/sessions/${encodeURIComponent(activeId)}`);
+    const grouped = (projectId) => sessions.filter(s => String(s.project_id||'')===String(projectId||''));
+    const sessionLink = (s) => `<a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a>`;
+    const projectList = `<div class="chat-project"><div class="chat-project-head">Unsorted</div>${grouped(null).map(sessionLink).join('')||'<small class="muted">No chats</small>'}</div>` + projects.map(p=>`<div class="chat-project"><div class="chat-project-head">${esc(p.name)}</div>${grouped(p.id).map(sessionLink).join('')||'<small class="muted">No chats</small>'}</div>`).join('');
+    const messageNode = (m) => {
+      const node=document.createElement('div'); node.className=`chat-message ${m.role==='assistant'?'assistant':'user'}`; node.dataset.messageId=m.id;
+      node.innerHTML=`<div class="chat-role">${m.role==='assistant'?'Orchestrator':'You'}</div><div class="chat-text"></div>`;
+      updateMessageNode(node,m); return node;
+    };
+    const updateMessageNode = (node,m) => {
+      const body=m.body||''; if(node.dataset.body===body)return;
+      if(hasSelection(node))return;
+      const text=node.querySelector('.chat-text');
+      text.innerHTML=m.role==='assistant'?MD.render(body):esc(body).replace(/\n/g,'<br>');
+      node.dataset.body=body;
+    };
+    const syncMessages = (box,messages) => {
+      const visible=messages.filter(m=>m.role!=='system'), logs=messages.filter(m=>m.role==='system');
+      const scroll=scrollState(box);
+      let empty=box.querySelector('.chat-empty');
+      if(!visible.length){if(!empty){empty=document.createElement('div');empty.className='chat-empty';empty.textContent='Start a conversation with the Coms Board orchestrator.';box.prepend(empty);}}
+      else empty?.remove();
+      let cursor=box.querySelector('.chat-message')||box.querySelector('.chat-empty')||box.querySelector('details.chat-logs');
+      for(const m of visible){
+        let node=box.querySelector(`.chat-message[data-message-id="${m.id}"]`);
+        if(!node)node=messageNode(m); else updateMessageNode(node,m);
+        if(node!==cursor)box.insertBefore(node,cursor);
+        cursor=node.nextElementSibling;
+      }
+      let details=box.querySelector('details.chat-logs');
+      if(logs.length&&!details){details=document.createElement('details');details.className='chat-logs';details.innerHTML='<summary></summary><div class="chat-log-list"></div>';box.appendChild(details);}
+      if(details){details.querySelector('summary').textContent=`Debug logs (${logs.length})`;const list=details.querySelector('.chat-log-list');
+        for(const m of logs){let node=list.querySelector(`[data-message-id="${m.id}"]`);if(!node){node=document.createElement('div');node.dataset.messageId=m.id;node.innerHTML=`<b>${esc(m.kind)}</b> · ${esc(m.created_at)}<pre></pre>`;list.appendChild(node);}const pre=node.querySelector('pre');
+          if(pre.textContent!==(m.body||'')&&!hasSelection(node))pre.textContent=m.body||'';
+        }
+      }
+      restoreScroll(box,scroll);
+    };
+    paint(`<section class="chat-page" id="orch-page"><aside class="chat-sidebar" id="orch-sidebar"><div class="chat-side-head"><b>Chats</b><button class="btn sm" id="new-project">+ Project</button></div><button class="btn primary chat-new" id="new-chat">＋ New chat</button><div class="chat-projects">${projectList}</div><div class="chat-project-create hidden" id="project-create"><input id="project-name" placeholder="Project name"><button class="btn sm" id="save-project">Create</button></div></aside><div class="chat-main"><div class="chat-head"><button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button><div class="chat-title"><b id="chat-title">${esc(detail.title)}</b><small id="chat-subtitle">${detail.busy?'Orchestrator is responding':detail.backend?`ACP · ${esc(detail.backend)}`:'Ready'}</small></div><label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id||'')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label><span class="chat-status badge ${detail.busy?'in_progress':'open'}" id="chat-status">${detail.busy?'working':'ready'}</span></div><div id="chat-messages" class="chat-transcript"></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" placeholder="Message the orchestrator…"></textarea><button class="btn primary" ${detail.busy?'disabled':''}>Send</button></form></div></section>`);
+    syncMessages($('#chat-messages'),detail.messages);
+    $('#chat-messages').scrollTop=$('#chat-messages').scrollHeight;
+    $('#new-chat').onclick=async()=>{try{const project_id=detail.project_id||null;const s=await api('POST','/api/runner/sessions',{title:'New chat',project_id});location.hash=`#/orchestrator?session=${encodeURIComponent(s.id)}`;}catch(e){fail(e);}};
+    $('#new-project').onclick=()=>{$('#project-create').classList.toggle('hidden');$('#project-name').focus();};
+    $('#save-project').onclick=async()=>{const name=$('#project-name').value.trim();if(!name)return;try{await api('POST','/api/runner/projects',{name});render();}catch(e){fail(e);}};
+    $('#move-project').onchange=async()=>{try{await api('PATCH',`/api/runner/sessions/${encodeURIComponent(activeId)}`,{project_id:$('#move-project').value||null});sessions=await GET('/api/runner/sessions');$('#orch-sidebar .chat-projects').innerHTML=`<div class="chat-project"><div class="chat-project-head">Unsorted</div>${grouped(null).map(sessionLink).join('')||'<small class="muted">No chats</small>'}</div>`+projects.map(p=>`<div class="chat-project"><div class="chat-project-head">${esc(p.name)}</div>${grouped(p.id).map(sessionLink).join('')||'<small class="muted">No chats</small>'}</div>`).join('');}catch(e){fail(e);}};
+    $('#chat-menu').onclick=()=>$('#orch-page').classList.toggle('sidebar-open');
+    let sending=false;
+    $('#chat-form').onsubmit=async e=>{
+      e.preventDefault();
+      const input=$('#chat-input'),button=$('#chat-form button'),body=input.value.trim();
+      if(!body||sending||detail.busy)return;
+      sending=true;button.disabled=true;
+      try{
+        await api('POST',`/api/runner/sessions/${encodeURIComponent(activeId)}/messages`,{body});
+        input.value='';detail.busy=true;$('#chat-status').textContent='working';$('#chat-status').className='chat-status badge in_progress';
+      }catch(err){fail(err);button.disabled=false;}finally{sending=false;}
+    };
+    $('#chat-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#chat-form').requestSubmit();}};
+    poll(async()=>{detail=await GET(`/api/runner/sessions/${encodeURIComponent(activeId)}`);const box=$('#chat-messages');if(!box)return;syncMessages(box,detail.messages);const status=$('#chat-status');status.textContent=detail.busy?'working':'ready';status.className=`chat-status badge ${detail.busy?'in_progress':'open'}`;$('#chat-form button').disabled=detail.busy||sending;$('#chat-title').textContent=detail.title;$('#chat-subtitle').textContent=detail.busy?'Orchestrator is responding':detail.backend?`ACP · ${detail.backend}`:'Ready';},1400);
+  });
+
+  route(/^\/debug$/, async () => {
+    setTab('debug'); const q=qs();
+    const data=await GET(`/api/runner/debug${q.ticket?`?ticket=${encodeURIComponent(q.ticket)}`:''}`);
+    const messageView=m=>`<div class="debug-message ${m.kind==='acp-response'?'response':''}"><div><b>${esc(m.role)} · ${esc(m.kind)}</b><span class="ts">${esc(m.created_at)}</span></div><pre>${esc(m.body||'')}</pre></div>`;
+    paint(`<div class="pagehead"><div><h1>Agent debug</h1><div class="sub">ACP transcripts, tool events, review decisions and prior runs${q.ticket?` · ticket #${esc(q.ticket)}`:''}</div></div>${q.ticket?`<a class="btn" href="#/tickets/${encodeURIComponent(q.ticket)}">Back to ticket</a>`:''}</div>
+      <div class="debug-runs">${data.runs.map(r=>`<details class="card debug-run"><summary><b>Run #${r.id} · Ticket #${r.ticket_id} ${esc(r.ticket_title)}</b><span>${badge(r.status)} ${badge(r.priority)} · ${esc(r.backend)} · started ${esc(r.started_at||'—')}</span></summary><div class="debug-run-actions"><a href="#/tickets/${r.ticket_id}">Open ticket</a>${r.session_id?`<span class="mono small">ACP session ${esc(r.session_id)}</span>`:''}</div>${r.error?`<div class="tint-p">${esc(r.error)}</div>`:''}${r.reviews.map(x=>`<div class="debug-review"><b>Orchestrator review: ${esc(x.decision||x.status)}</b> · ${esc(x.backend)}<p>${esc(x.reason)}</p></div>`).join('')}${r.messages.map(messageView).join('')||'<div class="empty">No stored messages for this run.</div>'}</details>`).join('')||'<div class="empty">No agent runs recorded yet.</div>'}</div>
+      ${data.reviews.length?`<div class="card"><h2>Orchestrator review history</h2>${data.reviews.map(x=>`<div class="debug-review"><a href="#/tickets/${x.ticket_id}">Ticket #${x.ticket_id} ${esc(x.ticket_title)}</a> · ${badge(x.status)}${x.decision?` · ${esc(x.decision)}`:''} · ${esc(x.backend)}<p>${esc(x.reason||'Review in progress')}</p><small class="ts">${esc(x.created_at)}${x.finished_at?` · finished ${esc(x.finished_at)}`:''}</small></div>`).join('')}</div>`:''}
+      ${data.unattached_messages.length?`<details class="card debug-run"><summary>Ticket chat and standalone review logs (${data.unattached_messages.length})</summary>${data.unattached_messages.map(m=>`<div class="debug-message"><div><b>Ticket #${m.ticket_id} · ${esc(m.role)} · ${esc(m.kind)}</b><span class="ts">${esc(m.created_at)}</span></div><pre>${esc(m.body||'')}</pre></div>`).join('')}</details>`:''}`);
+  });
+
+  route(/^\/runner$/, async () => {
+    setTab('runner');
+    const [s, templates, tickets] = await Promise.all([GET('/api/runner/settings'), GET('/api/runner/templates'), GET('/api/tickets?all=1')]);
+    paint(`<div class="pagehead"><div><h1>Agent runner</h1><div class="sub">ACP backend controls, execution templates, active work and ticket transcripts</div></div></div>
+      <div class="layout"><div class="layout-body">
+        <div class="card"><h2>Backend settings</h2><div class="grid-3">
+          <label>Active backend<select id="rb">${['opencode','codex','claude'].map(x=>`<option value="${x}"${s.active_backend===x?' selected':''}>${x}${(s.backends.find(b=>b.id===x)||{}).available?' · detected':''}</option>`).join('')}</select></label>
+          <label>Model<div style="display:flex;gap:.35rem"><select id="runner-model" style="min-width:0;flex:1"><option value="">Loading ACP models…</option></select><button class="btn sm" id="refresh-models" type="button" title="Refresh available models">↻</button></div><small id="model-note" class="muted">Model list comes from the selected backend.</small></label>
+          <label>Parallel backend agents<input id="rp" type="number" min="1" max="16" value="${esc(s.parallel_agents)}"></label>
+          <label>Workspace path<input id="rw" value="${esc(s.workspace)}"><small class="muted">A separate, existing directory for agent work.</small>${s.workspace_error?`<small class="error">${esc(s.workspace_error)}</small>`:''}</label></div>
+          <div class="grid-3">${['opencode','codex','claude'].map(x=>`<label>${x} command (optional)<input id="cmd-${x}" value="${esc(s[x+'_command']||'')}" placeholder="${x==='opencode'?'opencode acp':x==='codex'?'codex-acp':'claude-code-acp'}"></label>`).join('')}</div>
+          <div class="form-actions"><button class="btn primary" id="save-runner">Save settings</button></div><div class="small muted">Commands run in the configured workspace. The runner logs ACP output and permissions on each ticket.</div></div>
+        <div class="card"><h2>Agent templates</h2><div class="list">${templates.map(t=>`<div class="item"><div class="main"><b>${esc(t.name)}</b> ${t.backend?badge(t.backend):'<span class="muted">active backend</span>'}<div class="small muted">${esc(t.prompt)}</div></div></div>`).join('')||'<div class="empty">No templates yet.</div>'}</div>
+          <form id="template-form" class="form"><div class="grid-3"><label>Name<input id="tn" required></label><label>Backend override<select id="tb"><option value="">Active backend</option><option>opencode</option><option>codex</option><option>claude</option></select></label><label>Enabled<select id="te"><option value="1">yes</option><option value="0">no</option></select></label></div><label>Instructions<textarea id="tp" rows="4" placeholder="Specialist role and working instructions…"></textarea></label><button class="btn ok">Save template</button></form></div>
+        <div class="card"><h2>Execution queue</h2><div class="list">${tickets.filter(t=>t.ready_for_execution).map(t=>`<div class="item"><div class="main"><a class="title" href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="meta">${badge(t.status)}${badge(t.priority)} · ${t.assignee?`assignee ${chip(t.assignee)}`:'unassigned'} · ${t.tags.toLowerCase().includes('human')?'human tagged':'ready'}</div></div></div>`).join('')||'<div class="empty">No tickets marked ready.</div>'}</div></div>
+      </div><aside class="layout-aside"><div class="card tint-y"><h3>Safety gates</h3><p>Only tickets with <b>Ready for agent execution</b> enabled enter the queue. Tickets assigned to a registered human, with an assignee beginning <code>human</code>, or tagged <code>human</code> are skipped.</p><p>Priority order: p0 → p1 → p2 → p3.</p></div><div class="card"><h3>Monitoring</h3><p>Open a ticket’s <b>Agent runner chat</b> to view live transcript, debug logs and run status.</p></div></aside></div>`);
+    let modelRequest=0;
+    const loadRunnerModels=async()=>{const request=++modelRequest;const backend=$('#rb').value,select=$('#runner-model'),note=$('#model-note');select.innerHTML='<option value="">Loading models…</option>';select.disabled=true;try{const data=await GET(`/api/runner/models?backend=${encodeURIComponent(backend)}`);if(request!==modelRequest)return;select.innerHTML='<option value="">Use ACP default</option>'+data.models.map(m=>`<option value="${esc(m.value)}">${esc(m.name||m.value)}</option>`).join('');const desired=s['model_'+backend]||data.current||'';if(data.models.some(m=>m.value===desired))select.value=desired;note.textContent=data.models.length?`${data.models.length} model${data.models.length===1?'':'s'} available from ${backend}.`:`This backend did not advertise a model selector; it will use its configured default.`;}catch(e){if(request!==modelRequest||e.name==='AbortError')return;select.innerHTML='<option value="">Use ACP default</option>';note.textContent=e.message||'Could not load models. Check backend command and authentication.';}finally{if(request===modelRequest&&select.isConnected)select.disabled=false;}};
+    $('#rb').onchange=loadRunnerModels;$('#refresh-models').onclick=loadRunnerModels;loadRunnerModels();
+    $('#save-runner').onclick=async()=>{if($('#runner-model').disabled){toast('Wait for model discovery to finish.',true);return;}const payload={active_backend:$('#rb').value,parallel_agents:+$('#rp').value,workspace:$('#rw').value}; for(const x of ['opencode','codex','claude']) payload[x+'_command']=$('#cmd-'+x).value.trim();payload['model_'+payload.active_backend]=$('#runner-model').value; try{await api('PUT','/api/runner/settings',payload);toast('runner settings saved');render();}catch(e){fail(e);}};
+    $('#template-form').onsubmit=async e=>{e.preventDefault();try{await api('POST','/api/runner/templates',{name:$('#tn').value,prompt:$('#tp').value,backend:$('#tb').value,enabled:$('#te').value==='1'});toast('template saved');render();}catch(err){fail(err);}};
   });
 
   // ------------------------------------------------------------ SEARCH / ACTIVITY
@@ -519,18 +713,18 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     setTab('');
     const q = qs().q || ''; $('#q').value = q;
     const r = q ? await GET(`/api/search?q=${encodeURIComponent(q)}&limit=25`) : { wiki: [], tickets: [], questions: [] };
-    app.innerHTML = `<div class="pagehead"><h1>Search</h1><div class="sub mono">“${esc(q)}” · ${r.wiki.length + r.tickets.length + r.questions.length} hits</div></div>
+    paint(`<div class="pagehead"><h1>Search</h1><div class="sub mono">“${esc(q)}” · ${r.wiki.length + r.tickets.length + r.questions.length} hits</div></div>
       <div class="results row"><div class="col"><h3>Wiki (${r.wiki.length})</h3>${r.wiki.map((w) => `<div class="card flat"><a class="title" href="#/wiki/${w.slug}"><b>${esc(w.title)}</b></a><div class="snip">${MD.esc(w.snippet).replace(/\[([^\]]+)\]/g, '<b>$1</b>')}</div><div class="ts">${esc(w.slug)} · ${ago(w.updated_at)}</div></div>`).join('') || '<div class="empty">—</div>'}</div>
       <div class="col"><h3>Tickets (${r.tickets.length})</h3>${r.tickets.map((t) => `<div class="card flat"><a href="#/tickets/${t.id}"><b>#${t.id} ${esc(t.title)}</b></a><div>${badge(t.status)}${badge(t.priority)} ${chip(t.assignee)}</div></div>`).join('') || '<div class="empty">—</div>'}</div>
-      <div class="col"><h3>Questions (${r.questions.length})</h3>${r.questions.map((b) => `<div class="card flat"><a href="#/questions/${b.question_id}"><b>${esc(b.title)}</b></a><div class="snip">${MD.esc(b.snippet).replace(/\[([^\]]+)\]/g, '<b>$1</b>')}</div><div>${badge(b.status)} score ${b.score} · ${chip(b.author)}</div></div>`).join('') || '<div class="empty">—</div>'}</div></div>`;
+      <div class="col"><h3>Questions (${r.questions.length})</h3>${r.questions.map((b) => `<div class="card flat"><a href="#/questions/${b.question_id}"><b>${esc(b.title)}</b></a><div class="snip">${MD.esc(b.snippet).replace(/\[([^\]]+)\]/g, '<b>$1</b>')}</div><div>${badge(b.status)} score ${b.score} · ${chip(b.author)}</div></div>`).join('') || '<div class="empty">—</div>'}</div></div>`);
   });
 
   route(/^\/activity$/, async () => {
     setTab('activity');
     const q = qs();
     const list = await GET(`/api/activity?limit=200${q.actor ? `&actor=${encodeURIComponent(q.actor)}` : ''}`);
-    app.innerHTML = `<div class="pagehead"><div><h1>Activity</h1><div class="sub">${q.actor ? `actor: ${esc(q.actor)}` : 'everything, newest first'}</div></div></div>
-      <div class="card"><div class="feed">${list.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>`;
+    paint(`<div class="pagehead"><div><h1>Activity</h1><div class="sub">${q.actor ? `actor: ${esc(q.actor)}` : 'everything, newest first'}</div></div></div>
+      <div class="card"><div class="feed">${list.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>`);
   });
 
   render();

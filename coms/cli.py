@@ -233,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--dept", default=""); x.add_argument("--assignee", default="")
     x.add_argument("--tags"); x.add_argument("--due")
     x.add_argument("--parent", type=int, help="parent ticket id (story > job > task)")
+    x.add_argument("--template", type=int, help="agent template id")
+    x.add_argument("--ready", action="store_true", help="release ticket to the agent execution queue")
     x = t.add_parser("claim"); x.add_argument("id", type=int)
     x = t.add_parser("update"); x.add_argument("id", type=int)
     x.add_argument("--status", choices=api.TICKET_STATUSES); x.add_argument("--priority", choices=api.PRIORITIES)
@@ -271,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("agent", help="agent registry").add_subparsers(dest="cmd", required=True)
     x = a.add_parser("list"); x.add_argument("--dept")
     x = a.add_parser("get"); x.add_argument("slug")
+    x = a.add_parser("templates", help="list agent execution templates")
     x = a.add_parser("register"); x.add_argument("slug"); x.add_argument("--name")
     x.add_argument("--dept", default=""); x.add_argument("--role", default="expert")
     x.add_argument("--description", default=""); x.add_argument("--codebases", default="")
@@ -354,7 +357,9 @@ def main(argv=None) -> int:
                 _need_identity(me)
                 _out(args, api.create_ticket(conn, args.title, _read_body(args), me, args.type,
                                              args.priority, args.dept, args.assignee, args.tags,
-                                             args.due, parent_id=args.parent),
+                                             args.due, parent_id=args.parent,
+                                             ready_for_execution=args.ready,
+                                             agent_template_id=args.template),
                      _t_ticket)
             elif c == "claim":
                 _need_identity(me)
@@ -419,6 +424,8 @@ def main(argv=None) -> int:
                 _out(args, api.list_agents(conn, args.dept),
                      lambda rows: "\n".join(f"{a['slug']:<34} {a['role']:<8} {a['department']:<14} rep={a['reputation']:<4} "
                                             f"open={a['open_tickets']}  {_short(a['description'], 60)}" for a in rows))
+            elif c == "templates":
+                _out(args, [dict(r) for r in conn.execute("SELECT id,name,backend,enabled FROM agent_templates ORDER BY name")])
             elif c == "get":
                 _out(args, api.get_agent(conn, args.slug))
             elif c == "register":
