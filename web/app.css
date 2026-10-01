@@ -190,6 +190,8 @@ table.grid td a.title:hover { text-decoration: underline; }
 #toast .t { border: var(--line); background: var(--green); padding: .6rem 1rem; box-shadow: var(--shadow); font-family: var(--mono); font-weight: 700; font-size: .85rem; animation: pop .15s ease-out; }
 #toast .t.err { background: var(--red); }
 @keyframes pop { from { transform: translateY(10px) scale(.96); opacity: 0; } to { transform: none; opacity: 1; } }
+.model-spinner { display:inline-block; width:.72em; height:.72em; margin-right:.35em; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; vertical-align:-.08em; animation:model-spin .7s linear infinite; }
+@keyframes model-spin { to { transform:rotate(360deg); } }
 
 /* ---------- markdown editor: see markdown-editor.css (single-pane live editor) */
 

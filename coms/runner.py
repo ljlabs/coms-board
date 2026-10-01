@@ -50,6 +50,7 @@ def backend_command(name, settings):
 class Runner:
     def __init__(self, *, start=False):
         self.lock = threading.RLock(); self.active = {}; self.conns = {}; self.stopping = threading.Event()
+        self.model_conns = {}; self.model_lock = threading.RLock()
         self.orchestrator_conn = None; self.orchestrator_busy = False
         self.orchestrator_session = None
         self.review_conns = {}
@@ -87,11 +88,15 @@ class Runner:
                 raise
             self.stopping.clear()
             self.thread = threading.Thread(target=self._loop, daemon=True, name='coms-agent-runner'); self.thread.start()
+            threading.Thread(target=self._warm_active_backend, daemon=True, name='coms-model-warmup').start()
     def stop(self):
         self.stopping.set()
         with self.lock:
             connections=list(self.conns.values())
             connections.extend(self.review_conns.values())
+            with self.model_lock:
+                connections.extend(self.model_conns.values())
+                self.model_conns.clear()
             if self.orchestrator_conn: connections.append(self.orchestrator_conn)
             self.conns.clear()
         for c in connections: c.cancel(); c.close()
@@ -131,12 +136,27 @@ class Runner:
         settings=self.settings(); cmd=backend_command(backend,settings)
         if not cmd: raise ValueError('No ACP command configured for '+backend)
         cwd=workspace_path(settings)
-        c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=lambda _m:None,on_request=lambda _m,respond:respond({'outcome':{'outcome':'cancelled'}}),on_close=lambda _e:None,logger=lambda _m:None,env={'COMS_DB':str(db.db_path()),'COMS_AGENT':'model-discovery'})
-        try:
-            c.start(); c.session_new(cwd=cwd)
+        key=(backend,tuple(cmd),cwd)
+        with self.model_lock:
+            c=self.model_conns.get(key)
+            if c is not None and not c.alive:
+                self.model_conns.pop(key,None); c.close(); c=None
+            if c is None:
+                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=lambda _m:None,on_request=lambda _m,respond:respond({'outcome':{'outcome':'cancelled'}}),on_close=lambda _e:None,logger=lambda _m:None,env={'COMS_DB':str(db.db_path()),'COMS_AGENT':'model-discovery'})
+                try:
+                    c.start(); c.session_new(cwd=cwd); self.model_conns[key]=c
+                except Exception:
+                    c.close(); raise
             option=next((o for o in c.config_options if o.get('id')=='model'),{})
             return {'backend':backend,'models':c.models(),'current':c.current_model(),'config_id':option.get('id','model')}
-        finally: c.close()
+    def _warm_active_backend(self):
+        try: self.discover_models(self.settings().get('active_backend','opencode'))
+        except Exception: logging.info('ACP model warm-up will retry on demand',exc_info=True)
+    def _reset_and_warm_models(self):
+        with self.model_lock:
+            connections=list(self.model_conns.values()); self.model_conns.clear()
+            for c in connections: c.close()
+        self._warm_active_backend()
     def settings(self):
         conn=db.connect(); rows=conn.execute('SELECT key,value FROM runner_settings').fetchall(); return {r[0]:r[1] for r in rows}
     def _message(self, tid, rid, role, kind, body):

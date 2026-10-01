@@ -16,6 +16,7 @@ import json
 import mimetypes
 import re
 import sys
+import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -334,6 +335,7 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
                 if key not in allowed: continue
                 conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)", (key, str(value)))
             conn.commit()
+        threading.Thread(target=RUNNER._reset_and_warm_models, daemon=True, name="coms-model-warmup").start()
         return {"saved": True}
 
 
