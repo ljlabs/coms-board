@@ -64,6 +64,29 @@ class TestServer(unittest.TestCase):
         closed = self.req("PATCH", f"/api/tickets/{j['id']}", {"status": "done"})
         self.assertIn("open_children_warning", closed)
 
+    def test_project_boards_over_http(self):
+        self.req("POST", "/api/wiki", {"slug": "board-context", "title": "Codebase context", "body": "docs"})
+        board = self.req("POST", "/api/ticket-boards", {"name": "HTTP project", "wiki_slug": "board-context"})
+        bid = board["id"]
+        ticket = self.req("POST", "/api/tickets", {"title": "httpboardword", "board_id": bid})
+        self.assertEqual(ticket["board_id"], bid)
+        self.assertEqual([t["id"] for t in self.req("GET", f"/api/tickets?board={bid}")], [ticket["id"]])
+        self.assertEqual([t["id"] for t in self.req("GET", f"/api/tickets?q=httpboardword&board={bid}")], [ticket["id"]])
+        self.assertEqual(self.req("GET", "/api/tickets?q=httpboardword&board=1"), [])
+        updated = self.req("PATCH", f"/api/ticket-boards/{bid}", {"name": "Renamed HTTP project"})
+        self.assertEqual(updated["wiki_slug"], "board-context")
+        self.assertEqual(updated["ticket_count"], 1)
+        for bad in ("bad", "0", "-1"):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.req("GET", f"/api/tickets?board={bad}")
+            self.assertEqual(cm.exception.code, 400)
+        self.req("DELETE", f"/api/ticket-boards/{bid}")
+        self.assertFalse(any(b["id"] == bid for b in self.req("GET", "/api/ticket-boards")))
+        self.assertEqual(self.req("GET", "/api/wiki/board-context")["body"], "docs")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.req("GET", f"/api/tickets/{ticket['id']}")
+        self.assertEqual(cm.exception.code, 404)
+
     def test_links_over_http(self):
         t = self.req("POST", "/api/tickets", {"title": "linked work"})
         self.req("POST", "/api/wiki", {"title": "Note Page", "body": "b"})

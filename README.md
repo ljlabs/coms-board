@@ -45,6 +45,34 @@ python3 -m coms.server
 
 Open `http://127.0.0.1:8765/`. Run `python3 coms.py --help` for the full CLI.
 
+On **Tickets**, use the **Project board** dropdown to switch boards, or use
+**New board**, **Edit board**, and **Delete board** to manage them. Each board
+has a name, description, and optional link to a shared wiki page for codebase
+context and docs. List and kanban views show only the selected board's tickets;
+the selection is remembered. Ticket forms let you choose the board or move
+existing standalone tickets. Parent and child tickets must share a board.
+
+Existing tickets are kept in **Default**, which can be renamed but cannot be
+deleted. Deleting another board requires confirmation in the UI and removes
+its tickets, comments, and ticket links. Linked wiki pages are kept. Wiki,
+questions, agents, search, activity, and dashboard summaries remain shared.
+
+Agents can use project boards through the CLI (board IDs come from creation or
+`ticket-board list`):
+
+```sh
+python3 coms.py ticket-board create "My project" --wiki-page hello
+python3 coms.py ticket create "Project task" --board 2
+python3 coms.py ticket list --board 2
+python3 coms.py ticket search "Project" --board 2
+python3 coms.py ticket-board update 2 "Renamed project"
+```
+
+Omitting `--board` preserves existing CLI behavior: ticket lists and search span
+all boards, and new tickets go to Default or inherit their parent's board. The
+HTTP API exposes board management at `/api/ticket-boards`, accepts `board_id`
+when creating/updating tickets, and filters ticket lists/search with `?board=ID`.
+
 ## Configuration
 
 | Variable     | Default          | Purpose                                  |

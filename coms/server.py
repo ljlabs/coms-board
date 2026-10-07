@@ -220,10 +220,32 @@ def r_wiki_rev(conn, m, mm, q, b, actor):
     return api.wiki_revision(conn, int(mm.group(1))) if m == "GET" else None
 
 
+def r_ticket_boards(conn, m, _mm, q, b, actor):
+    if m == "GET":
+        return api.list_ticket_boards(conn)
+    if m == "POST":
+        return api.save_ticket_board(conn, b.get("name", ""), actor,
+                                     b.get("description", ""), b.get("wiki_slug", ""))
+
+
+def r_ticket_board(conn, m, mm, q, b, actor):
+    bid = int(mm.group(1))
+    if m == "GET":
+        return api.get_ticket_board(conn, bid)
+    if m in ("PUT", "PATCH"):
+        board = api.get_ticket_board(conn, bid)
+        return api.save_ticket_board(conn, b.get("name", board["name"]), actor,
+                                     b.get("description", board["description"]),
+                                     b.get("wiki_slug", board["wiki_slug"]), board_id=bid)
+    if m == "DELETE":
+        api.delete_ticket_board(conn, bid, actor)
+        return {"deleted": bid}
+
+
 def r_tickets(conn, m, _mm, q, b, actor):
     if m == "GET":
         if q.get("q"):
-            return api.search_tickets(conn, q["q"])
+            return api.search_tickets(conn, q["q"], board_id=q.get("board"))
         status = q.get("status")
         assignee = q.get("assignee")
         if _bool(q.get("unassigned", False)):
@@ -236,13 +258,15 @@ def r_tickets(conn, m, _mm, q, b, actor):
             type_=q.get("type"),
             include_closed=_bool(q.get("all", False)),
             parent_id=int(q["parent"]) if q.get("parent") else None,
+            board_id=q.get("board"),
         )
     if m == "POST":
         pid = b.get("parent_id")
         return api.create_ticket(conn, b.get("title", ""), b.get("body", ""), actor,
                                  b.get("type", "task"), b.get("priority", "p2"), b.get("department", ""),
                                  b.get("assignee", ""), b.get("tags"), b.get("due_at"),
-                                 parent_id=int(pid) if pid not in (None, "") else None)
+                                 parent_id=int(pid) if pid not in (None, "") else None,
+                                 board_id=b.get("board_id"))
 
 
 def r_ticket(conn, m, mm, q, b, actor):
@@ -252,7 +276,7 @@ def r_ticket(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id")})
+            "tags", "result", "due_at", "parent_id", "board_id")})
 
 
 def r_ticket_tree(conn, m, mm, q, b, actor):
@@ -337,6 +361,8 @@ ROUTES = [
     (r"/api/wiki/([^/]+)/move", r_wiki_move),
     (r"/api/wiki-revisions/(\d+)", r_wiki_rev),
     (r"/api/wiki/([^/]+)", r_wiki_page),
+    (r"/api/ticket-boards", r_ticket_boards),
+    (r"/api/ticket-boards/(\d+)", r_ticket_board),
     (r"/api/tickets", r_tickets),
     (r"/api/tickets/(\d+)/claim", r_ticket_claim),
     (r"/api/tickets/(\d+)/comments", r_ticket_comments),

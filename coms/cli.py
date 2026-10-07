@@ -175,6 +175,7 @@ def _t_ticket_overview(d):
 # (group, cmd) pairs that never write — they get a read-only DB connection,
 # so they work without write permission and create no -wal/-shm files.
 READONLY_CMDS = {
+    ("ticket-board", "list"), ("ticket-board", "get"),
     ("wiki", "search"), ("wiki", "list"), ("wiki", "get"), ("wiki", "history"), ("wiki", "tree"),
     ("ticket", "list"), ("ticket", "mine"), ("ticket", "get"), ("ticket", "search"),
     ("ticket", "tree"), ("ticket", "children"),
@@ -215,13 +216,28 @@ def build_parser() -> argparse.ArgumentParser:
     x = w.add_parser("delete"); x.add_argument("slug")
     x = w.add_parser("history"); x.add_argument("slug")
 
+    # ---- project ticket boards
+    b = sub.add_parser("ticket-board", help="project ticket boards").add_subparsers(dest="cmd", required=True)
+    b.add_parser("list")
+    x = b.add_parser("get"); x.add_argument("id", type=int)
+    for command in ("create", "update"):
+        x = b.add_parser(command)
+        if command == "update":
+            x.add_argument("id", type=int)
+        x.add_argument("name")
+        x.add_argument("--description", default=None if command == "update" else "")
+        x.add_argument("--wiki-page", default=None if command == "update" else "")
+    x = b.add_parser("delete", help="delete board and all its tickets; wiki pages are kept")
+    x.add_argument("id", type=int)
+
     # ---- tickets
     t = sub.add_parser("ticket", help="ticket queue").add_subparsers(dest="cmd", required=True)
     x = t.add_parser("list"); x.add_argument("--status", action="append"); x.add_argument("--assignee")
     x.add_argument("--dept"); x.add_argument("--type"); x.add_argument("--all", action="store_true")
     x.add_argument("--unassigned", action="store_true")
     x.add_argument("--parent", type=int, help="only direct children of this ticket")
-    x = t.add_parser("mine")
+    x.add_argument("--board", type=int, help="project board id")
+    x = t.add_parser("mine"); x.add_argument("--board", type=int)
     x = t.add_parser("get"); x.add_argument("id", type=int)
     x = t.add_parser("tree", help="whole hierarchy containing a ticket (story > job > tasks)")
     x.add_argument("id", type=int)
@@ -233,12 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--dept", default=""); x.add_argument("--assignee", default="")
     x.add_argument("--tags"); x.add_argument("--due")
     x.add_argument("--parent", type=int, help="parent ticket id (story > job > task)")
+    x.add_argument("--board", type=int, help="project board id (default: Default or parent's board)")
     x = t.add_parser("claim"); x.add_argument("id", type=int)
     x = t.add_parser("update"); x.add_argument("id", type=int)
     x.add_argument("--status", choices=api.TICKET_STATUSES); x.add_argument("--priority", choices=api.PRIORITIES)
     x.add_argument("--assignee"); x.add_argument("--title"); x.add_argument("--body"); x.add_argument("--tags")
     x.add_argument("--dept"); x.add_argument("--type", choices=api.TICKET_TYPES)
     x.add_argument("--parent", help="parent ticket id, or 'none' to detach")
+    x.add_argument("--board", type=int)
     x = t.add_parser("comment"); x.add_argument("id", type=int); x.add_argument("--body"); x.add_argument("--file")
     x = t.add_parser("link", help="attach context: wiki page, question, ticket, or url")
     x.add_argument("id", type=int); x.add_argument("kind", choices=["wiki", "question", "ticket", "url"])
@@ -247,7 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("kind", choices=["wiki", "question", "ticket", "url"]); x.add_argument("ref")
     x = t.add_parser("done", help="record the result and close the ticket")
     x.add_argument("id", type=int); x.add_argument("--result"); x.add_argument("--file")
-    x = t.add_parser("search"); x.add_argument("query")
+    x = t.add_parser("search"); x.add_argument("query"); x.add_argument("--board", type=int)
 
     # ---- questions (stack-exchange style Q&A)
     b = sub.add_parser("questions",
@@ -324,6 +342,23 @@ def main(argv=None) -> int:
                 _out(args, {"deleted": args.slug}, lambda d: f"deleted {d['deleted']}")
             elif c == "history":
                 _out(args, api.wiki_revisions(conn, args.slug))
+        elif g == "ticket-board":
+            if c == "list":
+                _out(args, api.list_ticket_boards(conn))
+            elif c == "get":
+                _out(args, api.get_ticket_board(conn, args.id))
+            elif c in ("create", "update"):
+                _need_identity(me)
+                old = api.get_ticket_board(conn, args.id) if c == "update" else {}
+                _out(args, api.save_ticket_board(
+                    conn, args.name, me,
+                    args.description if args.description is not None else old["description"],
+                    args.wiki_page if args.wiki_page is not None else old["wiki_slug"],
+                    board_id=args.id if c == "update" else None))
+            elif c == "delete":
+                _need_identity(me)
+                api.delete_ticket_board(conn, args.id, me)
+                _out(args, {"deleted": args.id})
         elif g == "ticket":
             if c == "list":
                 assignee = "" if args.unassigned else args.assignee
@@ -337,12 +372,13 @@ def main(argv=None) -> int:
                         type_=args.type,
                         include_closed=args.all,
                         parent_id=args.parent,
+                        board_id=args.board,
                     ),
                     _t_tickets,
                 )
             elif c == "mine":
                 _need_identity(me)
-                _out(args, api.list_tickets(conn, assignee=me), _t_tickets)
+                _out(args, api.list_tickets(conn, assignee=me, board_id=args.board), _t_tickets)
             elif c == "get":
                 _out(args, api.get_ticket(conn, args.id), _t_ticket)
             elif c == "tree":
@@ -354,7 +390,7 @@ def main(argv=None) -> int:
                 _need_identity(me)
                 _out(args, api.create_ticket(conn, args.title, _read_body(args), me, args.type,
                                              args.priority, args.dept, args.assignee, args.tags,
-                                             args.due, parent_id=args.parent),
+                                             args.due, parent_id=args.parent, board_id=args.board),
                      _t_ticket)
             elif c == "claim":
                 _need_identity(me)
@@ -364,7 +400,7 @@ def main(argv=None) -> int:
                 t = api.update_ticket(conn, args.id, me, status=args.status, priority=args.priority,
                                       assignee=args.assignee, title=args.title, body=args.body,
                                       tags=args.tags, department=args.dept, type=args.type,
-                                      parent_id=args.parent)
+                                      parent_id=args.parent, board_id=args.board)
                 _warn_open_children(t)
                 _out(args, t, _t_ticket)
             elif c == "comment":
@@ -384,7 +420,7 @@ def main(argv=None) -> int:
                 _warn_open_children(t)
                 _out(args, t, _t_ticket)
             elif c == "search":
-                _out(args, api.search_tickets(conn, args.query), _t_tickets)
+                _out(args, api.search_tickets(conn, args.query, board_id=args.board), _t_tickets)
         elif g == "questions":
             if c == "list":
                 _out(args, api.list_questions(conn, args.status, args.tag, args.dept, args.unanswered), _t_questions)

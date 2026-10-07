@@ -1,7 +1,7 @@
 """The Q&A subsystem is addressed as `coms questions ...` (the questions page).
 
-There is no `board` naming anywhere: no CLI alias, no /api/board/* routes,
-no `board` key in search results. Activity kinds use the `question.*` prefix.
+Q&A has no `board` CLI alias, /api/board/* routes, or `board` search key.
+Project ticket boards are separate. Q&A activity uses the `question.*` prefix.
 """
 import json
 import os
@@ -67,7 +67,8 @@ class TestQuestionsCli(unittest.TestCase):
     def test_help_advertises_questions(self):
         h = cli.build_parser().format_help()
         self.assertIn("questions", h)
-        self.assertNotIn("board", h.lower().replace("dashboard", "").replace("coms-board", ""))
+        # Reject the retired Q&A command, while allowing `ticket-board`.
+        self.assertNotRegex(h, r"(?m)^\s+board\s|[\{,]board[,\}]")
 
 
 class TestQuestionsApi(unittest.TestCase):

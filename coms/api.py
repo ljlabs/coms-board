@@ -394,6 +394,83 @@ def search_wiki(conn, q: str, limit: int = 20) -> list[dict]:
 # Tickets
 # --------------------------------------------------------------------------
 
+def _board_id(value) -> int:
+    try:
+        if isinstance(value, bool) or str(value) != str(int(value)) or int(value) < 1:
+            raise ValueError()
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise BadRequest("board_id must be a positive integer")
+
+
+def get_ticket_board(conn, board_id: int) -> dict:
+    board = _one(conn.execute("SELECT * FROM ticket_boards WHERE id=?", (_board_id(board_id),)))
+    if not board:
+        raise NotFound(f"ticket board #{board_id} not found")
+    board["ticket_count"] = conn.execute(
+        "SELECT COUNT(*) FROM tickets WHERE board_id=?", (board["id"],)).fetchone()[0]
+    return board
+
+
+def list_ticket_boards(conn) -> list[dict]:
+    return _rows(conn.execute(
+        "SELECT b.*, (SELECT COUNT(*) FROM tickets t WHERE t.board_id=b.id) AS ticket_count "
+        "FROM ticket_boards b ORDER BY b.id=1 DESC, b.name COLLATE NOCASE"))
+
+
+def save_ticket_board(conn, name: str, actor: str, description: str = "",
+                      wiki_slug: str = "", board_id: int | None = None) -> dict:
+    if not isinstance(name, str) or not name.strip():
+        raise BadRequest("board name required")
+    if not isinstance(description, str) or not isinstance(wiki_slug, str):
+        raise BadRequest("description and wiki_slug must be text")
+    name, wiki_slug = name.strip(), wiki_slug.strip()
+    if board_id is not None:
+        board_id = get_ticket_board(conn, board_id)["id"]
+    if wiki_slug:
+        get_wiki(conn, wiki_slug)
+    if conn.execute("SELECT id FROM ticket_boards WHERE name=? AND id<>?",
+                    (name, board_id or 0)).fetchone():
+        raise BadRequest("a board with that name already exists")
+    ts = now()
+    try:
+        if board_id is None:
+            cur = conn.execute(
+                "INSERT INTO ticket_boards(name, description, wiki_slug, created_at, updated_at) "
+                "VALUES (?,?,?,?,?)", (name, description, wiki_slug, ts, ts))
+            board_id = cur.lastrowid
+            kind = "board.create"
+        else:
+            conn.execute("UPDATE ticket_boards SET name=?, description=?, wiki_slug=?, updated_at=? WHERE id=?",
+                         (name, description, wiki_slug, ts, board_id))
+            kind = "board.edit"
+        log_activity(conn, actor, kind, f"board:{board_id}", f"saved ticket board “{name}”")
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise BadRequest("a board with that name already exists")
+    return get_ticket_board(conn, board_id)
+
+
+def delete_ticket_board(conn, board_id: int, actor: str) -> None:
+    board = get_ticket_board(conn, board_id)
+    if board["id"] == 1:
+        raise BadRequest("the default board cannot be deleted")
+    # Delete only this board's tickets and their attachments; wiki stays shared.
+    with conn:
+        for table in ("ticket_comments", "ticket_links"):
+            conn.execute(f"DELETE FROM {table} WHERE ticket_id IN "
+                         "(SELECT id FROM tickets WHERE board_id=?)", (board["id"],))
+        conn.execute("DELETE FROM ticket_links WHERE kind='ticket' AND ref IN "
+                     "(SELECT CAST(id AS TEXT) FROM tickets WHERE board_id=?)", (board["id"],))
+        conn.execute("DELETE FROM ticket_fts WHERE docid IN "
+                     "(SELECT id FROM tickets WHERE board_id=?)", (board["id"],))
+        conn.execute("DELETE FROM tickets WHERE board_id=?", (board["id"],))
+        conn.execute("DELETE FROM ticket_boards WHERE id=?", (board["id"],))
+        log_activity(conn, actor, "board.delete", f"board:{board['id']}",
+                     f"deleted ticket board “{board['name']}” and {board['ticket_count']} tickets")
+
+
 def _index_ticket(conn, t: dict) -> None:
     conn.execute("DELETE FROM ticket_fts WHERE docid=?", (t["id"],))
     conn.execute(
@@ -406,9 +483,13 @@ def list_tickets(conn, status: str | list[str] | None = None, assignee: str | No
                  department: str | None = None, type_: str | None = None,
                  requester: str | None = None,
                  include_closed: bool = False, limit: int = 200,
-                 parent_id: int | None = None) -> list[dict]:
+                 parent_id: int | None = None, board_id: int | None = None) -> list[dict]:
     sql = "SELECT * FROM tickets WHERE 1=1"
     args: list[Any] = []
+    if board_id is not None:
+        board_id = get_ticket_board(conn, board_id)["id"]
+        sql += " AND board_id=?"
+        args.append(board_id)
     if status:
         sts = [status] if isinstance(status, str) else list(status)
         sql += f" AND status IN ({','.join('?' * len(sts))})"
@@ -440,7 +521,7 @@ def list_tickets(conn, status: str | list[str] | None = None, assignee: str | No
     return rows
 
 
-_TICKET_BRIEF = "id, title, type, status, priority, assignee, requester, parent_id, updated_at"
+_TICKET_BRIEF = "id, title, type, status, priority, assignee, requester, parent_id, board_id, updated_at"
 
 
 def _ticket_brief(conn, tid: int) -> dict | None:
@@ -578,7 +659,7 @@ def unlink_ticket(conn, tid: int, kind: str, ref: str, actor: str) -> dict:
 def create_ticket(conn, title: str, body: str, requester: str, type_: str = "task",
                   priority: str = "p2", department: str = "", assignee: str = "",
                   tags=None, due_at: str | None = None,
-                  parent_id: int | None = None) -> dict:
+                  parent_id: int | None = None, board_id: int | None = None) -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -587,12 +668,18 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
         raise BadRequest(f"priority must be one of {PRIORITIES}")
     if parent_id is not None:
         _check_parent(conn, None, parent_id)
+        parent_board = _ticket_brief(conn, parent_id)["board_id"]
+        if board_id is None:
+            board_id = parent_board
+        elif _board_id(board_id) != parent_board:
+            raise BadRequest("parent and child tickets must belong to the same board")
+    board_id = get_ticket_board(conn, 1 if board_id is None else board_id)["id"]
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "
-        "tags, due_at, parent_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "tags, due_at, parent_id, board_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title.strip(), body or "", type_, "open", priority, department or "", assignee or "",
-         requester or "", _tags(tags), due_at, parent_id, ts, ts),
+         requester or "", _tags(tags), due_at, parent_id, board_id, ts, ts),
     )
     tid = cur.lastrowid
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
@@ -609,7 +696,7 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if not t:
         raise NotFound(f"ticket #{tid} not found")
     allowed = {"title", "body", "type", "status", "priority", "department", "assignee",
-               "tags", "result", "due_at", "parent_id"}
+               "tags", "result", "due_at", "parent_id", "board_id"}
     data = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if "status" in data and data["status"] not in TICKET_STATUSES:
         raise BadRequest(f"status must be one of {TICKET_STATUSES}")
@@ -624,6 +711,15 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
         else:
             data["parent_id"] = int(pid)
             _check_parent(conn, tid, data["parent_id"])
+    if "board_id" in data:
+        data["board_id"] = get_ticket_board(conn, data["board_id"])["id"]
+    board_id = data.get("board_id", t["board_id"])
+    parent_id = data.get("parent_id", t["parent_id"])
+    if parent_id is not None and _ticket_brief(conn, parent_id)["board_id"] != board_id:
+        raise BadRequest("parent and child tickets must belong to the same board")
+    if board_id != t["board_id"] and conn.execute(
+            "SELECT 1 FROM tickets WHERE parent_id=? LIMIT 1", (tid,)).fetchone():
+        raise BadRequest("detach child tickets before moving this ticket to another board")
     if "tags" in data:
         data["tags"] = _tags(data["tags"])
     ts = now()
@@ -693,15 +789,20 @@ def comment_ticket(conn, tid: int, author: str, body: str) -> dict:
     return get_ticket(conn, tid)
 
 
-def search_tickets(conn, q: str, limit: int = 20) -> list[dict]:
+def search_tickets(conn, q: str, limit: int = 20, board_id: int | None = None) -> list[dict]:
+    board_clause, args = "", [_fts_query(q)]
+    if board_id is not None:
+        board_clause = " AND t.board_id=?"
+        args.append(get_ticket_board(conn, board_id)["id"])
     if not q.strip():
         return []
     ids = [r[0] for r in conn.execute(
-        "SELECT docid FROM ticket_fts WHERE ticket_fts MATCH ? LIMIT ?", (_fts_query(q), limit))]
+        "SELECT f.docid FROM ticket_fts f JOIN tickets t ON t.id=f.docid "
+        "WHERE ticket_fts MATCH ?" + board_clause + " LIMIT ?", (*args, limit))]
     if not ids:
         return []
     return _rows(conn.execute(
-        f"SELECT id, title, status, priority, type, assignee, department, tags, updated_at "
+        f"SELECT id, title, status, priority, type, assignee, department, tags, board_id, updated_at "
         f"FROM tickets WHERE id IN ({','.join('?' * len(ids))})", ids))
 
 

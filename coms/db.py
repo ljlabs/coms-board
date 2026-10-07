@@ -67,6 +67,15 @@ CREATE INDEX IF NOT EXISTS ix_wiki_rev_page ON wiki_revisions(page_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts4(slug, title, body, tags);
 
+CREATE TABLE IF NOT EXISTS ticket_boards (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  wiki_slug   TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tickets (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   title       TEXT NOT NULL,
@@ -180,6 +189,7 @@ def db_path() -> Path:
 # applies these with ALTER TABLE ... ADD COLUMN, which works on SQLite 3.7.
 MIGRATIONS = [
     ("tickets", "parent_id", "INTEGER"),  # ticket hierarchy: story > job > task
+    ("tickets", "board_id", "INTEGER NOT NULL DEFAULT 1"),
     ("wiki_pages", "folder", "TEXT NOT NULL DEFAULT ''"),  # wiki folders: slash path, '' = unfiled
 ]
 
@@ -197,10 +207,14 @@ TABLE_RENAMES = [
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # Stable fallback for existing tickets and callers that omit a board.
+    conn.execute("INSERT OR IGNORE INTO ticket_boards(id, name, created_at, updated_at) "
+                 "VALUES (1, 'Default', datetime('now'), datetime('now'))")
     for table, column, decl in MIGRATIONS:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_tickets_board ON tickets(board_id)")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:
