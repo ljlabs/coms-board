@@ -93,6 +93,13 @@ main.wide { max-width: none; }
 .pagehead h1 { margin: 0; }
 .pagehead .sub { color: var(--muted); font-family: var(--mono); font-size: .8rem; }
 .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.board-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .7rem; margin-bottom: 1rem; padding: .8rem; border: var(--line); background: var(--paper-2); }
+.board-toolbar label { font-family: var(--mono); font-size: .8rem; font-weight: 700; }
+.board-toolbar select { min-width: 150px; max-width: 100%; border: var(--line); padding: .4rem .6rem; background: var(--paper); }
+.board-context { display: flex; align-items: center; flex-wrap: wrap; gap: .8rem; margin-bottom: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.board-dialog { width: min(560px, calc(100% - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; color: var(--ink); }
+.board-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.board-error { color: #a21c1c; }
 
 /* ---------- cards & blocks */
 .card {
