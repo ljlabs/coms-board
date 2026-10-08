@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from coms import api, db
+from coms import api, db, team
 
 
 def tool(name, description, properties=None, required=(), write=False):
@@ -56,7 +56,20 @@ TOOLS = [
     tool("skill_get", "Read a shared skill and its current version.", {"slug": S}, ["slug"]),
     tool("skill_put", "Publish a verified reusable procedure for all agents. For updates, pass the version returned by skill_get.",
          {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
+    tool("team_roster", "List teammates on a job, with distinct names, identities, capabilities and assigned tickets.", {"job_id": I}, ['job_id']),
+    tool("team_delegate", "Delegate one specialty: reuse a suitable registered agent or register a distinct personally named teammate, then create an actionable child assignment. Parent, readiness and shared research requirements are automatic.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
+    tool("team_read", "Read the job conversation, replies, peer reviews and actually retrieved source index.", {"job_id": I, "after_id": I}, ['job_id']),
+    tool("team_send", "Ask one teammate a substantive question. The runner wakes the recipient for a response. Finish your turn if waiting; you resume after replies.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
+    tool("team_note", "Post a useful update or staffing decision to the shared job conversation; does not demand replies.", {"job_id": I, "body": S}, ['job_id', 'body'], True),
+    tool("team_reply", "Answer a question addressed to you; records a visible reply and releases the waiting sender.", {"message_id": I, "body": S}, ['message_id', 'body'], True),
+    tool("team_request_review", "Request another teammate's review of your published wiki revision. Finish the turn while waiting; resume to address feedback.", {"job_id": I, "ticket_id": I, "artifact_slug": S, "reviewer": S}, ['job_id', 'ticket_id', 'artifact_slug', 'reviewer'], True),
+    tool("team_review", "After wiki_get of the requested revision, accept it or request concrete changes. Review retrieved source evidence too.", {"review_id": I, "decision": {"type": "string", "enum": ['accepted', 'changes_requested']}, "body": S}, ['review_id', 'decision', 'body'], True),
+    tool("source_fetch", "Retrieve a public HTTPS source and record its real content/status/access date for peer inspection. Failed URLs are not verified evidence.", {"job_id": I, "url": S}, ['job_id', 'url'], True),
+    tool("source_get", "Read the content and retrieval status of a recorded research source.", {"source_id": I}, ['source_id']),
 ]
+
+COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
+DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
 
 
 def validate(spec, arguments):
@@ -77,20 +90,33 @@ def validate(spec, arguments):
             raise ValueError(f"invalid argument: {key}")
 
 
-def call_tool(name, args, *, readonly=False):
+def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=False):
     spec = next((t for t in TOOLS if t["name"] == name), None)
-    if not spec or (readonly and not spec["annotations"]["readOnlyHint"]):
+    if not spec or (readonly and not spec["annotations"]["readOnlyHint"]) or (collaboration and name not in COLLABORATION_TOOLS) or (dispatch_only and name not in DISPATCH_TOOLS):
         raise ValueError(f"tool unavailable: {name}")
     validate(spec, args)
     actor = os.environ.get("COMS_AGENT", "agent-runner")
     assigned = os.environ.get("COMS_TICKET_ID")
+    response_to = os.environ.get('COMS_TEAM_MESSAGE_ID')
+    if response_to and name == 'team_reply' and args['message_id'] != int(response_to):
+        raise ValueError('Reply to the message assigned to this response turn')
     if assigned and name in ("ticket_result", "ticket_comment", "ticket_link") and args["id"] != int(assigned):
         raise ValueError("execution agent may only change its assigned ticket")
     conn = db.connect(readonly=readonly)
     if name == "board_search": result = api.search_all(conn, args["query"])
     elif name == "wiki_list": result = api.list_wiki(conn)
-    elif name == "wiki_get": result = api.get_wiki(conn, args["slug"])
+    elif name == "wiki_get":
+        result = api.get_wiki(conn, args["slug"])
+        if not readonly and os.environ.get('COMS_RUN_ID'):
+            conn.execute('INSERT OR REPLACE INTO artifact_reads VALUES(?,?,?,?)', (actor, int(os.environ['COMS_RUN_ID']), args['slug'], result['updated_at']))
+            conn.commit()
     elif name in ("wiki_put", "wiki_append"):
+        if assigned and actor != api.ADMIN_ACTOR:
+            job = team.job_for_ticket(conn, int(assigned))
+            if job and job.get('collaboration_required') and job['assignee'] != actor:
+                page = conn.execute('SELECT author FROM wiki_pages WHERE slug=?', (args['slug'],)).fetchone()
+                if page and page['author'] != actor:
+                    raise api.BadRequest('This page belongs to another teammate. Publish your own uniquely named evidence page and reference their page instead of overwriting it.')
         result = api.save_wiki(conn, args["slug"], args.get("title", ""), args["body"], actor,
                                tags=args.get("tags"), folder=args.get("folder"), append=name == "wiki_append")
     elif name == "ticket_list": result = api.list_tickets(conn, include_closed=True)
@@ -107,6 +133,7 @@ def call_tool(name, args, *, readonly=False):
     elif name == "ticket_link": result = api.link_ticket(conn, args["id"], args["kind"], args["ref"], actor, args.get("note", ""))
     elif name == "ticket_result":
         if not args["result"].strip(): raise ValueError("a nonempty result is required")
+        team.validate_delivery(conn, args['id'], actor)
         result = api.update_ticket(conn, args["id"], actor, result=args["result"])
     elif name == "questions_list": result = api.list_questions(conn)
     elif name == "questions_get": result = api.get_question(conn, args["id"], actor)
@@ -118,6 +145,27 @@ def call_tool(name, args, *, readonly=False):
     elif name == "skill_list": result = api.list_skills(conn)
     elif name == "skill_get": result = api.get_skill(conn, args['slug'])
     elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
+    elif name == 'team_roster': result = team.roster(conn, args['job_id'])
+    elif name == 'team_delegate':
+        if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
+        result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'])
+    elif name == 'team_read': result = team.room(conn, args['job_id'], args.get('after_id', 0))
+    elif name == 'team_send': result = team.send(conn, args['job_id'], actor, args['to'], args['body'])
+    elif name == 'team_note': result = team.send(conn, args['job_id'], actor, '*', args['body'], kind='note')
+    elif name == 'team_reply': result = team.reply(conn, args['message_id'], actor, args['body'])
+    elif name == 'team_request_review':
+        if assigned and int(assigned) != args['ticket_id']: raise ValueError('Request review of your assigned ticket only')
+        result = team.request_review(conn, args['job_id'], args['ticket_id'], actor, args['artifact_slug'], args['reviewer'])
+    elif name == 'team_review':
+        if response_to:
+            request = conn.execute('SELECT message_id FROM peer_reviews WHERE id=?', (args['review_id'],)).fetchone()
+            if not request or request['message_id'] != int(response_to): raise ValueError('Decide the peer review assigned to this response turn')
+        result = team.review(conn, args['review_id'], actor, args['decision'], args['body'], int(os.environ.get('COMS_RUN_ID', '0')))
+    elif name in ('source_fetch', 'source_get'):
+        result = team.fetch_source(conn, args['job_id'], actor, args['url']) if name == 'source_fetch' else team.source_get(conn, args['source_id'])
+        if not readonly and os.environ.get('COMS_RUN_ID'):
+            conn.execute('INSERT OR IGNORE INTO source_reads VALUES(?,?,?)', (actor, int(os.environ['COMS_RUN_ID']), result['id']))
+            conn.commit()
     else: raise ValueError(f"tool unavailable: {name}")
     if not spec["annotations"]["readOnlyHint"] and os.environ.get("COMS_RUN_ID"):
         conn.execute("INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,'system','board-delivery',?,?)",
@@ -127,7 +175,7 @@ def call_tool(name, args, *, readonly=False):
     return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
 
 
-def dispatch(message, readonly=False):
+def dispatch(message, readonly=False, collaboration=False, dispatch_only=False):
     mid = message.get("id")
     if mid is None: return None
     method = message.get("method")
@@ -139,9 +187,9 @@ def dispatch(message, readonly=False):
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "coms-board", "version": "1.0.0"}}
     elif method == "ping": result = {}
     elif method == "tools/list":
-        result = {"tools": [t for t in TOOLS if not readonly or t["annotations"]["readOnlyHint"]]}
+        result = {"tools": [t for t in TOOLS if (not readonly or t["annotations"]["readOnlyHint"]) and (not collaboration or t['name'] in COLLABORATION_TOOLS) and (not dispatch_only or t['name'] in DISPATCH_TOOLS)]}
     elif method == "tools/call":
-        try: result = call_tool(params.get("name"), params.get("arguments", {}), readonly=readonly)
+        try: result = call_tool(params.get("name"), params.get("arguments", {}), readonly=readonly, collaboration=collaboration, dispatch_only=dispatch_only)
         except (ValueError, api.BadRequest, api.NotFound) as exc:
             result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
     else:
@@ -152,6 +200,8 @@ def dispatch(message, readonly=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--readonly", action="store_true")
+    parser.add_argument("--collaboration", action="store_true")
+    parser.add_argument("--dispatch", action="store_true")
     args = parser.parse_args()
     try:
         for line in sys.stdin:
@@ -159,7 +209,7 @@ def main():
             try:
                 message = json.loads(line)
                 if not isinstance(message, dict): raise ValueError("request must be an object")
-                response = dispatch(message, args.readonly)
+                response = dispatch(message, args.readonly, args.collaboration, args.dispatch)
             except Exception as exc:
                 response = {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,
                             "error": {"code": -32603, "message": str(exc)}}

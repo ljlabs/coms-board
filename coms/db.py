@@ -111,6 +111,38 @@ CREATE TABLE IF NOT EXISTS agent_templates (
   enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runner_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS team_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
+  sender TEXT NOT NULL, recipient TEXT NOT NULL DEFAULT '*', kind TEXT NOT NULL,
+  body TEXT NOT NULL, reply_to INTEGER, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_team_messages_job ON team_messages(job_id,id);
+CREATE TABLE IF NOT EXISTS team_deliveries (
+  message_id INTEGER NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  run_id INTEGER, response_id INTEGER, error TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL, PRIMARY KEY(message_id,recipient)
+);
+CREATE TABLE IF NOT EXISTS peer_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL,
+  artifact_slug TEXT NOT NULL, artifact_version TEXT NOT NULL, author TEXT NOT NULL,
+  reviewer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested',
+  message_id INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artifact_reads (
+  agent_slug TEXT NOT NULL, run_id INTEGER NOT NULL, artifact_slug TEXT NOT NULL,
+  artifact_version TEXT NOT NULL, PRIMARY KEY(agent_slug,run_id,artifact_slug)
+);
+CREATE TABLE IF NOT EXISTS research_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, reader TEXT NOT NULL,
+  url TEXT NOT NULL, final_url TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+  retrieved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS source_reads (
+  agent_slug TEXT NOT NULL, run_id INTEGER NOT NULL, source_id INTEGER NOT NULL,
+  PRIMARY KEY(agent_slug,run_id,source_id)
+);
 CREATE TABLE IF NOT EXISTS shared_skills (
   slug TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, updated_by TEXT NOT NULL,
@@ -302,6 +334,7 @@ def db_path() -> Path:
 # Columns added after the initial schema shipped. connect() (write mode)
 # applies these with ALTER TABLE ... ADD COLUMN, which works on SQLite 3.7.
 MIGRATIONS = [
+    ("tickets", "collaboration_required", "INTEGER NOT NULL DEFAULT 0"),
     ("agents", "instructions", "TEXT NOT NULL DEFAULT ''"),
     ("agent_runs", "agent_slug", "TEXT NOT NULL DEFAULT ''"),
     ("agent_runs", "stage", "TEXT NOT NULL DEFAULT 'execute'"),

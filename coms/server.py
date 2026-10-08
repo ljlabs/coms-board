@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from coms import api, db, progress  # noqa: E402
+from coms import api, db, progress, team  # noqa: E402
 from coms.workspace import DEFAULT_WORKSPACE, workspace_path
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -321,7 +321,7 @@ def r_tickets(conn, m, _mm, q, b, actor):
                                  parent_id=int(pid) if pid not in (None, "") else None,
                                  board_id=b.get("board_id"),
                                  ready_for_execution=b.get("ready_for_execution", False),
-                                 agent_template_id=b.get("agent_template_id"), recommended_workers=b.get('recommended_workers'))
+                                 agent_template_id=b.get("agent_template_id"), recommended_workers=b.get('recommended_workers'), collaboration_required=b.get('collaboration_required'))
         if ticket['ready_for_execution'] and not ticket['assignee']:
             api.resolve_ticket_agent(conn, ticket)
             ticket = api.get_ticket(conn, ticket['id'])
@@ -331,11 +331,26 @@ def r_tickets(conn, m, _mm, q, b, actor):
 def r_ticket(conn, m, mm, q, b, actor):
     tid = int(mm.group(1))
     if m == "GET":
-        return api.get_ticket(conn, tid)
+        ticket = api.get_ticket(conn, tid)
+        job = team.job_for_ticket(conn, tid)
+        ticket['team_job_id'] = job['id'] if job and job.get('collaboration_required') else None
+        return ticket
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers") if k in b})
+            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required") if k in b})
+
+
+def r_teams(conn, m, mm, q, b, actor):
+    if m == 'GET':
+        return [dict(row) for row in conn.execute("SELECT t.id,t.title,t.status,t.assignee,(SELECT count(*) FROM team_messages WHERE job_id=t.id) AS message_count,(SELECT count(*) FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id WHERE m.job_id=t.id AND d.status IN ('pending','responding')) AS pending_count FROM tickets t WHERE t.type='job' AND t.collaboration_required=1 ORDER BY t.id DESC")]
+
+
+def r_team(conn, m, mm, q, b, actor):
+    job_id = int(mm.group(1))
+    if m == 'GET': return team.room(conn, job_id)
+    if m == 'POST':
+        return team.send(conn, job_id, actor, b.get('to', '*'), b.get('body', ''), kind='note' if b.get('to', '*') == '*' else 'question')
 
 
 def r_runner_settings(conn, m, _mm, q, b, actor):
@@ -623,6 +638,8 @@ def r_question_comment_item(conn, m, mm, _q, b, actor):
 
 
 ROUTES = [
+    (r"/api/teams", r_teams),
+    (r"/api/teams/(\d+)", r_team),
     (r"/api/skills/([a-z0-9-]+)", r_skills),
     (r"/api/skills", r_skills),
     (r"/api/runner/projects/(\d+)", r_orchestrator_project),

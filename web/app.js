@@ -44,12 +44,12 @@
     owner.cleanup.push(() => clearTimeout(timer));
   }
   function progressHTML(data={items:[],active_count:0,waiting_count:0,generated_at:''}) {
-    const states={starting:'Starting',working:'Working',thinking:'Thinking',responding:'Writing response',tool:'Using tool',reviewing:'Reviewing',waiting:'Waiting for teammates',completed:'Finished',failed:'Failed'};
+    const states={starting:'Starting',working:'Working',collaborating:'Talking to a teammate',thinking:'Thinking',responding:'Writing response',tool:'Using tool',reviewing:'Reviewing',waiting:'Waiting for teammates',completed:'Finished',failed:'Failed'};
     const active=data.items.filter(x=>['running','waiting'].includes(x.state));
     const recent=data.items.filter(x=>!['running','waiting'].includes(x.state)).slice(0,4);
     return `<div class="card-title"><h3>Live agent progress</h3><span class="small muted" data-progress-refresh>updated ${ago(data.generated_at)}</span></div>
       <div class="progress-counts"><b>${data.active_count} running</b><span>${data.waiting_count} waiting for teammates</span>${data.capacity?`<span>${data.capacity} ticket slots</span>`:''}<span class="small muted">refreshes every 2 seconds</span></div>
-      <div class="progress-list">${[...active,...recent].map(x=>`<article class="progress-item ${esc(x.state)}" data-progress-key="${esc(x.key)}"><div class="progress-heading"><b>${chip(x.agent_slug)}</b><span class="badge ${x.state==='failed'?'blocked':x.state==='running'?'in_progress':'done'}">${esc(states[x.phase]||x.phase)}</span>${x.ticket_id?`<a href="#/tickets/${x.ticket_id}">#${x.ticket_id} ${esc(x.ticket_title||'')}</a>`:'<span>Orchestrator chat</span>'}</div><p class="progress-summary">${esc(x.summary)}</p>
+      <div class="progress-list">${[...active,...recent].map(x=>`<article class="progress-item ${esc(x.state)}" data-progress-key="${esc(x.key)}"><div class="progress-heading"><b><a class="chip" href="#/agents/${encodeURIComponent(x.agent_slug)}">${esc(x.agent_name||x.agent_slug)}</a></b><span class="badge ${x.state==='failed'?'blocked':x.state==='running'?'in_progress':'done'}">${esc(states[x.phase]||x.phase)}</span>${x.ticket_id?`<a href="#/tickets/${x.ticket_id}">#${x.ticket_id} ${esc(x.ticket_title||'')}</a>`:'<span>Orchestrator chat</span>'}</div><p class="progress-summary">${esc(x.summary)}</p>
         <div class="small muted">${esc(x.backend)} · ${x.response_chars.toLocaleString()} response characters · ${x.tool_calls} tool calls · last event ${x.idle_seconds}s ago${x.state==='running'&&x.idle_seconds>45?' · waiting for a new model event':''}</div>
         ${x.preview?`<details class="progress-response"${x.state==='running'?' open':''}><summary>Latest response</summary><pre>${esc(x.preview)}</pre></details>`:''}</article>`).join('')||'<div class="empty">No sessions running. Ready tickets start automatically.</div>'}</div>`;
   }
@@ -69,6 +69,24 @@
       try { const data=await GET('/api/runner/status'+query);drawProgress($('#'+id),data); }
       catch(e){if(e.name==='AbortError')throw e;const box=$('#'+id);if(box)box.innerHTML=`<h3>Live agent progress</h3><p class="error">Could not refresh: ${esc(e.message)}</p>`;}
     };
+    await refresh();poll(refresh,2000);
+  }
+  async function mountTeam(id,jobId) {
+    const container=$('#'+id);if(!container)return;
+    container.innerHTML=`<div class="card-title"><h3>Team conversation</h3><a class="btn sm" href="#/teams/${jobId}">Open room</a></div><p class="small muted">Named questions, replies and peer review. Directed questions wake the recipient automatically.</p><div class="team-members"></div><div class="team-feed" aria-label="Team conversation"></div><div class="team-reviews"></div><form class="team-form form"><div class="grid-2"><label>To<select class="team-to"><option value="*">Everyone · note</option></select></label><label>Message<textarea class="team-input" rows="2" required placeholder="Ask a teammate, or leave a useful update…"></textarea></label></div><button class="btn">Send to team</button></form>`;
+    let signature='';
+    const refresh=async()=>{
+      const data=await GET('/api/teams/'+jobId),box=$('#'+id);if(!box)return;
+      const select=$('.team-to',box),selected=select.value;
+      select.innerHTML='<option value="*">Everyone · note</option>'+data.members.map(a=>`<option value="${esc(a.slug)}">${esc(a.name)} · ${esc(a.description)}</option>`).join('');select.value=[...select.options].some(o=>o.value===selected)?selected:'*';
+      $('.team-members',box).innerHTML=data.members.map(a=>`<a class="chip" href="#/agents/${encodeURIComponent(a.slug)}">${esc(a.name)}</a>`).join(' ')+`<span class="small muted"> · ${data.sources.filter(s=>s.status==='ok').length} retrieved sources · ${data.sources.filter(s=>s.status!=='ok').length} retrieval failures</span>`;
+      const feed=$('.team-feed',box),next=JSON.stringify([data.messages,data.reviews]);if(next===signature||hasSelection(feed))return;
+      const position=scrollState(feed);signature=next;
+      feed.innerHTML=data.messages.map(m=>`<article class="team-message ${esc(m.kind)}" data-team-message="${m.id}"><div class="team-message-head"><b>${esc(m.sender_name||m.sender)}</b><span>→ ${m.recipient==='*'?'everyone':esc(m.recipient_name||m.recipient)}</span><span class="badge">${esc(m.kind.replaceAll('_',' '))}</span><span class="ts">#${m.id}${m.reply_to?` · reply to #${m.reply_to}`:''} · ${ago(m.created_at)}</span></div><div class="md">${MD.render(m.body)}</div>${m.deliveries.map(d=>`<div class="small muted">${esc(d.status)}${d.error?` · ${esc(d.error)}`:''}</div>`).join('')}</article>`).join('')||'<div class="empty">No teammate messages yet. The orchestrator will explain its staffing decision here.</div>';
+      restoreScroll(feed,position);
+      $('.team-reviews',box).innerHTML=data.reviews.length?`<h4>Peer review</h4><div class="list">${data.reviews.map(r=>`<div class="item"><div class="main"><a href="#/wiki/${encodeURIComponent(r.artifact_slug)}">${esc(r.artifact_slug)}</a> · ${esc(r.reviewer)} · ${badge(r.status)}${!r.current?' <b>revision changed</b>':''}<div class="small">${esc(r.reason)}</div></div></div>`).join('')}</div>`:'';
+    };
+    $('.team-form',container).onsubmit=async event=>{event.preventDefault();const input=$('.team-input',container),body=input.value.trim();if(!body)return;try{await api('POST','/api/teams/'+jobId,{to:$('.team-to',container).value,body});input.value='';await refresh();}catch(err){fail(err);}};
     await refresh();poll(refresh,2000);
   }
   const scrollState = box => ({ top: box.scrollTop, follow: box.scrollHeight - box.scrollTop - box.clientHeight < 24 });
@@ -544,6 +562,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           <div class="actions" style="margin-top:.6rem"><select id="lk-kind"><option value="wiki">wiki</option><option value="question">question</option><option value="ticket">ticket</option><option value="url">url</option></select><input id="lk-ref" placeholder="slug / id / url" style="max-width:200px"><input id="lk-note" placeholder="note (optional)" style="max-width:180px"><button class="btn sm" id="lk-add">+ link</button></div></div>
         <div class="card ${t.result ? 'tint-g' : ''}" id="resultcard"><div class="card-title"><h3>Result</h3></div><div class="md" id="result">${t.result ? MD.render(t.result) : '<span class="muted">nothing delivered yet — the assignee records the outcome here (<code>coms ticket done</code>)</span>'}</div></div>
         <div class="card" id="ticket-progress">${progressHTML(runnerData.progress)}</div>
+        ${t.team_job_id?'<div class="card" id="ticket-team"></div>':''}
         <div class="card" id="runner-chat"><div class="card-title"><h3>Agent runner chat</h3><span class="badge ${t.ready_for_execution?'in_progress':'blocked'}">${t.ready_for_execution?'ready gate open':'awaiting orchestration'}</span></div>
           <div class="mono small muted">Watch current work in Live progress above. Full responses and tool output are in <a href="#/debug?ticket=${t.id}">Debug</a>; published updates appear in Comments.</div>
           <div id="runner-messages" class="runner-messages">${runnerData.messages.filter(m=>m.role==='user'&&m.kind==='text').map(m=>`<div class="runner-msg user" data-message-id="${m.id}"><b>You</b><pre>${esc(m.body)}</pre><span class="ts">${esc(m.created_at)}</span></div>`).join('') || '<div class="empty">No chat messages yet.</div>'}</div>
@@ -610,6 +629,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       if(resultBox&&latest.result!==t.result&&!resultBox.querySelector('textarea,[contenteditable="true"]')&&!hasSelection(resultBox)){resultBox.innerHTML=MD.render(latest.result)||'<span class="muted">Nothing delivered yet.</span>';t.result=latest.result;}
     }
     poll(refreshRunner,2000);
+    if(t.team_job_id)await mountTeam('ticket-team',t.team_job_id);
     document.querySelectorAll('[data-mv]').forEach((b) => b.onclick = () => patch({ status: b.dataset.mv }, `→ ${b.dataset.mv}`));
     if ($('#claim')) $('#claim').onclick = async () => { try { await api('POST', `/api/tickets/${id}/claim`); toast('claimed'); render(); } catch (e) { fail(e); } };
     $('#lk-add').onclick = async () => {
@@ -760,9 +780,20 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       const byDept={};for(const agent of agents)(byDept[agent.department||'']||=[]).push(agent);
       return Object.keys(byDept).sort().map(d=>`<div class="dept-head"><h2>${esc(deptName(d))}</h2><span class="d">${esc(deptDesc(d))}</span></div><div class="agent-grid">${byDept[d].sort((a,b)=>(a.role==='orchestrator'?-1:0)-(b.role==='orchestrator'?-1:0)||a.name.localeCompare(b.name)).map(a=>`<div class="agent-card" data-agent-slug="${esc(a.slug)}"><span class="rep" title="reputation">${a.reputation}</span><h3><a href="#/agents/${encodeURIComponent(a.slug)}">${esc(a.name)}</a></h3>${badge(a.role)} <span class="mono small muted">${esc(a.slug)}</span><p class="small">${esc(a.description)}</p>${a.runtime?`<div class="agent-state">${badge(a.runtime.state)} ${esc(a.runtime.summary)}${a.runtime.ticket_id?` <a href="#/tickets/${a.runtime.ticket_id}">#${a.runtime.ticket_id}</a>`:''}</div>`:'<div class="small muted">Available for assignment</div>'}<div class="cb">${a.codebases?'pkgs: '+esc(a.codebases):''}</div><div class="meta mono small muted">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen)||'never'}</div></div>`).join('')}</div>`).join('')||'<div class="empty">The orchestrator registers automatically when the runner starts. Teammates are reused or registered as jobs are delegated.</div>';
     }
-    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub" id="agent-count">${AGENTS.length} registered agents · shared identities and reusable capabilities</div></div><div class="actions"><a class="btn" href="#/skills">Shared skills</a><a class="btn ok" href="#/agents/new">+ Agent</a></div></div><div class="card" id="agents-progress"></div><div id="agent-roster">${roster(AGENTS)}</div>`);
+    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub" id="agent-count">${AGENTS.length} registered agents · shared identities and reusable capabilities</div></div><div class="actions"><a class="btn" href="#/teams">Team rooms</a><a class="btn" href="#/skills">Shared skills</a><a class="btn ok" href="#/agents/new">+ Agent</a></div></div><div class="card" id="agents-progress"></div><div id="agent-roster">${roster(AGENTS)}</div>`);
     await mountProgress('agents-progress');
     poll(async()=>{const agents=await GET('/api/agents');AGENTS=agents;const box=$('#agent-roster');if(box&&!hasSelection(box))box.innerHTML=roster(agents);if($('#agent-count'))$('#agent-count').textContent=`${agents.length} registered agents · shared identities and reusable capabilities`;},3000);
+  });
+
+  route(/^\/teams$/,async()=>{
+    setTab('agents');const jobs=await GET('/api/teams');
+    paint(`<div class="pagehead"><h1>Team rooms</h1><a class="btn" href="#/agents">Agents</a></div><div class="card" id="teams-progress"></div><div class="card"><div class="list">${jobs.map(j=>`<div class="item"><div class="main"><a class="title" href="#/teams/${j.id}">#${j.id} ${esc(j.title)}</a><div>${badge(j.status)} · ${j.message_count} messages · ${j.pending_count} awaiting responses</div></div><a class="btn sm" href="#/tickets/${j.id}">Job ticket</a></div>`).join('')||'<div class="empty">Create a ready job ticket to start a collaborative team.</div>'}</div></div>`);
+    await mountProgress('teams-progress');
+  });
+  route(/^\/teams\/(\d+)$/,async id=>{
+    setTab('agents');const job=await GET('/api/tickets/'+id);await loadRefs();
+    paint(`<div class="pagehead"><div><h1>${esc(job.title)}</h1><div class="sub">Shared conversation and current-revision peer reviews</div></div><a class="btn" href="#/tickets/${id}">Job #${id}</a></div><div class="card" id="team-progress"></div><div class="card" id="team-room"></div>`);
+    await mountProgress('team-progress','?ticket='+id);await mountTeam('team-room',id);
   });
 
   async function agentForm(slug){

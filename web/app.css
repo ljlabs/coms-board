@@ -321,6 +321,15 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .progress-counts { display:flex; flex-wrap:wrap; gap:.8rem; margin-bottom:1rem; }
 .progress-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:.8rem; }
 .progress-item { border:var(--line); padding:.8rem; min-width:0; }
+.team-feed { max-height:560px; overflow-y:auto; border:var(--line); margin:1rem 0; padding:.8rem; }
+.team-message { padding:.8rem 0; border-bottom:1px solid var(--ink); overflow-wrap:anywhere; }
+.team-message:last-child { border-bottom:0; }
+.team-message-head { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+.team-message.question { border-left:4px solid var(--cyan); padding-left:.6rem; }
+.team-message.peer_review { border-left:4px solid var(--yellow); padding-left:.6rem; }
+.team-message.reply { border-left:4px solid var(--green); padding-left:.6rem; }
+.team-members { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
+.team-form textarea { width:100%; }
 .progress-item.running { border-left:3px solid var(--cyan); }
 .progress-item.waiting { border-left:3px solid var(--yellow); }
 .progress-item.failed { border-left:3px solid var(--pink); }

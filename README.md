@@ -117,6 +117,31 @@ to every teammate. Agents read them with `skill_list` / `skill_get` and publish
 verified methods with `skill_put`. An update requires the current version,
 preventing concurrent agents from silently overwriting each other.
 
+**Team rooms**, linked from Agents and each job ticket, show named questions,
+replies and peer-review decisions. `team_send` wakes the addressed teammate for
+a bounded response turn. The runner pauses senders automatically after a
+question or review request, freeing their slots until replies arrive. They resume with the
+shared conversation. `team_request_review` asks a teammate to inspect an exact
+wiki revision; the reviewer must read it before `team_review` can accept it or
+request changes. A later edit invalidates that approval.
+
+The lead's first turn exposes delegation tools only. `team_delegate` reuses a
+suitable specialist or registers a named teammate and creates a ready child
+ticket with the job's source URLs and collaboration requirements. Workers
+start after staffing finishes, so they can see the complete team roster.
+Research and response sessions expose board tools only through OpenCode;
+workspace edits and hidden backend subagents cannot substitute for board
+deliverables. Specialists cannot overwrite another teammate's wiki page.
+
+New jobs require collaboration. Research delivery requires an answered
+teammate question, an attached evidence page with current peer approval, and
+a citation to content actually retrieved through `source_fetch`. The source
+record includes its real status, content and retrieval time; reviewers inspect
+it with `source_get`. The lead must wait for child reviews, write and attach a
+fresh synthesis, obtain its peer approval, and ensure the team published a new
+shared procedure. These checks verify recorded actions; factual quality still
+depends on the research and peer critique.
+
 Live progress refreshes every two seconds on Agents, tickets, Runner, Debug,
 and Activity. It shows the registered agent, current phase, latest response,
 tool count, and time since the last model event. Thinking updates provide a

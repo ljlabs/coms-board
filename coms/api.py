@@ -257,7 +257,7 @@ def orchestrator_agent(conn, *, commit=True) -> dict:
         log_activity(conn, 'orchestrator', 'agent.role', 'agent:orchestrator', 'Assigned the orchestrator role')
         if commit: conn.commit()
         return {**reserved, 'role': 'orchestrator'}
-    return ensure_agent(conn, 'Orchestrator', 'orchestrator',
+    return ensure_agent(conn, 'Rowan', 'orchestrator',
                         'Build teams, reuse specialists, delegate work, review evidence and synthesize results.',
                         slug='team-orchestrator' if reserved else 'orchestrator', commit=commit)
 
@@ -343,8 +343,8 @@ def shared_skill_context(conn) -> str:
 def seed_shared_skills(conn):
     actor = orchestrator_agent(conn)['slug']
     defaults = {
-        'team-orchestration': ('Team orchestration', '''When coordinating a job, call agents_list first. Reuse a suitable registered teammate; use agent_ensure to create one only if needed. Assign every child ticket to that teammate and set ready=true for actionable work. Respect the ticket's suggested worker count, adjusting it when necessary and explaining why. Each teammate owns its ticket result or a separate wiki page. Only the lead writes the shared synthesis page; workers must not replace the same page concurrently. After dispatch, finish your turn so the runner can wait without consuming an inference slot. The runner resumes the lead for SYNTHESIS when child results arrive. During SYNTHESIS, read and check those results, resolve missing evidence, publish the combined deliverable, and call ticket_result. Creating tickets is not completed research.'''),
-        'source-backed-research': ('Source-backed research', '''Use current primary sources and cite direct URLs and publication/access dates. Fetch and inspect a source before claiming it supports a fact. Distinguish evidence, inference, and unverified claims. If source access fails, record that limitation rather than inventing citations. For a research worker, publish evidence and links in your own ticket_result or a uniquely named wiki page. For the lead, verify worker claims before synthesis. Capture methods you actually verified as shared skills; do not convert unverified findings into procedural skills.'''),
+        'team-orchestration': ('Team orchestration', '''Lead only: use agents_list to reuse suitable teammates. In the staffing turn, team_delegate registers or reuses a personally named specialist and creates a ready child assignment; expertise belongs in capabilities. Finish staffing before workers start. Post staffing decisions with team_note. Workers use team_roster and team_send for substantive questions; recipients are awakened automatically. Sending a question or requesting peer review automatically pauses the sender and releases its slot. Resumed workers read team_read, use answers, publish separate wiki pages, ticket_link them and request current-revision peer reviews with team_request_review. Reviewers inspect wiki_get and source_get, then team_review with concrete acceptance or changes_requested. Revise rejected work before another review. Only the lead owns the synthesis; it waits for child tickets and reviews, writes and links a fresh combined page, obtains its peer review, and delivers ticket_result. Publish new shared procedures grounded in methods this team successfully used. No filler greetings or invented completion claims.'''),
+        'source-backed-research': ('Source-backed research', '''Board shared skills use skill_get, not the backend's native skill loader. Use source_fetch with real primary-source URLs; it records actual content, HTTP failures and dates for peers. A 404 means the URL does not exist, not that source access was restricted. Do not repeatedly guess URLs. Read retrieved evidence and cite direct URLs and dates; use source_get to inspect teammates' evidence. Distinguish evidence, inference and unverifiable claims. If a source fails, record the limitation honestly and try the real starting URLs in the job. Workers publish separate evidence pages; the lead verifies them before synthesis. Peer reviews must challenge unsupported factual claims. Shared skills are verified procedures, not unverified research findings. Never claim a backtest was performed unless it was actually executed.'''),
     }
     for slug, (title, body) in defaults.items():
         if not conn.execute('SELECT 1 FROM shared_skills WHERE slug=?', (slug,)).fetchone():
@@ -871,7 +871,8 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
                   tags=None, due_at: str | None = None,
                   parent_id: int | None = None, board_id: int | None = None,
                   ready_for_execution: bool = False,
-                  agent_template_id: int | None = None, recommended_workers: int | None = None) -> dict:
+                  agent_template_id: int | None = None, recommended_workers: int | None = None,
+                  collaboration_required: bool | None = None) -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -889,14 +890,15 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
     ready_for_execution = _execution_flag(ready_for_execution)
     agent_template_id = _template_id(conn, agent_template_id)
     recommended_workers = _worker_count(recommended_workers)
+    collaboration_required = _execution_flag(type_ == 'job' if collaboration_required is None else collaboration_required)
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "
-        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at, recommended_workers) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at, recommended_workers, collaboration_required) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title.strip(), body or "", type_, "open", priority, department or "", assignee or "",
          requester or "", _tags(tags), due_at, parent_id, board_id, ready_for_execution,
-         agent_template_id, ts, ts, recommended_workers),
+         agent_template_id, ts, ts, recommended_workers, collaboration_required),
     )
     tid = cur.lastrowid
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
@@ -913,7 +915,7 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if not t:
         raise NotFound(f"ticket #{tid} not found")
     allowed = {"title", "body", "type", "status", "priority", "department", "assignee",
-               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers"}
+               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required"}
     data = {k: v for k, v in fields.items() if k in allowed and (v is not None or k in ("agent_template_id", "recommended_workers"))}
     if "status" in data and data["status"] not in TICKET_STATUSES:
         raise BadRequest(f"status must be one of {TICKET_STATUSES}")
@@ -923,6 +925,7 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
         raise BadRequest(f"type must be one of {TICKET_TYPES}")
     if "ready_for_execution" in data:
         data["ready_for_execution"] = _execution_flag(data["ready_for_execution"])
+    if 'collaboration_required' in data: data['collaboration_required'] = _execution_flag(data['collaboration_required'])
     if "agent_template_id" in data:
         data["agent_template_id"] = _template_id(conn, data["agent_template_id"])
     if 'recommended_workers' in data: data['recommended_workers'] = _worker_count(data['recommended_workers'])
