@@ -265,10 +265,32 @@ def r_wiki_rev(conn, m, mm, q, b, actor):
     return api.wiki_revision(conn, int(mm.group(1))) if m == "GET" else None
 
 
+def r_ticket_boards(conn, m, _mm, q, b, actor):
+    if m == "GET":
+        return api.list_ticket_boards(conn)
+    if m == "POST":
+        return api.save_ticket_board(conn, b.get("name", ""), actor,
+                                     b.get("description", ""), b.get("wiki_slug", ""))
+
+
+def r_ticket_board(conn, m, mm, q, b, actor):
+    bid = int(mm.group(1))
+    if m == "GET":
+        return api.get_ticket_board(conn, bid)
+    if m in ("PUT", "PATCH"):
+        board = api.get_ticket_board(conn, bid)
+        return api.save_ticket_board(conn, b.get("name", board["name"]), actor,
+                                     b.get("description", board["description"]),
+                                     b.get("wiki_slug", board["wiki_slug"]), board_id=bid)
+    if m == "DELETE":
+        api.delete_ticket_board(conn, bid, actor)
+        return {"deleted": bid}
+
+
 def r_tickets(conn, m, _mm, q, b, actor):
     if m == "GET":
         if q.get("q"):
-            return api.search_tickets(conn, q["q"])
+            return api.search_tickets(conn, q["q"], board_id=q.get("board"))
         status = q.get("status")
         assignee = q.get("assignee")
         if _bool(q.get("unassigned", False)):
@@ -281,6 +303,7 @@ def r_tickets(conn, m, _mm, q, b, actor):
             type_=q.get("type"),
             include_closed=_bool(q.get("all", False)),
             parent_id=int(q["parent"]) if q.get("parent") else None,
+            board_id=q.get("board"),
         )
     if m == "POST":
         pid = b.get("parent_id")
@@ -288,6 +311,7 @@ def r_tickets(conn, m, _mm, q, b, actor):
                                  b.get("type", "task"), b.get("priority", "p2"), b.get("department", ""),
                                  b.get("assignee", ""), b.get("tags"), b.get("due_at"),
                                  parent_id=int(pid) if pid not in (None, "") else None,
+                                 board_id=b.get("board_id"),
                                  ready_for_execution=b.get("ready_for_execution", False),
                                  agent_template_id=b.get("agent_template_id"))
 
@@ -299,7 +323,7 @@ def r_ticket(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id", "ready_for_execution", "agent_template_id") if k in b})
+            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id") if k in b})
 
 
 def r_runner_settings(conn, m, _mm, q, b, actor):
@@ -307,13 +331,16 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
         values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
         values.setdefault("active_backend", "opencode"); values.setdefault("parallel_agents", "2")
         values.setdefault("workspace", str(DEFAULT_WORKSPACE))
+        values.setdefault("opencode_api_base_url", "http://localhost:11434/v1")
+        values.setdefault("opencode_api_model", "")
+        values["opencode_api_key_set"] = bool(values.pop("opencode_api_key", ""))
         try: workspace_path(values); values["workspace_error"] = ""
         except ValueError as exc: values["workspace_error"] = str(exc)
         from .runner import backend_command
         values["backends"] = [{"id": x, "available": bool(__import__('shutil').which(backend_command(x, values)[0]))} for x in ("codex", "claude", "opencode")]
         return values
     if m in ("PUT", "PATCH", "POST"):
-        allowed = {"active_backend", "parallel_agents", "workspace", "codex_command", "claude_command", "opencode_command", "model_codex", "model_claude", "model_opencode"}
+        allowed = {"active_backend", "parallel_agents", "workspace", "codex_command", "claude_command", "opencode_command", "model_codex", "model_claude", "model_opencode", "opencode_api_base_url", "opencode_api_key", "opencode_api_model"}
         if "active_backend" in b and b["active_backend"] not in ("codex", "claude", "opencode"):
             raise api.BadRequest("active_backend must be codex, claude, or opencode")
         if "parallel_agents" in b and not 1 <= int(b["parallel_agents"]) <= 16:
@@ -321,14 +348,29 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
         if "workspace" in b:
             try: b["workspace"] = workspace_path(b)
             except ValueError as exc: raise api.BadRequest(str(exc))
+        if "opencode_api_base_url" in b:
+            from .runner import normalize_opencode_api_base_url
+            try: b["opencode_api_base_url"] = normalize_opencode_api_base_url(b["opencode_api_base_url"])
+            except (TypeError, ValueError) as exc: raise api.BadRequest(str(exc))
+        for field in ("opencode_api_key", "opencode_api_model"):
+            if field in b and not isinstance(b[field], str): raise api.BadRequest("OpenCode API settings must be strings")
+        if "opencode_api_model" in b: b["opencode_api_model"] = b["opencode_api_model"].strip()
+        if "clear_opencode_api_key" in b and not isinstance(b["clear_opencode_api_key"], bool):
+            raise api.BadRequest("clear_opencode_api_key must be a boolean")
         from .runner import RUNNER, backend_command
         previous = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
         previous_backend=previous.get("active_backend","opencode")
         new_backend=b.get("active_backend",previous_backend)
+        clear_api_key=b.get("clear_opencode_api_key",False)
+        api_key_changed=(clear_api_key and bool(previous.get("opencode_api_key"))) or ("opencode_api_key" in b and b["opencode_api_key"]!=previous.get("opencode_api_key","") and bool(b["opencode_api_key"]))
+        opencode_settings_changed=(api_key_changed
+            or ("opencode_api_base_url" in b and b["opencode_api_base_url"]!=previous.get("opencode_api_base_url","http://localhost:11434/v1"))
+            or ("opencode_api_model" in b and b["opencode_api_model"]!=previous.get("opencode_api_model","")))
         runtime_changed=(new_backend!=previous_backend
             or ("workspace" in b and str(previous.get("workspace",str(DEFAULT_WORKSPACE)))!=str(b["workspace"]))
             or ("model_"+new_backend in b and str(previous.get("model_"+new_backend,""))!=str(b["model_"+new_backend]))
-            or (new_backend+"_command" in b and str(previous.get(new_backend+"_command",""))!=str(b[new_backend+"_command"])))
+            or (new_backend+"_command" in b and str(previous.get(new_backend+"_command",""))!=str(b[new_backend+"_command"]))
+            or (new_backend=="opencode" and opencode_settings_changed))
         for backend in ("codex", "claude", "opencode"):
             if backend + "_command" in b:
                 if not isinstance(b[backend + "_command"], str): raise api.BadRequest("backend commands must be strings")
@@ -340,15 +382,18 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
             RUNNER.conns.clear()
             for key, value in b.items():
                 if key not in allowed: continue
+                if key == "opencode_api_key" and not value: continue
                 conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)", (key, str(value)))
+            if clear_api_key: conn.execute("DELETE FROM runner_settings WHERE key='opencode_api_key'")
             if runtime_changed:
                 current={r[0]:r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
                 active_workspace=workspace_path(current)
                 conn.execute("UPDATE orchestrator_sessions SET backend=?,workspace=?,acp_session_id=''",(current.get("active_backend","opencode"),active_workspace))
             conn.commit()
-        if runtime_changed and RUNNER.thread and RUNNER.thread.is_alive():
+        if (runtime_changed or opencode_settings_changed) and RUNNER.thread and RUNNER.thread.is_alive():
             threading.Thread(target=RUNNER._reset_and_warm_models, daemon=True, name="coms-model-warmup").start()
-            threading.Thread(target=RUNNER._reset_orchestrator, daemon=True, name="coms-orchestrator-warmup").start()
+            if runtime_changed:
+                threading.Thread(target=RUNNER._reset_orchestrator, daemon=True, name="coms-orchestrator-warmup").start()
         return {"saved": True}
 
 
@@ -478,6 +523,14 @@ def r_ticket_comments(conn, m, mm, q, b, actor):
     return api.comment_ticket(conn, int(mm.group(1)), actor, b.get("body", "")) if m == "POST" else None
 
 
+def r_ticket_comment(conn, m, mm, _q, b, actor):
+    tid, cid = int(mm.group(1)), int(mm.group(2))
+    if m in ("PATCH", "PUT"):
+        return api.update_ticket_comment(conn, tid, cid, actor, b.get("body", ""))
+    if m == "DELETE":
+        return api.delete_ticket_comment(conn, tid, cid, actor)
+
+
 def r_ticket_links(conn, m, mm, q, b, actor):
     tid = int(mm.group(1))
     if m == "POST":
@@ -534,6 +587,14 @@ def r_question_comment(conn, m, _mm, q, b, actor):
         return api.comment_question(conn, b["target_type"], int(b["target_id"]), actor, b.get("body", ""))
 
 
+def r_question_comment_item(conn, m, mm, _q, b, actor):
+    comment_id = int(mm.group(1))
+    if m in ("PATCH", "PUT"):
+        return api.update_question_comment(conn, comment_id, actor, b.get("body", ""))
+    if m == "DELETE":
+        return api.delete_question_comment(conn, comment_id, actor)
+
+
 ROUTES = [
     (r"/api/runner/projects/(\d+)", r_orchestrator_project),
     (r"/api/runner/projects", r_orchestrator_projects),
@@ -559,13 +620,17 @@ ROUTES = [
     (r"/api/wiki/([^/]+)/move", r_wiki_move),
     (r"/api/wiki-revisions/(\d+)", r_wiki_rev),
     (r"/api/wiki/([^/]+)", r_wiki_page),
+    (r"/api/ticket-boards", r_ticket_boards),
+    (r"/api/ticket-boards/(\d+)", r_ticket_board),
     (r"/api/tickets", r_tickets),
     (r"/api/tickets/(\d+)/claim", r_ticket_claim),
+    (r"/api/tickets/(\d+)/comments/(\d+)", r_ticket_comment),
     (r"/api/tickets/(\d+)/comments", r_ticket_comments),
     (r"/api/tickets/(\d+)/links", r_ticket_links),
     (r"/api/tickets/(\d+)/tree", r_ticket_tree),
     (r"/api/tickets/(\d+)", r_ticket),
     (r"/api/questions", r_questions),
+    (r"/api/questions/comments/(\d+)", r_question_comment_item),
     (r"/api/questions/(\d+)/answers", r_answers),
     (r"/api/questions/(\d+)/accept", r_accept),
     (r"/api/questions/(\d+)", r_question),

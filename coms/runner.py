@@ -1,6 +1,6 @@
 """ACP-backed ticket runner for Coms Board."""
 from __future__ import annotations
-import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid
+import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 from . import db
 from .acp import AcpConnection, AcpError
@@ -8,6 +8,79 @@ from .workspace import DEFAULT_WORKSPACE, workspace_path
 from .orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
+OPENCODE_LOCAL_PROVIDER_ID = 'coms-local'
+
+
+def normalize_opencode_api_base_url(value):
+    value = str(value or DEFAULT_OPENCODE_API_BASE_URL).strip().rstrip('/')
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in ('http', 'https') or not parts.netloc or parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError('OpenCode API URL must be an http(s) base URL without credentials, query, or fragment.')
+    path = parts.path.rstrip('/')
+    if not path.endswith('/v1'):
+        path += '/v1'
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, '', ''))
+
+
+def _opencode_model_ids(base_url, api_key):
+    request = urllib.request.Request(base_url.rstrip('/') + '/models', headers={'Accept': 'application/json'})
+    if api_key:
+        request.add_header('Authorization', 'Bearer ' + api_key)
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return []
+    entries = payload.get('data', payload.get('models', [])) if isinstance(payload, dict) else []
+    models = []
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict):
+            model_id = entry.get('id') or entry.get('name')
+        else:
+            model_id = entry if isinstance(entry, str) else ''
+        if model_id and model_id not in models:
+            models.append(str(model_id))
+    return models
+
+
+def backend_environment(name, settings, values=None):
+    env = dict(values or {})
+    if name != 'opencode':
+        return env
+    base_url = normalize_opencode_api_base_url(settings.get('opencode_api_base_url', DEFAULT_OPENCODE_API_BASE_URL))
+    api_key = settings.get('opencode_api_key', '')
+    model_ids = _opencode_model_ids(base_url, api_key)
+    model_hint = str(settings.get('opencode_api_model', '')).strip()
+    selected = str(settings.get('model_opencode', '')).strip()
+    prefix = OPENCODE_LOCAL_PROVIDER_ID + '/'
+    if model_hint.startswith(prefix): model_hint = model_hint[len(prefix):]
+    if selected.startswith(prefix): selected = selected[len(prefix):]
+    elif '/' in selected: selected = ''
+    if model_hint and model_hint not in model_ids:
+        model_ids.insert(0, model_hint)
+    if selected and selected not in model_ids:
+        model_ids.insert(0, selected)
+    config = {
+        '$schema': 'https://opencode.ai/config.json',
+        'provider': {
+            OPENCODE_LOCAL_PROVIDER_ID: {
+                'npm': '@ai-sdk/openai-compatible',
+                'name': 'Local LLM API',
+                'options': {
+                    'baseURL': base_url,
+                    'apiKey': '{env:COMS_OPENCODE_API_KEY}',
+                },
+                'models': {model_id: {'name': model_id} for model_id in model_ids},
+            },
+        },
+    }
+    default_model = selected if selected in model_ids else (model_ids[0] if model_ids else '')
+    if default_model:
+        config['model'] = OPENCODE_LOCAL_PROVIDER_ID + '/' + default_model
+    env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, separators=(',', ':'))
+    env['COMS_OPENCODE_API_KEY'] = api_key
+    return env
 
 
 def _release_acp_db():
@@ -135,9 +208,9 @@ class Runner:
             chosen=next((x.get('optionId') for x in options if x.get('kind') in ('allow_once','allow_always','allow')), None)
             if chosen: respond({'outcome':{'outcome':'selected','optionId':chosen}})
             else: respond({'outcome':{'outcome':'cancelled'}})
-        cmd=backend_command(backend, self.settings())
+        settings=self.settings(); cmd=backend_command(backend, settings)
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'agent-runner'}, mcp_servers=board_servers('agent-runner',ticket_id,run_id))
+        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'agent-runner'}), mcp_servers=board_servers('agent-runner',ticket_id,run_id))
         try:
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,self.settings()); return c
         except Exception:
@@ -160,13 +233,13 @@ class Runner:
             c=self._orchestrator_connection(backend,cwd,settings)
             option=next((o for o in c.config_options if o.get('id')=='model'),{})
             return {'backend':backend,'models':c.models(),'current':c.current_model(),'config_id':option.get('id','model')}
-        key=(backend,tuple(cmd),cwd)
+        key=(backend,tuple(cmd),cwd,settings.get('opencode_api_base_url',''),settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
         with self.model_lock:
             c=self.model_conns.get(key)
             if c is not None and not c.alive:
                 self.model_conns.pop(key,None); c.close(); c=None
             if c is None:
-                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=lambda _m:None,on_request=lambda _m,respond:respond({'outcome':{'outcome':'cancelled'}}),on_close=lambda _e:None,logger=lambda _m:None,env={'COMS_DB':str(db.db_path()),'COMS_AGENT':'model-discovery'})
+                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=lambda _m:None,on_request=lambda _m,respond:respond({'outcome':{'outcome':'cancelled'}}),on_close=lambda _e:None,logger=lambda _m:None,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path()),'COMS_AGENT':'model-discovery'}))
                 try:
                     c.start(); c.session_new(cwd=cwd); self.model_conns[key]=c
                 except Exception:
@@ -322,7 +395,7 @@ class Runner:
                 conn.execute("UPDATE ticket_reviews SET status='superseded',reason='Ticket changed while review was starting.',finished_at=? WHERE id=?",(now(),review_id)); conn.commit(); return
             backend=settings.get('active_backend','opencode'); cwd=workspace_path(settings); cmd=backend_command(backend,settings)
             if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator-review'},mcp_servers=board_servers('orchestrator-review',readonly=True))
+            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator-review'}),mcp_servers=board_servers('orchestrator-review',readonly=True))
             with self.lock: self.review_conns[tid]=c
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
             comments=current.get('comments') or []
@@ -428,7 +501,7 @@ class Runner:
     def _orchestrator_connection(self,backend,cwd,settings):
         cmd=backend_command(backend,settings)
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-        key=(backend,tuple(cmd),cwd,settings.get('model_'+backend,''))
+        key=(backend,tuple(cmd),cwd,settings.get('model_'+backend,''),settings.get('opencode_api_base_url','') if backend=='opencode' else '',settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
         with self.orchestrator_conn_lock:
             c=self.orchestrator_conn
             if c is not None and (self.orchestrator_conn_key!=key or not c.alive):
@@ -455,7 +528,7 @@ class Runner:
                     opt=next((x.get('optionId') for x in options if isinstance(x,dict) and x.get('kind') in ('allow_once','allow_always','allow')),None) if transcript else None
                     if transcript: transcript.permission(params,opt or 'cancelled')
                     respond({'outcome':{'outcome':'selected','optionId':opt}} if opt else {'outcome':{'outcome':'cancelled'}})
-                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env={'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator'},mcp_servers=board_servers('orchestrator'))
+                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator'}),mcp_servers=board_servers('orchestrator'))
                 try:
                     c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
                 except Exception:

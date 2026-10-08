@@ -80,7 +80,7 @@
     if (d < 86400 * 30) return `${Math.floor(d / 86400)}d ago`;
     return iso.slice(0, 10);
   };
-  const tags = (s, base) => (s || '').split(',').filter(Boolean).map((t) => `<a class="tag" href="${base}?tag=${encodeURIComponent(t)}">${esc(t)}</a>`).join('');
+  const tags = (s, base) => (s || '').split(',').filter(Boolean).map((t) => `<a class="tag" href="${base}${base.includes('?') ? '&' : '?'}tag=${encodeURIComponent(t)}">${esc(t)}</a>`).join('');
   const badge = (v, extra = '') => v ? `<span class="badge ${esc(v)} ${extra}">${esc(v.replace('_', ' '))}</span>` : '';
   const chip = (a) => a ? `<a class="who-chip" href="#/agents/${encodeURIComponent(a)}">${esc(a)}</a>` : '<span class="muted mono small">—</span>';
 
@@ -100,7 +100,8 @@
     const el = document.getElementById(id), btn = $('#toggleside');
     if (!el || !btn) return;
     const apply = (c) => { el.classList.toggle('aside-collapsed', c); btn.classList.toggle('on', c); };
-    apply(localStorage.getItem(storeKey) === '0');
+    const saved = localStorage.getItem(storeKey);
+    apply(saved === null ? window.matchMedia('(max-width: 900px)').matches : saved === '0');
     btn.onclick = () => { const c = !el.classList.contains('aside-collapsed'); localStorage.setItem(storeKey, c ? '0' : '1'); apply(c); };
   };
   const refLink = (ref) => {
@@ -110,6 +111,45 @@
   };
   const qs = () => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
   const setTab = (t) => document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === t));
+  const header = $('.topbar'), headerTools = $('#header-tools'), menuToggle = $('#menu-toggle'), menuBackdrop = $('#menu-backdrop');
+  const mobileHeader = window.matchMedia('(max-width: 900px)');
+  if (header && headerTools && menuToggle && menuBackdrop) {
+    headerTools.inert = mobileHeader.matches;
+    const closeMenu = (restoreFocus = false) => {
+      header.classList.remove('menu-open'); document.body.classList.remove('menu-open'); menuBackdrop.hidden = true;
+      menuToggle.setAttribute('aria-expanded', 'false'); menuToggle.setAttribute('aria-label', 'Open menu');
+      headerTools.inert = mobileHeader.matches;
+      if (restoreFocus && mobileHeader.matches) menuToggle.focus();
+    };
+    const openMenu = () => {
+      header.classList.add('menu-open'); document.body.classList.add('menu-open'); menuBackdrop.hidden = false;
+      menuToggle.setAttribute('aria-expanded', 'true'); menuToggle.setAttribute('aria-label', 'Close menu');
+      headerTools.inert = false; $('#tabs a').focus();
+    };
+    menuToggle.addEventListener('click', () => menuToggle.getAttribute('aria-expanded') === 'true' ? closeMenu(true) : openMenu());
+    menuBackdrop.addEventListener('click', () => closeMenu(true));
+    $('#tabs').addEventListener('click', (event) => { if (event.target.closest('a')) window.setTimeout(() => closeMenu(), 0); });
+    $('#searchform').addEventListener('submit', (event) => {
+      event.preventDefault();
+      location.hash = `#/search?q=${encodeURIComponent($('#q').value.trim())}`;
+      if (header.classList.contains('menu-open')) closeMenu();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (!header.classList.contains('menu-open')) return;
+      if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = [menuToggle, ...headerTools.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')]
+        .filter((el) => !el.disabled && el.getClientRects().length);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (!focusable.includes(document.activeElement)) { event.preventDefault(); first.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+    mobileHeader.addEventListener('change', (event) => {
+      if (!event.matches) closeMenu(false);
+      else headerTools.inert = !header.classList.contains('menu-open');
+    });
+  }
   const wireWikilinks = (root, known) => root.querySelectorAll('a.wikilink').forEach((a) => { if (known && !known.has(a.dataset.slug)) a.classList.add('missing'); });
   const field = (label, inner) => `<label>${label}${inner}</label>`;
   const opts = (list, cur) => list.map((v) => `<option value="${v}"${v === cur ? ' selected' : ''}>${v.replace('_', ' ')}</option>`).join('');
@@ -170,7 +210,6 @@
     if (window.MdEditor) MdEditor.sweep();
   }
   window.addEventListener('hashchange', render);
-  $('#searchform').addEventListener('submit', (e) => { e.preventDefault(); location.hash = `#/search?q=${encodeURIComponent($('#q').value)}`; });
 
   // ------------------------------------------------------------ HOME
   route(/^\/$/, async () => {
@@ -237,10 +276,10 @@
     const table = `
         ${q.tag ? `<div class="filters">tag: <span class="chip on">${esc(q.tag)}</span> <a class="btn sm ghost" href="#/wiki">clear</a></div>` : ''}
         ${inFolder ? `<div class="filters"><a class="chip ${!q.r ? 'on' : ''}" href="#/wiki?folder=${encodeURIComponent(q.folder)}">this folder</a><a class="chip ${q.r ? 'on' : ''}" href="#/wiki?folder=${encodeURIComponent(q.folder)}&r=1">with sub-folders</a>${subfolders.map((f) => `<a class="chip" href="#/wiki?folder=${encodeURIComponent(f.path)}">📁 ${esc(f.name)} <span class="muted">${f.total_count}</span></a>`).join('')}</div>` : ''}
-        <table class="grid fixed" id="wt"><colgroup><col>${showFolder ? '<col class="w170">' : ''}<col><col class="w120"><col class="w120"><col class="w70"></colgroup>
+        <div class="wiki-table-scroll"><table class="grid fixed" id="wt"><colgroup><col>${showFolder ? '<col class="w170">' : ''}<col><col class="w120"><col class="w120"><col class="w70"></colgroup>
         <thead><tr><th>Page</th>${showFolder ? '<th>Folder</th>' : ''}<th>Tags</th><th>Dept</th><th>Updated</th><th>Size</th></tr></thead><tbody>
         ${pages.map((p) => `<tr data-k="${esc((p.title + ' ' + p.slug + ' ' + p.tags + ' ' + (p.folder || '')).toLowerCase())}"><td><a class="title" href="#/wiki/${p.slug}">${esc(p.title)}</a><div class="mono small muted ellipsis" title="${esc(p.slug)}">${esc(p.slug)}</div></td>${showFolder ? `<td class="mono small wrap">${folderCell(p)}</td>` : ''}<td>${tags(p.tags, '#/wiki')}</td><td class="mono small">${esc(p.department || '—')}</td><td class="ts" title="${esc(p.updated_at)}">${ago(p.updated_at)}<br><span class="muted">${esc(p.updated_by)}</span></td><td class="mono small">${(p.size / 1024).toFixed(1)}k</td></tr>`).join('') || `<tr><td colspan="${showFolder ? 6 : 5}" class="muted">${inFolder ? 'no pages in this folder' : 'no pages yet — agents write here with <code>coms wiki put</code>'}</td></tr>`}
-        </tbody></table>`;
+        </tbody></table></div>`;
     const aside = `<div class="card"><h3>Tags</h3>${allTags.map((t) => `<a class="tag" href="#/wiki?tag=${encodeURIComponent(t)}">${esc(t)}</a>`).join('') || '<span class="muted">—</span>'}</div>
         <div class="card tint-c"><h3>For agents</h3><pre class="mono small" style="white-space:pre-wrap;margin:0">coms wiki search "&lt;topic&gt;"
 coms wiki tree [prefix]
@@ -250,7 +289,7 @@ coms wiki mv &lt;slug&gt; a/b
 coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     paint(`
       <div class="pagehead"><div><h1>Wiki</h1><div class="sub">long-term agent notes — how-tos, gotchas, verified procedures${inFolder ? ` · <span class="mono">${folderCrumb(q.folder, q.folder)}</span>` : ''}</div></div>
-        <div class="actions"><input id="wf" class="mono" placeholder="filter…" style="border:3px solid #111;padding:.4rem .6rem">${asideToggleBtn()}<a class="btn primary" href="#/wiki/new${inFolder && q.folder ? `?folder=${encodeURIComponent(q.folder)}` : ''}">+ New page</a></div></div>
+        <div class="actions"><input id="wf" class="wiki-filter mono" placeholder="filter…" style="border:3px solid #111;padding:.4rem .6rem">${asideToggleBtn()}<a class="btn primary" href="#/wiki/new${inFolder && q.folder ? `?folder=${encodeURIComponent(q.folder)}` : ''}">+ New page</a></div></div>
       ${layout({ id: 'wikiindex', nav: folderTree(tree, inFolder ? q.folder : undefined), body: table, aside })}`);
     wireAside('wikiindex', 'coms.wikiside');
     $('#wf').addEventListener('input', (e) => { const v = e.target.value.toLowerCase(); document.querySelectorAll('#wt tbody tr').forEach((tr) => tr.classList.toggle('hidden', !(tr.dataset.k || '').includes(v))); });
@@ -337,8 +376,39 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   }
 
   // ------------------------------------------------------------ TICKETS
+  const boardOpts = (boards, cur) => boards.map((b) => `<option value="${b.id}"${String(b.id) === String(cur) ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
+  const rememberBoard = (id) => localStorage.setItem('coms.ticketboard', String(id));
+  const currentBoard = (boards, id) => boards.find((b) => String(b.id) === String(id || localStorage.getItem('coms.ticketboard'))) || boards.find((b) => b.id === 1);
+  async function boardEditor(board) {
+    try {
+      const pages = await GET('/api/wiki');
+      const dialog = document.createElement('dialog');
+      dialog.className = 'board-dialog card';
+      dialog.innerHTML = `<form class="form"><h2>${board ? 'Edit board' : 'New board'}</h2>
+        ${field('Board name', `<input name="name" required maxlength="200" value="${esc(board ? board.name : '')}">`)}
+        ${field('Description', `<textarea name="description" rows="3">${esc(board ? board.description : '')}</textarea>`)}
+        ${field('Project context in wiki', `<select name="wiki_slug"><option value="">— no page linked —</option>${pages.map((p) => `<option value="${esc(p.slug)}"${board && board.wiki_slug === p.slug ? ' selected' : ''}>${esc(p.title)} (${esc(p.slug)})</option>`).join('')}</select>`)}
+        <p class="small muted">Link a wiki page with codebase notes and documentation. Wiki pages remain shared.</p>
+        <p class="board-error small" role="alert"></p>
+        <div class="form-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn ok" type="submit">Save board</button></div></form>`;
+      document.body.appendChild(dialog);
+      dialog.addEventListener('close', () => dialog.remove());
+      $('[data-cancel]', dialog).onclick = () => dialog.close();
+      $('form', dialog).onsubmit = async (e) => {
+        e.preventDefault();
+        const button = $('button[type="submit"]', dialog); button.disabled = true;
+        try {
+          const saved = await api(board ? 'PATCH' : 'POST', board ? `/api/ticket-boards/${board.id}` : '/api/ticket-boards', Object.fromEntries(new FormData(e.target)));
+          rememberBoard(saved.id); dialog.close(); toast('board saved');
+          const target = `#/tickets?board=${saved.id}`;
+          if (location.hash === target) render(); else location.hash = target;
+        } catch (err) { $('.board-error', dialog).textContent = err.message; button.disabled = false; }
+      };
+      dialog.showModal(); $('input[name="name"]', dialog).focus();
+    } catch (e) { fail(e); }
+  }
   const ticketItem = (t) => `<div class="item"><div class="main"><a class="title" href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a>
-    <div class="meta">${badge(t.status)}${badge(t.priority)}${badge(t.type)} ${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''} <span>${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</span> ${t.department ? `<span>${esc(t.department)}</span>` : ''} <span class="ts">${ago(t.updated_at)}</span> ${t.comment_count ? `<span>💬 ${t.comment_count}</span>` : ''} ${tags(t.tags, '#/tickets')}</div></div></div>`;
+    <div class="meta">${badge(t.status)}${badge(t.priority)}${badge(t.type)} ${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''} <span>${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</span> ${t.department ? `<span>${esc(t.department)}</span>` : ''} <span class="ts">${ago(t.updated_at)}</span> ${t.comment_count ? `<span>💬 ${t.comment_count}</span>` : ''} ${tags(t.tags, `#/tickets?board=${t.board_id}`)}</div></div></div>`;
   // brief dict (parent / child / tree node): id,title,type,status,priority,assignee,requester,parent_id,updated_at
   const briefItem = (b) => `<div class="item"><div class="main"><a class="title" href="#/tickets/${b.id}">#${b.id} ${esc(b.title)}</a>
     <div class="meta">${badge(b.type)}${badge(b.status)}${badge(b.priority)} ${b.assignee ? chip(b.assignee) : '<b>unassigned</b>'} <span class="ts">${ago(b.updated_at)}</span></div></div></div>`;
@@ -347,8 +417,12 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     setTab('tickets');
     const q = qs();
     await loadRefs();
+    const boards = await GET('/api/ticket-boards');
+    const board = currentBoard(boards, q.board);
+    q.board = String(board.id); rememberBoard(board.id);
     const view = q.view || localStorage.getItem('coms.tview') || 'list';
     const params = new URLSearchParams();
+    params.set('board', board.id);
     if (q.status) params.set('status', q.status); else if (q.all) params.set('all', '1'); else if (view === 'board') params.set('all', '1');
     if (q.assignee) params.set('assignee', q.assignee); if (q.unassigned) params.set('unassigned', '1');
     if (q.dept) params.set('dept', q.dept); if (q.type) params.set('type', q.type);
@@ -357,9 +431,13 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const link = (k, v) => { const n = { ...q }; if (v === undefined) delete n[k]; else n[k] = v; return `#/tickets?${new URLSearchParams(n)}`; };
     paint(`
       <div class="pagehead"><div><h1>Tickets</h1><div class="sub">research tasks, chores and bugs for the agent team</div></div>
-        <div class="actions"><button class="btn ${view === 'list' ? 'primary' : ''}" id="vl">List</button><button class="btn ${view === 'board' ? 'primary' : ''}" id="vb">Board</button><a class="btn ok" href="#/tickets/new">+ New ticket</a></div></div>
+        <div class="actions"><button class="btn ${view === 'list' ? 'primary' : ''}" id="vl">List</button><button class="btn ${view === 'board' ? 'primary' : ''}" id="vb">Board</button><a class="btn ok" href="#/tickets/new?board=${board.id}">+ New ticket</a></div></div>
+      <div class="board-toolbar"><label for="ticket-board">Project board</label><select id="ticket-board">${boardOpts(boards, board.id)}</select>
+        <div class="actions"><button class="btn sm" id="board-new">+ New board</button><button class="btn sm" id="board-edit">Edit board</button><button class="btn sm danger" id="board-delete"${board.id === 1 ? ' disabled title="The default board is kept for existing tickets and integrations"' : ''}>Delete board</button></div>
+      </div>
+      ${board.description || board.wiki_slug ? `<div class="board-context">${board.description ? `<span>${esc(board.description)}</span>` : ''}${board.wiki_slug ? `<a class="btn sm" href="#/wiki/${encodeURIComponent(board.wiki_slug)}">Project wiki ↗</a>` : ''}</div>` : ''}
       <div class="filters">
-        <a class="chip ${!q.status && !q.all && !q.unassigned ? 'on' : ''}" href="#/tickets">active</a>
+        <a class="chip ${!q.status && !q.all && !q.unassigned ? 'on' : ''}" href="#/tickets?board=${board.id}">active</a>
         ${TS.map((s) => `<a class="chip ${q.status === s ? 'on' : ''}" href="${link('status', s)}">${s.replace('_', ' ')}</a>`).join('')}
         <a class="chip ${q.all ? 'on' : ''}" href="${link('all', '1')}">all</a>
         <a class="chip ${q.unassigned ? 'on' : ''}" href="${link('unassigned', '1')}">unassigned</a>
@@ -369,11 +447,19 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         ${q.tag ? `<span class="chip on">tag: ${esc(q.tag)}</span> <a class="btn sm ghost" href="${link('tag', undefined)}">×</a>` : ''}
         <span class="muted mono small">${tix.length} tickets</span></div>
       ${view === 'board' ? kanban(tix) : (tix.length ? `<div class="list">${tix.map(ticketItem).join('')}</div>` : '<div class="empty">no tickets match</div>')}`);
-    $('#vl').onclick = () => { localStorage.setItem('coms.tview', 'list'); const hash=link('view', 'list'); if(location.hash!==hash)location.hash=hash; };
-    $('#vb').onclick = () => { localStorage.setItem('coms.tview', 'board'); const hash=link('view', 'board'); if(location.hash!==hash)location.hash=hash; };
+    const showView = (mode) => { localStorage.setItem('coms.tview', mode); const target = link('view', mode); if (location.hash === target) render(); else location.hash = target; };
+    $('#vl').onclick = () => showView('list');
+    $('#vb').onclick = () => showView('board');
     $('#fa').onchange = (e) => location.hash = link('assignee', e.target.value || undefined);
     $('#fd').onchange = (e) => location.hash = link('dept', e.target.value || undefined);
     $('#ft').onchange = (e) => location.hash = link('type', e.target.value || undefined);
+    $('#ticket-board').onchange = (e) => { rememberBoard(e.target.value); location.hash = link('board', e.target.value); };
+    $('#board-new').onclick = () => boardEditor(null);
+    $('#board-edit').onclick = () => boardEditor(board);
+    $('#board-delete').onclick = async () => {
+      if (!confirm(`Delete board “${board.name}” and ALL ${board.ticket_count} tickets, including comments and links? This cannot be undone. Wiki pages are kept.`)) return;
+      try { await api('DELETE', `/api/ticket-boards/${board.id}`); rememberBoard(1); toast('board deleted'); location.hash = '#/tickets?board=1'; } catch (e) { fail(e); }
+    };
   });
   function kanban(tix) {
     const cols = [['open', 'Open'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['review', 'Review'], ['done', 'Done'], ['wontfix', 'Won’t fix']];
@@ -384,20 +470,25 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     setTab('tickets'); await loadRefs();
     let templates = []; try { templates = await GET('/api/runner/templates'); } catch (e) { if(e.name==='AbortError')throw e; }
     const q = qs();
+    const boards = await GET('/api/ticket-boards');
+    const parent = q.parent ? await GET(`/api/tickets/${q.parent}`) : null;
+    const board = currentBoard(boards, parent ? parent.board_id : q.board);
     paint(`<div class="pagehead"><h1>New ticket</h1></div>
       <div class="card form" style="max-width:1000px">
+        ${field('Project board', `<select id="new-board">${boardOpts(boards, board.id)}</select>`)}
         ${field('Title', `<input id="title" placeholder="Research: …">`)}
         <div class="grid-3">${field('Type', `<select id="type">${opts(TT, q.type || 'research')}</select>`)}${field('Priority', `<select id="prio">${opts(PR, 'p2')}</select>`)}${field('Department', `<select id="dept">${deptOpts(q.dept || (DEPTS[0] && DEPTS[0].slug))}</select>`)}</div>
         <div class="grid-2">${field('Assignee', `<select id="assignee">${agentOpts(q.assignee || '')}</select>`)}${field('Tags', `<input id="tags" placeholder="topic, area">`)}</div>
         <div class="grid-2">${field('Agent template', `<select id="template"><option value="">Use default runner</option>${templates.filter(x=>x.enabled).map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>`)}${field('Execution gate', '<label class="small"><input id="ready" type="checkbox"> Ready for agent execution</label>')}</div>
         <div class="grid-2">${field('Parent ticket id (optional) — story &gt; job &gt; task', `<input id="parent" type="number" min="1" value="${esc(q.parent || '')}" placeholder="e.g. 42">`)}</div>
         ${field('Body (markdown) — what to find out, what "done" looks like, where to start', '<div id="ed"></div>')}
-        <div class="form-actions"><a class="btn" href="#/tickets">Cancel</a><button class="btn ok" id="save">Create</button></div></div>`);
+        <div class="form-actions"><a class="btn" href="#/tickets?board=${board.id}">Cancel</a><button class="btn ok" id="save">Create</button></div></div>`);
     const ed = new MdEditor($('#ed'), { onSave: save, minHeight: '300px', placeholder: '## Goal\n\n## Definition of done\n\n## Starting points\n- link to source…' });
     $('#save').onclick = () => save(ed.value);
     async function save(body) {
       const payload = { title: $('#title').value, body, type: $('#type').value, priority: $('#prio').value, department: $('#dept').value, assignee: $('#assignee').value, tags: $('#tags').value, ready_for_execution: $('#ready').checked, agent_template_id: $('#template').value || null };
       const p = $('#parent').value.trim(); if (p) payload.parent_id = +p;
+      payload.board_id = Number($('#new-board').value);
       try { const t = await api('POST', '/api/tickets', payload); toast(`ticket #${t.id} created`); location.hash = `#/tickets/${t.id}`; } catch (e) { fail(e); }
     }
     $('#title').focus();
@@ -406,8 +497,11 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   route(/^\/tickets\/(\d+)$/, async (id) => {
     setTab('tickets'); await loadRefs();
     const [t, runnerData, templates] = await Promise.all([GET(`/api/tickets/${id}`), GET(`/api/tickets/${id}/runner`), GET('/api/runner/templates').catch(e=>{if(e.name==='AbortError')throw e;return [];})]);
+    const boards = await GET('/api/ticket-boards');
+    const board = currentBoard(boards, t.board_id); rememberBoard(board.id);
     const known = new Set((await GET('/api/wiki')).map((x) => x.slug));
     paint(`
+      <div class="crumb mono small"><a href="#/tickets?board=${board.id}">← ${esc(board.name)} board</a></div>
       <div class="pagehead"><div>${t.parent ? `<div class="crumb small mono" style="margin-bottom:.3rem">↑ parent <a href="#/tickets/${t.parent.id}">#${t.parent.id} ${esc(t.parent.title)}</a> ${badge(t.parent.type)}${badge(t.parent.status)}</div>` : ''}<h1>#${t.id} <span id="ttl">${esc(t.title)}</span></h1><div class="sub">opened ${ago(t.created_at)} by ${esc(t.requester || '?')} · updated ${ago(t.updated_at)}${t.closed_at ? ` · closed ${t.closed_at.slice(0, 10)}` : ''}</div></div>
         <div class="actions"><a class="btn" href="#/tickets/${t.id}/tree">🌲 Tree</a>${t.status === 'open' && !t.assignee ? `<button class="btn pink" id="claim">Claim as ${esc(who())}</button>` : ''}<button class="btn" id="editbody">Edit body</button><button class="btn ok" id="editresult">${t.result ? 'Edit result' : 'Write result'}</button></div></div>
       ${layout({ id: 'ticket', body: `
@@ -425,10 +519,11 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           <form id="runner-form" class="runner-form"><textarea id="runner-input" placeholder="Message the ticket agent…" rows="3"></textarea><button class="btn primary">Send to agent</button></form>
           <div class="mono small muted">${runnerData.runs.map(r=>`Run #${r.id}: ${esc(r.status)} · ${esc(r.backend)}${r.error?` · ${esc(r.error)}`:''}`).join('<br>') || 'Queue starts only after Ready for agent execution is enabled and the ticket is not assigned/tagged for a human.'}</div>
         </div>
-        <div class="card"><h3>Timeline</h3><div class="timeline">${t.comments.map((c) => `<div class="tl ${c.kind}"><div><div class="who">${chip(c.author)}</div><div class="ts">${ago(c.created_at)}</div></div><div class="txt ${c.kind === 'comment' ? 'md' : ''}">${c.kind === 'comment' ? MD.render(c.body) : esc(c.body)}</div></div>`).join('') || '<span class="muted small">no comments</span>'}</div>
+        <div class="card"><h3>Timeline</h3><div class="timeline">${t.comments.map((c) => `<div class="tl ${c.kind}"><div><div class="who">${chip(c.author)}</div><div class="ts">${ago(c.created_at)}${c.updated_at ? ` · edited ${ago(c.updated_at)}` : ''}</div></div><div class="txt ${c.kind === 'comment' ? 'md' : ''}">${c.kind === 'comment' ? MD.render(c.body) : esc(c.body)}${c.kind === 'comment' && c.author === who() ? `<div class="comment-actions"><button class="btn sm ghost" data-ticket-comment-edit="${c.id}">edit</button><button class="btn sm ghost" data-ticket-comment-delete="${c.id}">delete</button></div>` : ''}</div></div>`).join('') || '<span class="muted small">no comments</span>'}</div>
           <div style="margin-top:1rem"><div id="ced"></div><div class="form-actions" style="margin-top:.5rem"><button class="btn" id="cmt">Comment</button></div></div></div>`,
         aside: `
         <div class="card"><h3>Fields</h3><div class="ticket-meta" style="grid-template-columns:1fr">
+          <label>Project board<select id="f-board">${boardOpts(boards, t.board_id)}</select></label>
           <label>Status<select id="f-status">${opts(TS, t.status)}</select></label>
           <label>Priority<select id="f-priority">${opts(PR, t.priority)}</select></label>
           <label>Type<select id="f-type">${opts(TT, t.type)}</select></label>
@@ -441,8 +536,28 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         </div><div class="form-actions" style="margin-top:.8rem"><button class="btn primary" id="savef">Save fields</button></div></div>
         <div class="card tint-y small"><b class="mono">quick moves</b><div class="actions" style="margin-top:.5rem">${TS.filter((s) => s !== t.status).map((s) => `<button class="btn sm" data-mv="${s}">${s.replace('_', ' ')}</button>`).join('')}</div></div>` })}`);
     wireWikilinks(app, known);
+    app.querySelectorAll('[data-ticket-comment-edit]').forEach((button) => {
+      button.onclick = () => {
+        const comment = t.comments.find((c) => c.id === Number(button.dataset.ticketCommentEdit));
+        const text = button.closest('.txt');
+        text.innerHTML = '<textarea class="comment-edit-input" rows="4" aria-label="Edit comment"></textarea><div class="comment-actions"><button class="btn sm" data-comment-save>save</button><button class="btn sm ghost" data-comment-cancel>cancel</button></div>';
+        const input = text.querySelector('textarea'); input.value = comment.body; input.focus();
+        text.querySelector('[data-comment-cancel]').onclick = () => render();
+        text.querySelector('[data-comment-save]').onclick = async () => {
+          try { await api('PATCH', `/api/tickets/${id}/comments/${comment.id}`, { body: input.value }); toast('comment updated'); render(); }
+          catch (e) { fail(e); }
+        };
+      };
+    });
+    app.querySelectorAll('[data-ticket-comment-delete]').forEach((button) => {
+      button.onclick = async () => {
+        if (!confirm('Delete this comment?')) return;
+        try { await api('DELETE', `/api/tickets/${id}/comments/${button.dataset.ticketCommentDelete}`); toast('comment deleted'); render(); }
+        catch (e) { fail(e); }
+      };
+    });
     const patch = async (data, msg) => { try { const r = await api('PATCH', `/api/tickets/${id}`, data); toast(msg || 'saved'); if (r && r.open_children_warning && r.open_children_warning.length) { toast(`⚠ ${r.open_children_warning.length} open child ticket(s): ${r.open_children_warning.map((c) => '#' + c.id).join(', ')}`, true); } render(); } catch (e) { fail(e); } };
-    $('#savef').onclick = () => patch({ status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value, ready_for_execution: $('#f-ready').checked, agent_template_id: $('#f-template').value || null });
+    $('#savef').onclick = () => patch({ board_id: Number($('#f-board').value), status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value, ready_for_execution: $('#f-ready').checked, agent_template_id: $('#f-template').value || null });
     $('#runner-form').onsubmit = async (e) => { e.preventDefault(); const input=$('#runner-input'), body=input.value.trim(); if(!body)return; try { await api('POST', `/api/tickets/${id}/runner`, {body}); input.value=''; await refreshRunner(); } catch(err){fail(err);} };
     async function refreshRunner() {
       const d=await GET(`/api/tickets/${id}/runner`), box=$('#runner-messages');
@@ -539,7 +654,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         ${kind === 'answer' ? `<button class="accept ${p.accepted ? 'on' : ''}" title="${isAsker || p.accepted ? 'accept this answer' : 'only the asker accepts'}">✔</button>` : ''}</div>
       <div class="body"><div class="md">${MD.render(p.body)}</div>
         <div class="foot"><div class="actions"><button class="btn sm ghost act-comment">comment</button>${p.author === who() ? '<button class="btn sm ghost act-edit">edit</button>' : ''}</div><div class="ts">${kind === 'answer' ? 'answered' : 'asked'} ${ago(p.created_at)} by ${chip(p.author)}${p.updated_at !== p.created_at ? ` · edited ${ago(p.updated_at)}` : ''}</div></div>
-        ${p.comments.length ? `<div class="comments">${p.comments.map((c) => `<div class="c">${MD.inline(c.body)} — <span class="mono">${esc(c.author)}</span> <span class="ts">${ago(c.created_at)}</span></div>`).join('')}</div>` : ''}
+        ${p.comments.length ? `<div class="comments">${p.comments.map((c) => `<div class="c"><div>${MD.inline(c.body)} — <span class="mono">${esc(c.author)}</span> <span class="ts">${ago(c.created_at)}${c.updated_at ? ` · edited ${ago(c.updated_at)}` : ''}</span></div>${c.author === who() ? `<div class="comment-actions"><button class="btn sm ghost" data-question-comment-edit="${c.id}">edit</button><button class="btn sm ghost" data-question-comment-delete="${c.id}">delete</button></div>` : ''}</div>`).join('')}</div>` : ''}
         <div class="cform hidden inline-form"><input placeholder="add a comment…"><button class="btn sm">post</button></div>
       </div></div>`;
     paint(`
@@ -553,6 +668,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const vote = async (kind, tid, cur, val) => { try { await api('POST', '/api/questions/vote', { target_type: kind, target_id: +tid, value: cur === val ? 0 : val }); render(); } catch (e) { fail(e); } };
     app.querySelectorAll('.post').forEach((el) => {
       const kind = el.dataset.kind, tid = el.dataset.id;
+      const postData = kind === 'question' ? q : q.answers.find((a) => a.id === +tid);
       const cur = kind === 'question' ? q.my_vote : q.answers.find((a) => a.id === +tid).my_vote;
       el.querySelector('.up').onclick = () => vote(kind, tid, cur, 1);
       el.querySelector('.down').onclick = () => vote(kind, tid, cur, -1);
@@ -562,6 +678,27 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       el.querySelector('.act-comment').onclick = () => { cf.classList.toggle('hidden'); cf.querySelector('input').focus(); };
       const postC = async () => { const body = cf.querySelector('input').value; if (!body.trim()) return; try { await api('POST', '/api/questions/comments', { target_type: kind, target_id: +tid, body }); render(); } catch (e) { fail(e); } };
       cf.querySelector('button').onclick = postC; cf.querySelector('input').onkeydown = (e) => { if (e.key === 'Enter') postC(); };
+      el.querySelectorAll('[data-question-comment-edit]').forEach((button) => {
+        button.onclick = () => {
+          const cid = Number(button.dataset.questionCommentEdit);
+          const comment = postData.comments.find((c) => c.id === cid);
+          const row = button.closest('.c');
+          row.innerHTML = '<textarea class="comment-edit-input" rows="3" aria-label="Edit comment"></textarea><div class="comment-actions"><button class="btn sm" data-comment-save>save</button><button class="btn sm ghost" data-comment-cancel>cancel</button></div>';
+          const input = row.querySelector('textarea'); input.value = comment.body; input.focus();
+          row.querySelector('[data-comment-cancel]').onclick = () => render();
+          row.querySelector('[data-comment-save]').onclick = async () => {
+            try { await api('PATCH', `/api/questions/comments/${cid}`, { body: input.value }); toast('comment updated'); render(); }
+            catch (e) { fail(e); }
+          };
+        };
+      });
+      el.querySelectorAll('[data-question-comment-delete]').forEach((button) => {
+        button.onclick = async () => {
+          if (!confirm('Delete this comment?')) return;
+          try { await api('DELETE', `/api/questions/comments/${button.dataset.questionCommentDelete}`); toast('comment deleted'); render(); }
+          catch (e) { fail(e); }
+        };
+      });
       const ed = el.querySelector('.act-edit');
       if (ed) ed.onclick = () => {
         const cur_ = kind === 'question' ? q.body : q.answers.find((a) => a.id === +tid).body;
@@ -636,21 +773,27 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           <label>Workspace path<input id="rw" value="${esc(s.workspace)}"><small class="muted">A separate, existing directory for agent work.</small>${s.workspace_error?`<small class="error">${esc(s.workspace_error)}</small>`:''}</label></div>
           <div class="grid-3">${['opencode','codex','claude'].map(x=>`<label>${x} command (optional)<input id="cmd-${x}" value="${esc(s[x+'_command']||'')}" placeholder="${x==='opencode'?'opencode acp':x==='codex'?'codex-acp':'claude-code-acp'}"></label>`).join('')}</div>
           <div class="form-actions"><button class="btn primary" id="save-runner">Save settings</button></div><div class="small muted">Commands run in the configured workspace. The runner logs ACP output and permissions on each ticket.</div></div>
+        <div class="card"><h2>OpenCode LLM API</h2><div class="grid-3">
+          <label>OpenAI-compatible API base URL<input id="opencode-api-url" type="url" value="${esc(s.opencode_api_base_url||'http://localhost:11434/v1')}" placeholder="http://localhost:11434/v1"><small class="muted">The runner adds /v1 when it is missing.</small></label>
+          <label>API key<input id="opencode-api-key" type="password" autocomplete="new-password" placeholder="${s.opencode_api_key_set?'Saved; leave blank to keep':'Enter API key'}"><small class="muted">${s.opencode_api_key_set?'A key is saved.':'No key is saved.'} It is not shown after saving.</small></label>
+          <label>Model ID override<input id="opencode-api-model" value="${esc(s.opencode_api_model||'')}" placeholder="Auto-discover from /v1/models"><small class="muted">Use this if the API does not list models automatically.</small></label>
+        </div><label class="small muted"><input id="clear-opencode-api-key" type="checkbox"> Clear the saved API key</label><div class="small muted">OpenCode uses this endpoint and discovers model IDs from its /models route. Save settings to refresh its ACP connection.</div></div>
         <div class="card"><h2>Agent templates</h2><div class="list">${templates.map(t=>`<div class="item"><div class="main"><b>${esc(t.name)}</b> ${t.backend?badge(t.backend):'<span class="muted">active backend</span>'}<div class="small muted">${esc(t.prompt)}</div></div></div>`).join('')||'<div class="empty">No templates yet.</div>'}</div>
           <form id="template-form" class="form"><div class="grid-3"><label>Name<input id="tn" required></label><label>Backend override<select id="tb"><option value="">Active backend</option><option>opencode</option><option>codex</option><option>claude</option></select></label><label>Enabled<select id="te"><option value="1">yes</option><option value="0">no</option></select></label></div><label>Instructions<textarea id="tp" rows="4" placeholder="Specialist role and working instructions…"></textarea></label><button class="btn ok">Save template</button></form></div>
         <div class="card"><h2>Execution queue</h2><div class="list">${tickets.filter(t=>t.ready_for_execution).map(t=>`<div class="item"><div class="main"><a class="title" href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="meta">${badge(t.status)}${badge(t.priority)} · ${t.assignee?`assignee ${chip(t.assignee)}`:'unassigned'} · ${t.tags.toLowerCase().includes('human')?'human tagged':'ready'}</div></div></div>`).join('')||'<div class="empty">No tickets marked ready.</div>'}</div></div>
       </div><aside class="layout-aside"><div class="card tint-y"><h3>Safety gates</h3><p>Only tickets with <b>Ready for agent execution</b> enabled enter the queue. Tickets assigned to a registered human, with an assignee beginning <code>human</code>, or tagged <code>human</code> are skipped.</p><p>Priority order: p0 → p1 → p2 → p3.</p></div><div class="card"><h3>Monitoring</h3><p>Open a ticket’s <b>Agent runner chat</b> to view live transcript, debug logs and run status.</p></div></aside></div>`);
     let modelRequest=0,modelController=null,loadedModelBackend='';
-    const loadRunnerModels=async()=>{const request=++modelRequest;const backend=$('#rb').value,select=$('#runner-model'),note=$('#model-note');if(modelController)modelController.abort();modelController=new AbortController();const controller=modelController,timeout=setTimeout(()=>controller.abort(),90000);loadedModelBackend='';select.disabled=false;select.innerHTML='<option value="">Use ACP default</option>';note.innerHTML=`<span class="model-spinner" aria-hidden="true"></span> Connecting to ${esc(backend)} ACP… You can save settings while discovery runs.`;try{const response=await fetch(`/api/runner/models?backend=${encodeURIComponent(backend)}`,{headers:{'Content-Type':'application/json','X-Coms-Agent':who()},signal:controller.signal});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||response.statusText);if(request!==modelRequest||!select.isConnected)return;select.innerHTML='<option value="">Use ACP default</option>'+data.models.map(m=>`<option value="${esc(m.value)}">${esc(m.name||m.value)}</option>`).join('');const desired=s['model_'+backend]||data.current||'';if(data.models.some(m=>m.value===desired))select.value=desired;loadedModelBackend=backend;note.textContent=data.models.length?`${data.models.length} model${data.models.length===1?'':'s'} available from ${backend}.`:`This backend did not advertise a model selector; it will use its configured default.`;}catch(e){if(request!==modelRequest||!select.isConnected)return;note.textContent=`${e.name==='AbortError'?`${backend} model discovery timed out after 90 seconds`:`Could not load ${backend} models: ${e.message||'check backend command and authentication'}`}. You can still save this backend and use its default model.`;}finally{clearTimeout(timeout);}};
+    const loadRunnerModels=async()=>{const request=++modelRequest;const backend=$('#rb').value,select=$('#runner-model'),note=$('#model-note');if(modelController)modelController.abort();modelController=new AbortController();const controller=modelController,timeout=setTimeout(()=>controller.abort(),90000);loadedModelBackend='';select.disabled=false;select.innerHTML='<option value="">Use ACP default</option>';note.innerHTML=`<span class="model-spinner" aria-hidden="true"></span> Connecting to ${esc(backend)} ACP… You can save settings while discovery runs.`;try{const response=await fetch(`/api/runner/models?backend=${encodeURIComponent(backend)}`,{headers:{'Content-Type':'application/json','X-Coms-Agent':who()},signal:controller.signal});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||response.statusText);if(request!==modelRequest||!select.isConnected)return;select.innerHTML='<option value="">Use ACP default</option>'+data.models.map(m=>`<option value="${esc(m.value)}">${esc(m.name||m.value)}</option>`).join('');const desired=s['model_'+backend]||data.current||'';if(data.models.some(m=>m.value===desired))select.value=desired;loadedModelBackend=backend;note.textContent=data.models.length?`${data.models.length} model${data.models.length===1?'':'s'} available from ${backend}.`:backend==='opencode'?'No OpenCode models were advertised. Check the API settings or enter a model ID override.':`This backend did not advertise a model selector; it will use its configured default.`;}catch(e){if(request!==modelRequest||!select.isConnected)return;note.textContent=`${e.name==='AbortError'?`${backend} model discovery timed out after 90 seconds`:`Could not load ${backend} models: ${e.message||'check backend command and authentication'}`}. You can still save this backend and use its default model.`;}finally{clearTimeout(timeout);}};
     $('#rb').onchange=loadRunnerModels;$('#refresh-models').onclick=loadRunnerModels;loadRunnerModels();
-    $('#save-runner').onclick=async()=>{const payload={active_backend:$('#rb').value,parallel_agents:+$('#rp').value,workspace:$('#rw').value}; for(const x of ['opencode','codex','claude']) payload[x+'_command']=$('#cmd-'+x).value.trim();if(loadedModelBackend===payload.active_backend)payload['model_'+payload.active_backend]=$('#runner-model').value; try{await api('PUT','/api/runner/settings',payload);toast('runner settings saved');render();}catch(e){fail(e);}};
+    $('#save-runner').onclick=async()=>{const payload={active_backend:$('#rb').value,parallel_agents:+$('#rp').value,workspace:$('#rw').value,opencode_api_base_url:$('#opencode-api-url').value.trim(),opencode_api_model:$('#opencode-api-model').value.trim(),clear_opencode_api_key:$('#clear-opencode-api-key').checked};const apiKey=$('#opencode-api-key').value;if(apiKey&&!payload.clear_opencode_api_key)payload.opencode_api_key=apiKey;for(const x of ['opencode','codex','claude']) payload[x+'_command']=$('#cmd-'+x).value.trim();if(loadedModelBackend===payload.active_backend)payload['model_'+payload.active_backend]=$('#runner-model').value; try{await api('PUT','/api/runner/settings',payload);toast('runner settings saved');render();}catch(e){fail(e);}};
     $('#template-form').onsubmit=async e=>{e.preventDefault();try{await api('POST','/api/runner/templates',{name:$('#tn').value,prompt:$('#tp').value,backend:$('#tb').value,enabled:$('#te').value==='1'});toast('template saved');render();}catch(err){fail(err);}};
   });
 
   // ------------------------------------------------------------ SEARCH / ACTIVITY
   route(/^\/search$/, async () => {
     setTab('');
-    const q = qs().q || ''; $('#q').value = q;
+    const q = qs().q || '';
+    $('#q').value = q;
     const r = q ? await GET(`/api/search?q=${encodeURIComponent(q)}&limit=25`) : { wiki: [], tickets: [], questions: [] };
     paint(`<div class="pagehead"><h1>Search</h1><div class="sub mono">“${esc(q)}” · ${r.wiki.length + r.tickets.length + r.questions.length} hits</div></div>
       <div class="results row"><div class="col"><h3>Wiki (${r.wiki.length})</h3>${r.wiki.map((w) => `<div class="card flat"><a class="title" href="#/wiki/${w.slug}"><b>${esc(w.title)}</b></a><div class="snip">${MD.esc(w.snippet).replace(/\[([^\]]+)\]/g, '<b>$1</b>')}</div><div class="ts">${esc(w.slug)} · ${ago(w.updated_at)}</div></div>`).join('') || '<div class="empty">—</div>'}</div>
