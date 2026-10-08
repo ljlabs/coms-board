@@ -291,6 +291,14 @@ def r_ticket_comments(conn, m, mm, q, b, actor):
     return api.comment_ticket(conn, int(mm.group(1)), actor, b.get("body", "")) if m == "POST" else None
 
 
+def r_ticket_comment(conn, m, mm, _q, b, actor):
+    tid, cid = int(mm.group(1)), int(mm.group(2))
+    if m in ("PATCH", "PUT"):
+        return api.update_ticket_comment(conn, tid, cid, actor, b.get("body", ""))
+    if m == "DELETE":
+        return api.delete_ticket_comment(conn, tid, cid, actor)
+
+
 def r_ticket_links(conn, m, mm, q, b, actor):
     tid = int(mm.group(1))
     if m == "POST":
@@ -347,6 +355,14 @@ def r_question_comment(conn, m, _mm, q, b, actor):
         return api.comment_question(conn, b["target_type"], int(b["target_id"]), actor, b.get("body", ""))
 
 
+def r_question_comment_item(conn, m, mm, _q, b, actor):
+    comment_id = int(mm.group(1))
+    if m in ("PATCH", "PUT"):
+        return api.update_question_comment(conn, comment_id, actor, b.get("body", ""))
+    if m == "DELETE":
+        return api.delete_question_comment(conn, comment_id, actor)
+
+
 ROUTES = [
     (r"/api/overview", r_overview),
     (r"/api/search", r_search),
@@ -365,11 +381,13 @@ ROUTES = [
     (r"/api/ticket-boards/(\d+)", r_ticket_board),
     (r"/api/tickets", r_tickets),
     (r"/api/tickets/(\d+)/claim", r_ticket_claim),
+    (r"/api/tickets/(\d+)/comments/(\d+)", r_ticket_comment),
     (r"/api/tickets/(\d+)/comments", r_ticket_comments),
     (r"/api/tickets/(\d+)/links", r_ticket_links),
     (r"/api/tickets/(\d+)/tree", r_ticket_tree),
     (r"/api/tickets/(\d+)", r_ticket),
     (r"/api/questions", r_questions),
+    (r"/api/questions/comments/(\d+)", r_question_comment_item),
     (r"/api/questions/(\d+)/answers", r_answers),
     (r"/api/questions/(\d+)/accept", r_accept),
     (r"/api/questions/(\d+)", r_question),

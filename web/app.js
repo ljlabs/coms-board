@@ -56,7 +56,8 @@
     const el = document.getElementById(id), btn = $('#toggleside');
     if (!el || !btn) return;
     const apply = (c) => { el.classList.toggle('aside-collapsed', c); btn.classList.toggle('on', c); };
-    apply(localStorage.getItem(storeKey) === '0');
+    const saved = localStorage.getItem(storeKey);
+    apply(saved === null ? window.matchMedia('(max-width: 900px)').matches : saved === '0');
     btn.onclick = () => { const c = !el.classList.contains('aside-collapsed'); localStorage.setItem(storeKey, c ? '0' : '1'); apply(c); };
   };
   const refLink = (ref) => {
@@ -66,6 +67,40 @@
   };
   const qs = () => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
   const setTab = (t) => document.querySelectorAll('#tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === t));
+  const header = $('.topbar'), headerTools = $('#header-tools'), menuToggle = $('#menu-toggle'), menuBackdrop = $('#menu-backdrop');
+  const mobileHeader = window.matchMedia('(max-width: 900px)');
+  if (header && headerTools && menuToggle && menuBackdrop) {
+    headerTools.inert = mobileHeader.matches;
+    const closeMenu = (restoreFocus = false) => {
+      header.classList.remove('menu-open'); document.body.classList.remove('menu-open'); menuBackdrop.hidden = true;
+      menuToggle.setAttribute('aria-expanded', 'false'); menuToggle.setAttribute('aria-label', 'Open menu');
+      headerTools.inert = mobileHeader.matches;
+      if (restoreFocus && mobileHeader.matches) menuToggle.focus();
+    };
+    const openMenu = () => {
+      header.classList.add('menu-open'); document.body.classList.add('menu-open'); menuBackdrop.hidden = false;
+      menuToggle.setAttribute('aria-expanded', 'true'); menuToggle.setAttribute('aria-label', 'Close menu');
+      headerTools.inert = false; $('#tabs a').focus();
+    };
+    menuToggle.addEventListener('click', () => menuToggle.getAttribute('aria-expanded') === 'true' ? closeMenu(true) : openMenu());
+    menuBackdrop.addEventListener('click', () => closeMenu(true));
+    $('#tabs').addEventListener('click', (event) => { if (event.target.closest('a')) window.setTimeout(() => closeMenu(), 0); });
+    document.addEventListener('keydown', (event) => {
+      if (!header.classList.contains('menu-open')) return;
+      if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = [menuToggle, ...headerTools.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')]
+        .filter((el) => !el.disabled && el.getClientRects().length);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (!focusable.includes(document.activeElement)) { event.preventDefault(); first.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+    mobileHeader.addEventListener('change', (event) => {
+      if (!event.matches) closeMenu(false);
+      else headerTools.inert = !header.classList.contains('menu-open');
+    });
+  }
   const wireWikilinks = (root, known) => root.querySelectorAll('a.wikilink').forEach((a) => { if (known && !known.has(a.dataset.slug)) a.classList.add('missing'); });
   const field = (label, inner) => `<label>${label}${inner}</label>`;
   const opts = (list, cur) => list.map((v) => `<option value="${v}"${v === cur ? ' selected' : ''}>${v.replace('_', ' ')}</option>`).join('');
@@ -102,7 +137,6 @@
     app.innerHTML = '<div class="empty">404 — no such page</div>';
   }
   window.addEventListener('hashchange', render);
-  $('#searchform').addEventListener('submit', (e) => { e.preventDefault(); location.hash = `#/search?q=${encodeURIComponent($('#q').value)}`; });
 
   // ------------------------------------------------------------ HOME
   route(/^\/$/, async () => {
@@ -169,10 +203,10 @@
     const table = `
         ${q.tag ? `<div class="filters">tag: <span class="chip on">${esc(q.tag)}</span> <a class="btn sm ghost" href="#/wiki">clear</a></div>` : ''}
         ${inFolder ? `<div class="filters"><a class="chip ${!q.r ? 'on' : ''}" href="#/wiki?folder=${encodeURIComponent(q.folder)}">this folder</a><a class="chip ${q.r ? 'on' : ''}" href="#/wiki?folder=${encodeURIComponent(q.folder)}&r=1">with sub-folders</a>${subfolders.map((f) => `<a class="chip" href="#/wiki?folder=${encodeURIComponent(f.path)}">📁 ${esc(f.name)} <span class="muted">${f.total_count}</span></a>`).join('')}</div>` : ''}
-        <table class="grid fixed" id="wt"><colgroup><col>${showFolder ? '<col class="w170">' : ''}<col><col class="w120"><col class="w120"><col class="w70"></colgroup>
+        <div class="wiki-table-scroll"><table class="grid fixed" id="wt"><colgroup><col>${showFolder ? '<col class="w170">' : ''}<col><col class="w120"><col class="w120"><col class="w70"></colgroup>
         <thead><tr><th>Page</th>${showFolder ? '<th>Folder</th>' : ''}<th>Tags</th><th>Dept</th><th>Updated</th><th>Size</th></tr></thead><tbody>
         ${pages.map((p) => `<tr data-k="${esc((p.title + ' ' + p.slug + ' ' + p.tags + ' ' + (p.folder || '')).toLowerCase())}"><td><a class="title" href="#/wiki/${p.slug}">${esc(p.title)}</a><div class="mono small muted ellipsis" title="${esc(p.slug)}">${esc(p.slug)}</div></td>${showFolder ? `<td class="mono small wrap">${folderCell(p)}</td>` : ''}<td>${tags(p.tags, '#/wiki')}</td><td class="mono small">${esc(p.department || '—')}</td><td class="ts" title="${esc(p.updated_at)}">${ago(p.updated_at)}<br><span class="muted">${esc(p.updated_by)}</span></td><td class="mono small">${(p.size / 1024).toFixed(1)}k</td></tr>`).join('') || `<tr><td colspan="${showFolder ? 6 : 5}" class="muted">${inFolder ? 'no pages in this folder' : 'no pages yet — agents write here with <code>coms wiki put</code>'}</td></tr>`}
-        </tbody></table>`;
+        </tbody></table></div>`;
     const aside = `<div class="card"><h3>Tags</h3>${allTags.map((t) => `<a class="tag" href="#/wiki?tag=${encodeURIComponent(t)}">${esc(t)}</a>`).join('') || '<span class="muted">—</span>'}</div>
         <div class="card tint-c"><h3>For agents</h3><pre class="mono small" style="white-space:pre-wrap;margin:0">coms wiki search "&lt;topic&gt;"
 coms wiki tree [prefix]
@@ -182,7 +216,7 @@ coms wiki mv &lt;slug&gt; a/b
 coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     app.innerHTML = `
       <div class="pagehead"><div><h1>Wiki</h1><div class="sub">long-term agent notes — how-tos, gotchas, verified procedures${inFolder ? ` · <span class="mono">${folderCrumb(q.folder, q.folder)}</span>` : ''}</div></div>
-        <div class="actions"><input id="wf" class="mono" placeholder="filter…" style="border:3px solid #111;padding:.4rem .6rem">${asideToggleBtn()}<a class="btn primary" href="#/wiki/new${inFolder && q.folder ? `?folder=${encodeURIComponent(q.folder)}` : ''}">+ New page</a></div></div>
+        <div class="actions"><input id="wf" class="wiki-filter mono" placeholder="Filter pages">${asideToggleBtn()}<a class="btn primary" href="#/wiki/new${inFolder && q.folder ? `?folder=${encodeURIComponent(q.folder)}` : ''}">+ New page</a></div></div>
       ${layout({ id: 'wikiindex', nav: folderTree(tree, inFolder ? q.folder : undefined), body: table, aside })}`;
     wireAside('wikiindex', 'coms.wikiside');
     $('#wf').addEventListener('input', (e) => { const v = e.target.value.toLowerCase(); document.querySelectorAll('#wt tbody tr').forEach((tr) => tr.classList.toggle('hidden', !(tr.dataset.k || '').includes(v))); });
@@ -404,7 +438,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
             <div class="meta">${ln.note ? `<span>${esc(ln.note)}</span>` : ''}<span class="ts">${chip(ln.created_by || '?')}</span><button class="btn sm ghost" data-unlink="${esc(ln.kind)}|${esc(ln.ref)}" title="remove link">×</button></div></div></div>`).join('')}</div>` : '<div class="muted small">no attached context — link the wiki notes and questions this work rests on (<code>coms ticket link</code>)</div>'}
           <div class="actions" style="margin-top:.6rem"><select id="lk-kind"><option value="wiki">wiki</option><option value="question">question</option><option value="ticket">ticket</option><option value="url">url</option></select><input id="lk-ref" placeholder="slug / id / url" style="max-width:200px"><input id="lk-note" placeholder="note (optional)" style="max-width:180px"><button class="btn sm" id="lk-add">+ link</button></div></div>
         <div class="card ${t.result ? 'tint-g' : ''}" id="resultcard"><div class="card-title"><h3>Result</h3></div><div class="md" id="result">${t.result ? MD.render(t.result) : '<span class="muted">nothing delivered yet — the assignee records the outcome here (<code>coms ticket done</code>)</span>'}</div></div>
-        <div class="card"><h3>Timeline</h3><div class="timeline">${t.comments.map((c) => `<div class="tl ${c.kind}"><div><div class="who">${chip(c.author)}</div><div class="ts">${ago(c.created_at)}</div></div><div class="txt ${c.kind === 'comment' ? 'md' : ''}">${c.kind === 'comment' ? MD.render(c.body) : esc(c.body)}</div></div>`).join('') || '<span class="muted small">no comments</span>'}</div>
+        <div class="card"><h3>Timeline</h3><div class="timeline">${t.comments.map((c) => `<div class="tl ${c.kind}"><div><div class="who">${chip(c.author)}</div><div class="ts">${ago(c.created_at)}${c.updated_at ? ` · edited ${ago(c.updated_at)}` : ''}</div></div><div class="txt ${c.kind === 'comment' ? 'md' : ''}">${c.kind === 'comment' ? MD.render(c.body) : esc(c.body)}${c.kind === 'comment' && c.author === who() ? `<div class="comment-actions"><button class="btn sm ghost" data-ticket-comment-edit="${c.id}">edit</button><button class="btn sm ghost" data-ticket-comment-delete="${c.id}">delete</button></div>` : ''}</div></div>`).join('') || '<span class="muted small">no comments</span>'}</div>
           <div style="margin-top:1rem"><div id="ced"></div><div class="form-actions" style="margin-top:.5rem"><button class="btn" id="cmt">Comment</button></div></div></div>`,
         aside: `
         <div class="card"><h3>Fields</h3><div class="ticket-meta" style="grid-template-columns:1fr">
@@ -419,6 +453,26 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         </div><div class="form-actions" style="margin-top:.8rem"><button class="btn primary" id="savef">Save fields</button></div></div>
         <div class="card tint-y small"><b class="mono">quick moves</b><div class="actions" style="margin-top:.5rem">${TS.filter((s) => s !== t.status).map((s) => `<button class="btn sm" data-mv="${s}">${s.replace('_', ' ')}</button>`).join('')}</div></div>` })}`;
     wireWikilinks(app, known);
+    app.querySelectorAll('[data-ticket-comment-edit]').forEach((button) => {
+      button.onclick = () => {
+        const comment = t.comments.find((c) => c.id === Number(button.dataset.ticketCommentEdit));
+        const text = button.closest('.txt');
+        text.innerHTML = '<textarea class="comment-edit-input" rows="4" aria-label="Edit comment"></textarea><div class="comment-actions"><button class="btn sm" data-comment-save>save</button><button class="btn sm ghost" data-comment-cancel>cancel</button></div>';
+        const input = text.querySelector('textarea'); input.value = comment.body; input.focus();
+        text.querySelector('[data-comment-cancel]').onclick = () => render();
+        text.querySelector('[data-comment-save]').onclick = async () => {
+          try { await api('PATCH', `/api/tickets/${id}/comments/${comment.id}`, { body: input.value }); toast('comment updated'); render(); }
+          catch (e) { fail(e); }
+        };
+      };
+    });
+    app.querySelectorAll('[data-ticket-comment-delete]').forEach((button) => {
+      button.onclick = async () => {
+        if (!confirm('Delete this comment?')) return;
+        try { await api('DELETE', `/api/tickets/${id}/comments/${button.dataset.ticketCommentDelete}`); toast('comment deleted'); render(); }
+        catch (e) { fail(e); }
+      };
+    });
     const patch = async (data, msg) => { try { const r = await api('PATCH', `/api/tickets/${id}`, data); toast(msg || 'saved'); if (r && r.open_children_warning && r.open_children_warning.length) { toast(`⚠ ${r.open_children_warning.length} open child ticket(s): ${r.open_children_warning.map((c) => '#' + c.id).join(', ')}`, true); } render(); } catch (e) { fail(e); } };
     $('#savef').onclick = () => patch({ board_id: Number($('#f-board').value), status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value });
     document.querySelectorAll('[data-mv]').forEach((b) => b.onclick = () => patch({ status: b.dataset.mv }, `→ ${b.dataset.mv}`));
@@ -501,7 +555,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         ${kind === 'answer' ? `<button class="accept ${p.accepted ? 'on' : ''}" title="${isAsker || p.accepted ? 'accept this answer' : 'only the asker accepts'}">✔</button>` : ''}</div>
       <div class="body"><div class="md">${MD.render(p.body)}</div>
         <div class="foot"><div class="actions"><button class="btn sm ghost act-comment">comment</button>${p.author === who() ? '<button class="btn sm ghost act-edit">edit</button>' : ''}</div><div class="ts">${kind === 'answer' ? 'answered' : 'asked'} ${ago(p.created_at)} by ${chip(p.author)}${p.updated_at !== p.created_at ? ` · edited ${ago(p.updated_at)}` : ''}</div></div>
-        ${p.comments.length ? `<div class="comments">${p.comments.map((c) => `<div class="c">${MD.inline(c.body)} — <span class="mono">${esc(c.author)}</span> <span class="ts">${ago(c.created_at)}</span></div>`).join('')}</div>` : ''}
+        ${p.comments.length ? `<div class="comments">${p.comments.map((c) => `<div class="c"><div>${MD.inline(c.body)} — <span class="mono">${esc(c.author)}</span> <span class="ts">${ago(c.created_at)}${c.updated_at ? ` · edited ${ago(c.updated_at)}` : ''}</span></div>${c.author === who() ? `<div class="comment-actions"><button class="btn sm ghost" data-question-comment-edit="${c.id}">edit</button><button class="btn sm ghost" data-question-comment-delete="${c.id}">delete</button></div>` : ''}</div>`).join('')}</div>` : ''}
         <div class="cform hidden inline-form"><input placeholder="add a comment…"><button class="btn sm">post</button></div>
       </div></div>`;
     app.innerHTML = `
@@ -515,6 +569,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const vote = async (kind, tid, cur, val) => { try { await api('POST', '/api/questions/vote', { target_type: kind, target_id: +tid, value: cur === val ? 0 : val }); render(); } catch (e) { fail(e); } };
     app.querySelectorAll('.post').forEach((el) => {
       const kind = el.dataset.kind, tid = el.dataset.id;
+      const postData = kind === 'question' ? q : q.answers.find((a) => a.id === +tid);
       const cur = kind === 'question' ? q.my_vote : q.answers.find((a) => a.id === +tid).my_vote;
       el.querySelector('.up').onclick = () => vote(kind, tid, cur, 1);
       el.querySelector('.down').onclick = () => vote(kind, tid, cur, -1);
@@ -524,6 +579,27 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       el.querySelector('.act-comment').onclick = () => { cf.classList.toggle('hidden'); cf.querySelector('input').focus(); };
       const postC = async () => { const body = cf.querySelector('input').value; if (!body.trim()) return; try { await api('POST', '/api/questions/comments', { target_type: kind, target_id: +tid, body }); render(); } catch (e) { fail(e); } };
       cf.querySelector('button').onclick = postC; cf.querySelector('input').onkeydown = (e) => { if (e.key === 'Enter') postC(); };
+      el.querySelectorAll('[data-question-comment-edit]').forEach((button) => {
+        button.onclick = () => {
+          const cid = Number(button.dataset.questionCommentEdit);
+          const comment = postData.comments.find((c) => c.id === cid);
+          const row = button.closest('.c');
+          row.innerHTML = '<textarea class="comment-edit-input" rows="3" aria-label="Edit comment"></textarea><div class="comment-actions"><button class="btn sm" data-comment-save>save</button><button class="btn sm ghost" data-comment-cancel>cancel</button></div>';
+          const input = row.querySelector('textarea'); input.value = comment.body; input.focus();
+          row.querySelector('[data-comment-cancel]').onclick = () => render();
+          row.querySelector('[data-comment-save]').onclick = async () => {
+            try { await api('PATCH', `/api/questions/comments/${cid}`, { body: input.value }); toast('comment updated'); render(); }
+            catch (e) { fail(e); }
+          };
+        };
+      });
+      el.querySelectorAll('[data-question-comment-delete]').forEach((button) => {
+        button.onclick = async () => {
+          if (!confirm('Delete this comment?')) return;
+          try { await api('DELETE', `/api/questions/comments/${button.dataset.questionCommentDelete}`); toast('comment deleted'); render(); }
+          catch (e) { fail(e); }
+        };
+      });
       const ed = el.querySelector('.act-edit');
       if (ed) ed.onclick = () => {
         const cur_ = kind === 'question' ? q.body : q.answers.find((a) => a.id === +tid).body;
@@ -573,7 +649,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   // ------------------------------------------------------------ SEARCH / ACTIVITY
   route(/^\/search$/, async () => {
     setTab('');
-    const q = qs().q || ''; $('#q').value = q;
+    const q = qs().q || '';
     const r = q ? await GET(`/api/search?q=${encodeURIComponent(q)}&limit=25`) : { wiki: [], tickets: [], questions: [] };
     app.innerHTML = `<div class="pagehead"><h1>Search</h1><div class="sub mono">“${esc(q)}” · ${r.wiki.length + r.tickets.length + r.questions.length} hits</div></div>
       <div class="results row"><div class="col"><h3>Wiki (${r.wiki.length})</h3>${r.wiki.map((w) => `<div class="card flat"><a class="title" href="#/wiki/${w.slug}"><b>${esc(w.title)}</b></a><div class="snip">${MD.esc(w.snippet).replace(/\[([^\]]+)\]/g, '<b>$1</b>')}</div><div class="ts">${esc(w.slug)} · ${ago(w.updated_at)}</div></div>`).join('') || '<div class="empty">—</div>'}</div>
