@@ -318,6 +318,19 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .kanban .kcard .m { font-family: var(--mono); font-size: .68rem; color: var(--muted); margin-top: .25rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
 
 /* ---------- agents */
+.progress-counts { display:flex; flex-wrap:wrap; gap:.8rem; margin-bottom:1rem; }
+.progress-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:.8rem; }
+.progress-item { border:var(--line); padding:.8rem; min-width:0; }
+.progress-item.running { border-left:3px solid var(--cyan); }
+.progress-item.waiting { border-left:3px solid var(--yellow); }
+.progress-item.failed { border-left:3px solid var(--pink); }
+.progress-heading { display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; }
+.progress-heading > a { overflow-wrap:anywhere; }
+.progress-summary { margin:.6rem 0; overflow-wrap:anywhere; }
+.progress-response { margin-top:.65rem; }
+.progress-response summary { cursor:pointer; font-size:.85rem; }
+.progress-response pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:180px; overflow:auto; font-size:.8rem; }
+.agent-state { margin:.6rem 0; overflow-wrap:anywhere; font-size:.85rem; }
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.25rem; }
 .agent-card { border: var(--line); background: var(--paper-2); box-shadow: var(--shadow); padding: 1rem 1.1rem; }
 .agent-card h3 { margin: 0 0 .3rem; text-transform: none; font-family: var(--sans); font-size: 1.05rem; }

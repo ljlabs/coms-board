@@ -67,7 +67,8 @@ class TestQuestionsCli(unittest.TestCase):
     def test_help_advertises_questions(self):
         h = cli.build_parser().format_help()
         self.assertIn("questions", h)
-        self.assertNotIn("board", h.lower().replace("dashboard", "").replace("coms-board", ""))
+        self.assertIn("ticket-board", h)
+        self.assertNotRegex(h, r"(?m)^\s+board\s")
 
 
 class TestQuestionsApi(unittest.TestCase):
@@ -148,6 +149,8 @@ class TestVendoredAssets(unittest.TestCase):
         self.assertNotIn("href=\"http", html)
         for name in ("app.js", "editor.js", "md.js", "mermaid.js", "pretty.js"):
             js = (ROOT / "web" / name).read_text()
+            # The local LLM settings placeholder is an endpoint, not a remote asset.
+            js = js.replace("http://localhost:11434/v1", "")
             self.assertNotIn("https://", js, msg=f"remote URL in web/{name}")
             self.assertNotIn("http://", js, msg=f"remote URL in web/{name}")
 

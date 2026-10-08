@@ -111,6 +111,23 @@ CREATE TABLE IF NOT EXISTS agent_templates (
   enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runner_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS shared_skills (
+  slug TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, updated_by TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shared_skill_versions (
+  slug TEXT NOT NULL, version INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+  author TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(slug, version)
+);
+CREATE TABLE IF NOT EXISTS agent_runtime (
+  key TEXT PRIMARY KEY, agent_slug TEXT NOT NULL, ticket_id INTEGER, run_id INTEGER,
+  backend TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'running',
+  phase TEXT NOT NULL DEFAULT 'starting', summary TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '',
+  response_chars INTEGER NOT NULL DEFAULT 0, thinking_updates INTEGER NOT NULL DEFAULT 0,
+  tool_calls INTEGER NOT NULL DEFAULT 0, started_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS agent_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, template_id INTEGER,
   backend TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
@@ -285,10 +302,15 @@ def db_path() -> Path:
 # Columns added after the initial schema shipped. connect() (write mode)
 # applies these with ALTER TABLE ... ADD COLUMN, which works on SQLite 3.7.
 MIGRATIONS = [
+    ("agents", "instructions", "TEXT NOT NULL DEFAULT ''"),
+    ("agent_runs", "agent_slug", "TEXT NOT NULL DEFAULT ''"),
+    ("agent_runs", "stage", "TEXT NOT NULL DEFAULT 'execute'"),
+    ("agent_messages", "updated_at", "TEXT NOT NULL DEFAULT ''"),
     ("tickets", "parent_id", "INTEGER"),  # ticket hierarchy: story > job > task
     ("tickets", "board_id", "INTEGER NOT NULL DEFAULT 1"),
     ("wiki_pages", "folder", "TEXT NOT NULL DEFAULT ''"),  # wiki folders: slash path, '' = unfiled
     ("tickets", "ready_for_execution", "INTEGER NOT NULL DEFAULT 0"),
+    ("tickets", "recommended_workers", "INTEGER"),
     ("tickets", "agent_template_id", "INTEGER"),
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),

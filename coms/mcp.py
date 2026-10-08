@@ -36,7 +36,8 @@ TOOLS = [
     tool("ticket_get", "Read a ticket, its result, comments and links.", {"id": I}, ["id"]),
     tool("ticket_create", "Create prioritized work. Set ready only for actionable agent work.",
          {"title": S, "body": S, "priority": {"type": "string", "enum": list(api.PRIORITIES)},
-          "assignee": S, "tags": S, "parent_id": I, "template_id": I, "ready": B}, ["title"], True),
+          "assignee": S, "tags": S, "parent_id": I, "template_id": I, "ready": B,
+          "type": {"type": "string", "enum": list(api.TICKET_TYPES)}, "recommended_workers": I}, ["title"], True),
     tool("ticket_comment", "Publish a concise durable update to a ticket.", {"id": I, "body": S}, ["id", "body"], True),
     tool("ticket_link", "Attach a wiki page, question, ticket or URL to a ticket.",
          {"id": I, "kind": {"type": "string", "enum": ["wiki", "question", "ticket", "url"]},
@@ -48,6 +49,13 @@ TOOLS = [
     tool("questions_ask", "Publish an unresolved question to the board.", {"title": S, "body": S}, ["title", "body"], True),
     tool("questions_answer", "Answer an existing question on the board.", {"id": I, "body": S}, ["id", "body"], True),
     tool("agent_templates", "List available execution templates before creating work."),
+    tool("agents_list", "List registered agents and their capabilities. Prefer reusing a suitable teammate."),
+    tool("agent_ensure", "Reuse a matching registered agent, or create a named teammate if none fits. An explicit slug selects that identity.",
+         {"name": S, "slug": S, "role": S, "description": S, "instructions": S}, ["name"], True),
+    tool("skill_list", "List shared procedural skills available to all agents."),
+    tool("skill_get", "Read a shared skill and its current version.", {"slug": S}, ["slug"]),
+    tool("skill_put", "Publish a verified reusable procedure for all agents. For updates, pass the version returned by skill_get.",
+         {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
 ]
 
 
@@ -89,9 +97,12 @@ def call_tool(name, args, *, readonly=False):
     elif name == "ticket_get": result = api.get_ticket(conn, args["id"])
     elif name == "ticket_create":
         result = api.create_ticket(conn, args["title"], args.get("body", ""), actor,
-                                   priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
+                                   type_=args.get('type', 'task'), priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
                                    tags=args.get("tags"), parent_id=args.get("parent_id"),
-                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"))
+                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'))
+        if args.get('ready'):
+            api.resolve_ticket_agent(conn, result)
+            result = api.get_ticket(conn, result['id'])
     elif name == "ticket_comment": result = api.comment_ticket(conn, args["id"], actor, args["body"])
     elif name == "ticket_link": result = api.link_ticket(conn, args["id"], args["kind"], args["ref"], actor, args.get("note", ""))
     elif name == "ticket_result":
@@ -102,11 +113,16 @@ def call_tool(name, args, *, readonly=False):
     elif name == "questions_ask": result = api.ask_question(conn, args["title"], args["body"], actor)
     elif name == "questions_answer": result = api.answer_question(conn, args["id"], actor, args["body"])
     elif name == "agent_templates": result = [dict(r) for r in conn.execute("SELECT id,name,backend,enabled FROM agent_templates ORDER BY name")]
+    elif name == "agents_list": result = api.list_agents(conn)
+    elif name == "agent_ensure": result = api.ensure_agent(conn, args['name'], args.get('role', 'expert'), args.get('description', ''), args.get('slug', ''), args.get('instructions', ''))
+    elif name == "skill_list": result = api.list_skills(conn)
+    elif name == "skill_get": result = api.get_skill(conn, args['slug'])
+    elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
     else: raise ValueError(f"tool unavailable: {name}")
     if not spec["annotations"]["readOnlyHint"] and os.environ.get("COMS_RUN_ID"):
         conn.execute("INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,'system','board-delivery',?,?)",
                      (int(os.environ["COMS_TICKET_ID"]), int(os.environ["COMS_RUN_ID"]),
-                      json.dumps({"tool": name, "id": result.get("id"), "slug": result.get("slug")}), api.now()))
+                      json.dumps({"tool": name, "id": result.get("id") if isinstance(result, dict) else None, "slug": result.get("slug") if isinstance(result, dict) else None}), api.now()))
         conn.commit()
     return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
 

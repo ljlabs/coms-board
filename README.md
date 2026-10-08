@@ -103,6 +103,27 @@ maximum parallel agent count, choose a model advertised by that backend, and
 create agent templates. The selected model is applied to new orchestrator and
 ticket sessions.
 
+**Agents** is the persistent team roster. The runner registers an orchestrator
+agent, and every ticket execution uses its assigned registered identity.
+For team work, create a ready ticket of type **job** and optionally set
+**Suggested workers**. The lead uses `agents_list` and `agent_ensure` to reuse
+specialists or register missing teammates, then assigns ready child tickets.
+The lead releases its execution slot while waiting and resumes automatically
+to verify and synthesize worker results. Final review cannot close a parent
+with unfinished child work.
+
+**Shared skills**, linked from Agents, contains versioned procedures available
+to every teammate. Agents read them with `skill_list` / `skill_get` and publish
+verified methods with `skill_put`. An update requires the current version,
+preventing concurrent agents from silently overwriting each other.
+
+Live progress refreshes every two seconds on Agents, tickets, Runner, Debug,
+and Activity. It shows the registered agent, current phase, latest response,
+tool count, and time since the last model event. Thinking updates provide a
+heartbeat without exposing private reasoning. Debug returns the newest stored
+messages and coalesces streamed text. Automatic reviews have a three-minute
+total limit; a timeout stays visible and leaves the ticket in review.
+
 Orchestrator responses appear as an ordered conversation: assistant commentary,
 tool calls, and the final answer each keep their own entry. Completed tools
 appear as compact activity rows. Expand a row to see the command and output

@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
-from . import db
+from . import api, db, progress
 from .acp import AcpConnection, AcpError
 from .workspace import DEFAULT_WORKSPACE, workspace_path
 from .orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
@@ -138,6 +138,7 @@ class Runner:
         self.orchestrator_busy = False
         self.orchestrator_session = None
         self.review_conns = {}
+        self.recorders = {}
         self._lease = None
         self.thread = None
         if start: self.start()
@@ -164,12 +165,15 @@ class Runner:
                     conn.execute('INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)',('workspace',path))
                     conn.commit()
                 conn=db.connect()
+                api.orchestrator_agent(conn)
+                api.seed_shared_skills(conn)
                 active_settings=self.settings()
                 active_backend=active_settings.get('active_backend','opencode')
                 active_workspace=workspace_path(active_settings)
                 conn.execute("UPDATE orchestrator_sessions SET backend=?,workspace=?,acp_session_id='' WHERE backend!=? OR workspace!=?",(active_backend,active_workspace,active_backend,active_workspace))
                 conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error='Server stopped before this run finished; update the ticket to retry.' WHERE status IN ('queued','running')",(now(),))
                 conn.execute("UPDATE ticket_reviews SET status='failed',reason='Server stopped before review finished.',finished_at=? WHERE status IN ('queued','running')",(now(),))
+                conn.execute("UPDATE agent_runtime SET state='failed',phase='failed',summary='Server stopped before this session finished.',updated_at=?,finished_at=? WHERE state='running'", (now(), now()))
                 conn.commit()
                 recover_turns(conn)
             except Exception:
@@ -197,9 +201,14 @@ class Runner:
         if self._lease:
             self._lease.close(); self._lease=None
     def _conn(self, ticket_id, backend, cwd, run_id=None):
+        actor = api.get_ticket(db.connect(), ticket_id).get('assignee') or 'agent-runner'
+        recorder = self.recorders.get(run_id)
         def log(line): self._message(ticket_id, run_id, 'system', 'acp-log', line)
         def notification(msg):
             params=msg.get('params') or {}; update=params.get('update') or {}
+            if recorder:
+                recorder.notification(update)
+                return
             text=update.get('content',{}).get('text') if isinstance(update.get('content'),dict) else None
             if text: self._message(ticket_id, run_id, 'system', 'acp-response', text)
             elif update: self._message(ticket_id, run_id, 'system', 'acp-'+str(update.get('sessionUpdate','event')), json.dumps(update,ensure_ascii=False))
@@ -210,7 +219,7 @@ class Runner:
             else: respond({'outcome':{'outcome':'cancelled'}})
         settings=self.settings(); cmd=backend_command(backend, settings)
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'agent-runner'}), mcp_servers=board_servers('agent-runner',ticket_id,run_id))
+        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor}), mcp_servers=board_servers(actor,ticket_id,run_id))
         try:
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,self.settings()); return c
         except Exception:
@@ -270,11 +279,12 @@ class Runner:
     def _loop(self):
         while not self.stopping.wait(1):
             try:
+                self._resume_waiting()
                 settings=self.settings(); maximum=max(1,min(16,int(settings.get('parallel_agents','2'))))
                 with self.lock:
                     if len(self.active)>=maximum: continue
                     conn=db.connect()
-                    rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND (r.status IN ('queued','running') OR (r.status='failed' AND t.updated_at<=r.finished_at))) ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT ?",(maximum-len(self.active),)).fetchall()
+                    rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND (r.status IN ('queued','running','waiting') OR (r.status='failed' AND t.updated_at<=r.finished_at))) AND NOT EXISTS (SELECT 1 FROM agent_runs busy WHERE t.assignee!='' AND busy.agent_slug=t.assignee AND busy.status='running') ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT ?",(maximum-len(self.active),)).fetchall()
                     for row in rows:
                         if row['id'] in self.active or 'review:'+str(row['id']) in self.active: continue
                         self.active[row['id']]=True
@@ -284,6 +294,7 @@ class Runner:
                         review_rows=conn.execute("SELECT t.*,a.role AS agent_role,coalesce((SELECT id FROM agent_runs ar WHERE ar.ticket_id=t.id AND ar.status='completed' ORDER BY ar.id DESC LIMIT 1),0) AS review_run_id FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee LEFT JOIN ticket_reviews tr ON tr.ticket_id=t.id AND tr.source_run_id=coalesce((SELECT id FROM agent_runs ar2 WHERE ar2.ticket_id=t.id AND ar2.status='completed' ORDER BY ar2.id DESC LIMIT 1),0) AND tr.ticket_version=t.updated_at WHERE t.status='review' AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND tr.id IS NULL ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.updated_at LIMIT ?",(slots,)).fetchall()
                         for row in review_rows:
                             if row['id'] in self.active: continue
+                            if not api.children_resolved(conn, row['id']): continue
                             key='review:'+str(row['id']); review_key=row['review_run_id']
                             prior=conn.execute('SELECT id,status FROM ticket_reviews WHERE ticket_id=? AND source_run_id=?',(row['id'],review_key)).fetchone()
                             if prior and prior['status'] in ('queued','running'): continue
@@ -296,6 +307,19 @@ class Runner:
             except Exception:
                 logging.exception('Coms Board runner scheduling failed')
                 self.stopping.wait(1)
+
+    def _resume_waiting(self):
+        conn = db.connect()
+        resumed = []
+        rows = conn.execute("SELECT r.id AS run_id,r.ticket_id,r.agent_slug FROM agent_runs r JOIN tickets t ON t.id=r.ticket_id WHERE r.status='waiting' AND t.ready_for_execution=1 AND t.status IN ('open','in_progress')").fetchall()
+        for row in rows:
+            if not api.children_delivered(conn, row['ticket_id']): continue
+            conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=? AND status='waiting'", (now(), row['run_id']))
+            conn.execute("UPDATE agent_runtime SET state='completed',phase='completed',summary='Worker results are ready; lead queued for synthesis.',updated_at=?,finished_at=? WHERE key=?", (now(), now(), 'run:' + str(row['run_id'])))
+            api.log_activity(conn, row['agent_slug'], 'runner.resume', f"ticket:{row['ticket_id']}", 'Worker results are ready; lead resuming synthesis')
+            resumed.append(row['ticket_id'])
+        conn.commit()
+        return resumed
     def _work(self,t):
         tid=t['id']; conn=db.connect(); settings=self.settings(); backend=settings.get('active_backend','opencode')
         # Recheck and reserve under the SQLite write lock: assignment/readiness
@@ -310,12 +334,25 @@ class Runner:
             with self.lock: self.active.pop(tid,None)
             return
         t=dict(current)
+        agent = api.resolve_ticket_agent(conn, t, commit=False)
+        if conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (agent['slug'],)).fetchone():
+            conn.rollback()
+            return
+        t['assignee'] = agent['slug']
+        children = api.list_tickets(conn, parent_id=tid, include_closed=True)
+        stage = 'synthesize' if t['type'] == 'job' and children else 'execute'
         template=conn.execute('SELECT * FROM agent_templates WHERE id=? AND enabled=1',(t.get('agent_template_id'),)).fetchone() if t.get('agent_template_id') else None
         if template and template['backend']: backend=template['backend']
-        cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at) VALUES(?,?,?,'running',?)",(tid,template['id'] if template else None,backend,now())); rid=cur.lastrowid
+        cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,?,'running',?,?,?)",(tid,template['id'] if template else None,backend,now(),agent['slug'],stage)); rid=cur.lastrowid
         conn.execute("UPDATE tickets SET status='in_progress',updated_at=? WHERE id=?",(now(),tid)); conn.commit()
         self._message(tid,rid,'system','status',f'Runner started with {backend}; priority {t["priority"]}.')
+        recorder = progress.Recorder('run:' + str(rid), agent['slug'], tid, rid, backend)
+        self.recorders[rid] = recorder
         try:
+            if t['type'] == 'job' and children and not api.children_delivered(conn, tid):
+                conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); conn.commit()
+                recorder.finish('waiting', 'Waiting for existing teammates to deliver; synthesis will resume automatically')
+                return
             if t.get('agent_template_id') and not template:
                 raise RuntimeError('Assigned agent template is missing or disabled; choose an enabled template before retrying.')
             cwd=workspace_path(settings)
@@ -326,9 +363,19 @@ class Runner:
                     idle=next((key for key in self.conns if key not in self.active),None)
                     if idle is None: break
                     self.conns.pop(idle).close()
+            previous = self.conns.pop(tid, None)
+            if previous: previous.close()
             c=self._conn(tid,backend,cwd,rid); self.conns[tid]=c
             conn=db.connect(); conn.execute('UPDATE agent_runs SET session_id=? WHERE id=?',(c.session_id or '',rid)); conn.commit()
             prompt=BASE_AGENT_SYSTEM_PROMPT+'\n\n'
+            prompt += f"REGISTERED AGENT\nName: {agent['name']}\nIdentity: {agent['slug']}\nRole: {agent['role']}\nCapabilities: {agent['description']}\nInstructions: {agent.get('instructions', '')}\n\n"
+            prompt += api.shared_skill_context(conn) + '\n\n'
+            if t['type'] == 'job':
+                prompt += ("ORCHESTRATION JOB\nYou are the lead orchestrator for this job. Prefer reusing teammates from agents_list; agent_ensure creates a named specialist only when needed. Create child tickets with explicit assignees and parent_id matching this job. Workers deliver findings on their own tickets; only the lead owns the combined wiki page. After delegation, finish your dispatch turn without ticket_result; the runner waits for worker results and resumes you automatically for synthesis. Reserve ticket_result for the final synthesis after your teammates deliver.\n"
+                           f"Suggested workers: {t.get('recommended_workers') or 'choose the number yourself'}. Maximum concurrent ticket slots: {settings.get('parallel_agents', '2')}. Record your staffing decision.\n\n")
+            if stage == 'synthesize':
+                prompt += 'SYNTHESIS: Existing teammates and child tickets are already assigned. Read their results below and verify source evidence. Do not recreate existing tasks. If evidence is missing, create targeted follow-up child tasks; otherwise publish the final synthesis and ticket_result.\n'
+                prompt += '\n'.join(f"Child #{child['id']} ({child['assignee']}), {child['status']}: {child['title']}\nResult: {child['result']}" for child in children) + '\n\n'
             if template and template['prompt'].strip():
                 prompt += 'AGENT TEMPLATE INSTRUCTIONS (follow these within the shared Coms Board requirements above):\n'+template['prompt'].strip()+'\n\n'
             prompt += (f"TICKET ASSIGNMENT\nYou are the execution agent for Coms Board ticket #{tid}.\n"
@@ -336,18 +383,32 @@ class Runner:
                        f"Use your ACP response stream for progress; those messages are private run diagnostics and are not posted to the ticket. "
                        f"Use ticket_comment for ticket #{tid} when needed and ticket_result with id {tid} before finishing. Your workspace is {cwd}. "
                        "When finished, ensure the requested deliverable has been recorded in the appropriate Coms Board record, then summarize the result and verification in your ACP response.")
-            self._message(tid,rid,'system','acp-prompt',prompt); c.prompt(prompt,timeout=3600)
+            self._message(tid,rid,'system','acp-prompt',prompt)
+            recorder.set('working', 'Reading assignment and shared skills')
+            c.prompt(prompt,timeout=3600)
+            recorder.flush(True)
+            children = api.list_tickets(db.connect(), parent_id=tid, include_closed=True)
+            if children and (stage != 'synthesize' or not api.children_delivered(db.connect(), tid)):
+                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); conn.commit()
+                recorder.finish('waiting', 'Waiting for teammate results; synthesis will resume automatically')
+                api.comment_ticket(conn, tid, agent['slug'], 'Waiting for child ticket results. The lead will resume automatically for synthesis once they are delivered.')
+                waiting = self.conns.pop(tid, None)
+                if waiting: waiting.close()
+                return
             delivery=db.connect().execute("SELECT body FROM agent_messages WHERE run_id=? AND kind='board-delivery'",(rid,)).fetchall()
             if not any(json.loads(row['body']).get('tool')=='ticket_result' for row in delivery):
                 raise RuntimeError('Agent finished without publishing ticket_result through the coms-board tools. Record the deliverable on the board and update the ticket to retry.')
             conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=?",(now(),rid)); conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'",(now(),tid)); conn.commit()
             self._message(tid,rid,'system','status','Agent turn finished; ticket moved to review.')
+            recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
         except Exception as e:
             conn=db.connect(); conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error=? WHERE id=?",(now(),str(e),rid)); conn.commit(); self._message(tid,rid,'system','error',str(e))
+            recorder.finish('failed', str(e))
             failed=self.conns.pop(tid,None)
             if failed: failed.close()
         finally:
             with self.lock: self.active.pop(tid,None)
+            self.recorders.pop(rid, None)
     def chat(self,tid,text):
         if not text.strip(): raise ValueError('message required')
         with self.lock:
@@ -364,8 +425,15 @@ class Runner:
         threading.Thread(target=self._worker,args=(tid,self._prompt,c,tid,text),daemon=True).start()
         return {'accepted':True}
     def _prompt(self,c,tid,text):
-        try: c.prompt(text,timeout=3600)
-        except Exception as e: self._message(tid,None,'system','error',str(e))
+        ticket = api.get_ticket(db.connect(), tid)
+        recorder = progress.Recorder('ticket-chat:' + uuid.uuid4().hex, ticket['assignee'] or 'agent-runner', tid, None, self.settings().get('active_backend', 'opencode'))
+        c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
+        try:
+            c.prompt(text,timeout=3600)
+            recorder.finish('completed', 'Ticket conversation finished')
+        except Exception as e:
+            self._message(tid,None,'system','error',str(e))
+            recorder.finish('failed', str(e))
         finally:
             with self.lock: self.active.pop(tid,None)
 
@@ -374,28 +442,32 @@ class Runner:
         tid=ticket['id']; conn=db.connect(); settings=self.settings(); backend=settings.get('active_backend','opencode')
         self._message(tid,source_run_id or None,'system','review-status',f'Orchestrator review started with {backend}.')
         conn.execute("UPDATE ticket_reviews SET status='running',backend=? WHERE id=?",(backend,review_id)); conn.commit()
-        response=[]; assistant_id=[None]
+        agent = api.orchestrator_agent(conn)
+        recorder = progress.Recorder('review:' + str(review_id), agent['slug'], tid, source_run_id or None, backend, message_kind='review-decision')
+        response=[]
         def add(role,kind,body):
             c=db.connect(); c.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,source_run_id or None,role,kind,body,now())); c.commit()
         def log(line): add('system','review-log',line)
         def notification(msg):
             p=msg.get('params') or {}; u=p.get('update') or {}; kind=u.get('sessionUpdate'); content=u.get('content') or {}; body=content.get('text') if isinstance(content,dict) else None
             if body and kind=='agent_message_chunk':
-                response.append(body); c=db.connect(); c.execute('UPDATE agent_messages SET body=body||? WHERE id=?',(body,assistant_id[0])); c.commit()
-            elif u: log(json.dumps(u,ensure_ascii=False))
+                response.append(body)
+            if u: recorder.notification(u)
         def request(msg,respond):
             respond({'outcome':{'outcome':'cancelled'}})
         c=None
         try:
             current=api.get_ticket(db.connect(),tid)
+            if not api.children_resolved(conn, tid):
+                raise RuntimeError('Worker tickets or their reviews are unfinished; the parent job cannot pass final review.')
             role=db.connect().execute('SELECT role FROM agents WHERE slug=?',(current['assignee'],)).fetchone()
             if current['status']!='review' or current['assignee'].lower().startswith('human') or (role and role['role'].lower()=='human') or 'human' in current['tags'].lower():
-                conn.execute("UPDATE ticket_reviews SET status='human_review',decision='human_review',reason='Ticket state or human assignment changed before review.',ticket_version=?,finished_at=? WHERE id=?",(current['updated_at'],now(),review_id)); conn.commit(); return
+                conn.execute("UPDATE ticket_reviews SET status='human_review',decision='human_review',reason='Ticket state or human assignment changed before review.',ticket_version=?,finished_at=? WHERE id=?",(current['updated_at'],now(),review_id)); conn.commit(); recorder.finish('completed', 'Review deferred to a human'); return
             if current['updated_at']!=ticket['updated_at']:
-                conn.execute("UPDATE ticket_reviews SET status='superseded',reason='Ticket changed while review was starting.',finished_at=? WHERE id=?",(now(),review_id)); conn.commit(); return
+                conn.execute("UPDATE ticket_reviews SET status='superseded',reason='Ticket changed while review was starting.',finished_at=? WHERE id=?",(now(),review_id)); conn.commit(); recorder.finish('completed', 'Review superseded by ticket changes'); return
             backend=settings.get('active_backend','opencode'); cwd=workspace_path(settings); cmd=backend_command(backend,settings)
             if not cmd: raise RuntimeError('No ACP command configured for '+backend)
-            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator-review'}),mcp_servers=board_servers('orchestrator-review',readonly=True))
+            c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':agent['slug']}),mcp_servers=board_servers(agent['slug'],readonly=True))
             with self.lock: self.review_conns[tid]=c
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
             comments=current.get('comments') or []
@@ -404,11 +476,12 @@ class Runner:
             discussion='\n'.join(f"{x['author']} [{x['kind']}]: {x['body']}" for x in comments)
             prompt=("You are the Coms Board orchestrator performing the final review of a completed ticket. Review the acceptance criteria, delivered result, ticket discussion, and execution transcript. Inspect the configured workspace read-only if useful. Do not change files, tickets, or comments. Bias toward closing: choose human_review only when there is a concrete unresolved requirement, material risk that needs human judgment, or a human-only decision. Otherwise choose close. Respond with exactly one valid JSON object and no other text. Use decision value close or human_review, for example: {\"decision\":\"close\",\"reason\":\"Acceptance criteria are met.\"}.\n\n"
                     f"Ticket #{tid}: {current['title']}\nPriority: {current['priority']}\nDescription / acceptance criteria:\n{current['body']}\n\nDelivered result:\n{current['result']}\n\nTicket discussion:\n{discussion}\n\nExecution transcript:\n{transcript}")
-            x=db.connect(); cur=x.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,source_run_id or None,'assistant','review-decision','',now())); assistant_id[0]=cur.lastrowid; x.commit()
-            c.prompt(prompt,timeout=1800)
+            recorder.set('reviewing', 'Checking the deliverable and acceptance criteria (3 minute limit)')
+            c.prompt(prompt,timeout=180,total_timeout=180)
+            recorder.flush(True)
             raw=''.join(response).strip(); decision=''; reason=''
             try:
-                parsed=json.loads(raw)
+                parsed=json.loads(raw.removeprefix('```json').removeprefix('```').removesuffix('```').strip())
                 decision=parsed.get('decision','').lower(); reason=str(parsed.get('reason','')).strip()
             except (ValueError, AttributeError): pass
             if decision not in ('close','human_review'):
@@ -419,21 +492,25 @@ class Runner:
             role=conn.execute('SELECT role FROM agents WHERE slug=?',(current['assignee'],)).fetchone()
             if current['status']!='review' or current['updated_at']!=ticket['updated_at']:
                 final='superseded'
+            elif not api.children_resolved(conn, tid):
+                final='superseded'; decision=''; reason='Worker tickets or reviews changed; finish them before final review.'
             elif current['assignee'].lower().startswith('human') or (role and role['role'].lower()=='human') or 'human' in current['tags'].lower():
                 final='human_review'; decision='human_review'; reason='Ticket was assigned or tagged for a human during automated review.'
             elif decision=='close':
-                api.update_ticket(db.connect(),tid,'orchestrator',status='done')
-                api.comment_ticket(db.connect(),tid,'orchestrator','Orchestrator review approved and closed this ticket: '+reason)
+                api.update_ticket(db.connect(),tid,agent['slug'],status='done')
+                api.comment_ticket(db.connect(),tid,agent['slug'],'Orchestrator review approved and closed this ticket: '+reason)
                 final='closed'
             else:
-                api.comment_ticket(db.connect(),tid,'orchestrator','Orchestrator review requests human judgment: '+reason)
+                api.comment_ticket(db.connect(),tid,agent['slug'],'Orchestrator review requests human judgment: '+reason)
                 final='human_review'
             current=api.get_ticket(db.connect(),tid)
             version=ticket['updated_at'] if final=='superseded' else current['updated_at']
             conn=db.connect(); conn.execute('UPDATE ticket_reviews SET status=?,decision=?,reason=?,ticket_version=?,finished_at=? WHERE id=?',(final,decision,reason,version,now(),review_id)); conn.commit()
             self._message(tid,source_run_id or None,'system','review-status',f'Orchestrator decision: {decision}. {reason}')
+            recorder.finish('completed', f'Review: {decision}. {reason}')
         except Exception as e:
             conn=db.connect(); conn.rollback(); conn.execute("UPDATE ticket_reviews SET status='failed',decision='',reason=?,finished_at=? WHERE id=?",(str(e),now(),review_id)); conn.commit(); self._message(tid,source_run_id or None,'system','review-error',str(e))
+            recorder.finish('failed', str(e))
         finally:
             if c: c.close()
             with self.lock:
@@ -519,7 +596,11 @@ class Runner:
                     if msg.get('method')!='session/update': return
                     p=msg.get('params') or {}
                     transcript=context(p)
-                    if transcript: transcript.apply(p.get('update'))
+                    if transcript:
+                        update = p.get('update') or {}
+                        recorder = self.orchestrator_context.get('recorder')
+                        if recorder: recorder.notification(update)
+                        if update.get('sessionUpdate') != 'agent_thought_chunk': transcript.apply(update)
                 def request(msg,respond):
                     if msg.get('method')!='session/request_permission': raise AcpError('Method not found',code=-32601)
                     params=msg.get('params') or {}
@@ -528,7 +609,8 @@ class Runner:
                     opt=next((x.get('optionId') for x in options if isinstance(x,dict) and x.get('kind') in ('allow_once','allow_always','allow')),None) if transcript else None
                     if transcript: transcript.permission(params,opt or 'cancelled')
                     respond({'outcome':{'outcome':'selected','optionId':opt}} if opt else {'outcome':{'outcome':'cancelled'}})
-                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':'orchestrator'}),mcp_servers=board_servers('orchestrator'))
+                actor = api.orchestrator_agent(db.connect())['slug']
+                c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor}),mcp_servers=board_servers(actor))
                 try:
                     c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
                 except Exception:
@@ -565,7 +647,7 @@ class Runner:
                 raise
         return {'accepted':True,'turn_id':turn['id'],'message':user}
     def _orchestrator_turn(self,text,sid,session,turn_id=None):
-        c=None; restored=False; transcript=None
+        c=None; restored=False; transcript=None; recorder=None
         try:
             if turn_id is not None: transcript=Transcript(sid,turn_id)
             settings=self.settings(); backend=settings.get('active_backend','opencode')
@@ -574,6 +656,8 @@ class Runner:
                 turn,_=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
                 turn_id=turn['id']
             transcript=Transcript(sid,turn_id)
+            agent = api.orchestrator_agent(db.connect())
+            recorder = progress.Recorder('chat:' + turn_id, agent['slug'], backend=backend)
             # Loading a session replays old messages; local rows are canonical.
             self.orchestrator_context={}
             c=self._orchestrator_connection(backend,cwd,settings)
@@ -592,15 +676,18 @@ class Runner:
                    "Use the attached coms-board MCP tools for all board operations. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; do not write board records to local files. "
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
+            guide += (" You are the registered orchestrator agent " + agent['slug'] + ". Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists. For work requiring a team, create a ready ticket of type job assigned to the orchestrator, with recommended_workers when specified. The job lead delegates child tickets and automatically resumes for synthesis after worker results arrive.\n\n" + api.shared_skill_context(db.connect()))
             self.orchestrator_context={'sid':sid,'connection':c,'acp_session_id':c.session_id,
-                                       'transcript':transcript,'stream_enabled':True}
+                                       'transcript':transcript,'stream_enabled':True,'recorder':recorder}
             context=history_before(sid,transcript.user_id) if not restored else ''
             first_turn=not restored
             prefix=guide+'\n\nWorkspace: '+cwd+'\n\n'
             if context and first_turn: prefix+='Previous conversation (restored from Coms Board history):\n'+context+'\n\n'
             result=c.prompt(prefix+'User: '+text,timeout=3600)
             transcript.finish((result or {}).get('stopReason',''))
+            recorder.finish('completed', 'Orchestrator conversation finished')
         except Exception as e:
+            if recorder: recorder.finish('failed', str(e))
             if transcript: transcript.finish(error=str(e))
             else: logging.exception('Could not begin orchestrator turn')
         finally:

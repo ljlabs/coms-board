@@ -12,6 +12,7 @@
 *.sqlite-wal
 *.sqlite-shm
 *.runner.lock
+data/*.log
 
 # Local application settings and task notes
 .kiro/

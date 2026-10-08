@@ -145,6 +145,7 @@ class TestServer(unittest.TestCase):
         self.assertEqual(self.req('DELETE',f"/api/runner/sessions/{chat['id']}")['deleted'],chat['id'])
         self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_sessions').fetchone()[0],0)
         db._migrate(conn)
+        conn.commit()
         self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_sessions').fetchone()[0],0)
 
     def test_invalid_json_shapes_and_parameters_are_client_errors(self):

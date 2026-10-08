@@ -221,7 +221,7 @@ class AcpConnection:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
 
     def request(self, method: str, params: Dict[str, Any],
-                timeout: float = 120.0) -> Any:
+                timeout: float = 120.0, total_timeout: Optional[float] = None) -> Any:
         with self._pending_lock:
             mid = self._next_id
             self._next_id += 1
@@ -241,10 +241,10 @@ class AcpConnection:
         # fresh spawn), and hard_cap bounds the total wait either way.
         start = time.monotonic()
         deadline = start + timeout
-        hard_cap = start + timeout + 480
+        hard_cap = start + (total_timeout if total_timeout is not None else timeout + 480)
         while not pend.event.is_set():
             deadline = max(deadline, self._last_rx + timeout)
-            remaining = deadline - time.monotonic()
+            remaining = min(deadline, hard_cap) - time.monotonic()
             if remaining <= 0:
                 with self._pending_lock:
                     self._pending.pop(mid, None)
@@ -398,7 +398,7 @@ class AcpConnection:
         return res
 
     def prompt(self, text: str, files: Optional[List[Dict[str, Any]]] = None,
-               timeout: float = 900.0) -> Dict[str, Any]:
+               timeout: float = 900.0, total_timeout: Optional[float] = None) -> Dict[str, Any]:
         if not self.session_id:
             raise AcpError("no active ACP session")
         content: List[Dict[str, Any]] = []
@@ -408,7 +408,7 @@ class AcpConnection:
             content.append(f)
         return self.request("session/prompt",
                             {"sessionId": self.session_id, "prompt": content},
-                            timeout=timeout)
+                            timeout=timeout, total_timeout=total_timeout)
 
     def cancel(self) -> None:
         if not self.session_id:

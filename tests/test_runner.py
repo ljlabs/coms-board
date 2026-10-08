@@ -97,6 +97,10 @@ class TestRunner(unittest.TestCase):
         self.assertIn('delivered-research', delivered['result'])
         self.assertEqual(delivered['links'][0]['ref'], 'delivered-research')
         self.assertEqual(api.get_wiki(self.conn, 'delivered-research')['body'], 'Published through MCP.')
+        self.assertEqual(run['agent_slug'], delivered['assignee'])
+        self.assertEqual(api.get_wiki(self.conn, 'delivered-research')['author'], run['agent_slug'])
+        self.assertEqual(api.get_agent(self.conn, run['agent_slug'])['role'], 'expert')
+        self.assertEqual(self.conn.execute('SELECT state FROM agent_runtime WHERE run_id=?', (run['id'],)).fetchone()['state'], 'completed')
         self.assertNotIn(ticket['id'], self.runner.active)
 
     def test_private_response_cannot_complete_ticket(self):

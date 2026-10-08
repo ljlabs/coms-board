@@ -43,6 +43,34 @@
     timer = setTimeout(tick, delay);
     owner.cleanup.push(() => clearTimeout(timer));
   }
+  function progressHTML(data={items:[],active_count:0,waiting_count:0,generated_at:''}) {
+    const states={starting:'Starting',working:'Working',thinking:'Thinking',responding:'Writing response',tool:'Using tool',reviewing:'Reviewing',waiting:'Waiting for teammates',completed:'Finished',failed:'Failed'};
+    const active=data.items.filter(x=>['running','waiting'].includes(x.state));
+    const recent=data.items.filter(x=>!['running','waiting'].includes(x.state)).slice(0,4);
+    return `<div class="card-title"><h3>Live agent progress</h3><span class="small muted" data-progress-refresh>updated ${ago(data.generated_at)}</span></div>
+      <div class="progress-counts"><b>${data.active_count} running</b><span>${data.waiting_count} waiting for teammates</span>${data.capacity?`<span>${data.capacity} ticket slots</span>`:''}<span class="small muted">refreshes every 2 seconds</span></div>
+      <div class="progress-list">${[...active,...recent].map(x=>`<article class="progress-item ${esc(x.state)}" data-progress-key="${esc(x.key)}"><div class="progress-heading"><b>${chip(x.agent_slug)}</b><span class="badge ${x.state==='failed'?'blocked':x.state==='running'?'in_progress':'done'}">${esc(states[x.phase]||x.phase)}</span>${x.ticket_id?`<a href="#/tickets/${x.ticket_id}">#${x.ticket_id} ${esc(x.ticket_title||'')}</a>`:'<span>Orchestrator chat</span>'}</div><p class="progress-summary">${esc(x.summary)}</p>
+        <div class="small muted">${esc(x.backend)} · ${x.response_chars.toLocaleString()} response characters · ${x.tool_calls} tool calls · last event ${x.idle_seconds}s ago${x.state==='running'&&x.idle_seconds>45?' · waiting for a new model event':''}</div>
+        ${x.preview?`<details class="progress-response"${x.state==='running'?' open':''}><summary>Latest response</summary><pre>${esc(x.preview)}</pre></details>`:''}</article>`).join('')||'<div class="empty">No sessions running. Ready tickets start automatically.</div>'}</div>`;
+  }
+  function drawProgress(box,data) {
+    if(!box||hasSelection(box))return;
+    const opened=new Set([...box.querySelectorAll('details[open]')].map(x=>x.closest('[data-progress-key]').dataset.progressKey));
+    const closed=new Set([...box.querySelectorAll('details:not([open])')].map(x=>x.closest('[data-progress-key]').dataset.progressKey));
+    box.innerHTML=progressHTML(data);
+    for(const detail of box.querySelectorAll('details')){
+      const key=detail.closest('[data-progress-key]').dataset.progressKey;
+      if(opened.has(key))detail.open=true;
+      if(closed.has(key))detail.open=false;
+    }
+  }
+  async function mountProgress(id,query='') {
+    const refresh=async()=>{
+      try { const data=await GET('/api/runner/status'+query);drawProgress($('#'+id),data); }
+      catch(e){if(e.name==='AbortError')throw e;const box=$('#'+id);if(box)box.innerHTML=`<h3>Live agent progress</h3><p class="error">Could not refresh: ${esc(e.message)}</p>`;}
+    };
+    await refresh();poll(refresh,2000);
+  }
   const scrollState = box => ({ top: box.scrollTop, follow: box.scrollHeight - box.scrollTop - box.clientHeight < 24 });
   const hasSelection = node => {
     const selection=window.getSelection();
@@ -107,6 +135,7 @@
   const refLink = (ref) => {
     const [k, v] = (ref || '').split(':');
     if (k === 'wiki') return `#/wiki/${v}`; if (k === 'ticket') return `#/tickets/${v}`; if (k === 'question') return `#/questions/${v}`;
+    if (k === 'agent') return `#/agents/${encodeURIComponent(v)}`; if (k === 'skill') return `#/skills/${encodeURIComponent(v)}`;
     return '#/';
   };
   const qs = () => Object.fromEntries(new URLSearchParams(location.hash.split('?')[1] || ''));
@@ -480,7 +509,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <div class="grid-3">${field('Type', `<select id="type">${opts(TT, q.type || 'research')}</select>`)}${field('Priority', `<select id="prio">${opts(PR, 'p2')}</select>`)}${field('Department', `<select id="dept">${deptOpts(q.dept || (DEPTS[0] && DEPTS[0].slug))}</select>`)}</div>
         <div class="grid-2">${field('Assignee', `<select id="assignee">${agentOpts(q.assignee || '')}</select>`)}${field('Tags', `<input id="tags" placeholder="topic, area">`)}</div>
         <div class="grid-2">${field('Agent template', `<select id="template"><option value="">Use default runner</option>${templates.filter(x=>x.enabled).map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>`)}${field('Execution gate', '<label class="small"><input id="ready" type="checkbox"> Ready for agent execution</label>')}</div>
-        <div class="grid-2">${field('Parent ticket id (optional) — story &gt; job &gt; task', `<input id="parent" type="number" min="1" value="${esc(q.parent || '')}" placeholder="e.g. 42">`)}</div>
+        <div class="grid-2">${field('Parent ticket id (optional) — story &gt; job &gt; task', `<input id="parent" type="number" min="1" value="${esc(q.parent || '')}" placeholder="e.g. 42">`)}${field('Suggested workers for a job (optional)', '<input id="workers" type="number" min="1" max="15" placeholder="Let the orchestrator decide"><small class="muted">Jobs use a named orchestrator who reuses or creates teammates.</small>')}</div>
         ${field('Body (markdown) — what to find out, what "done" looks like, where to start', '<div id="ed"></div>')}
         <div class="form-actions"><a class="btn" href="#/tickets?board=${board.id}">Cancel</a><button class="btn ok" id="save">Create</button></div></div>`);
     const ed = new MdEditor($('#ed'), { onSave: save, minHeight: '300px', placeholder: '## Goal\n\n## Definition of done\n\n## Starting points\n- link to source…' });
@@ -489,6 +518,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       const payload = { title: $('#title').value, body, type: $('#type').value, priority: $('#prio').value, department: $('#dept').value, assignee: $('#assignee').value, tags: $('#tags').value, ready_for_execution: $('#ready').checked, agent_template_id: $('#template').value || null };
       const p = $('#parent').value.trim(); if (p) payload.parent_id = +p;
       payload.board_id = Number($('#new-board').value);
+      payload.recommended_workers = $('#workers').value ? Number($('#workers').value) : null;
       try { const t = await api('POST', '/api/tickets', payload); toast(`ticket #${t.id} created`); location.hash = `#/tickets/${t.id}`; } catch (e) { fail(e); }
     }
     $('#title').focus();
@@ -506,15 +536,16 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <div class="actions"><a class="btn" href="#/tickets/${t.id}/tree">🌲 Tree</a>${t.status === 'open' && !t.assignee ? `<button class="btn pink" id="claim">Claim as ${esc(who())}</button>` : ''}<button class="btn" id="editbody">Edit body</button><button class="btn ok" id="editresult">${t.result ? 'Edit result' : 'Write result'}</button></div></div>
       ${layout({ id: 'ticket', body: `
         <div class="card" id="bodycard"><div class="md" id="body">${MD.render(t.body) || '<span class="muted">no description</span>'}</div></div>
-        ${t.children && t.children.length ? `<div class="card"><div class="card-title"><h3>Children (${t.children.length})</h3><a class="btn sm" href="#/tickets/new?parent=${t.id}${t.department ? `&dept=${encodeURIComponent(t.department)}` : ''}">+ child</a></div><div class="list">${t.children.map(briefItem).join('')}</div></div>` : ''}
+        <div class="card" id="ticket-children"${t.children.length?'':' hidden'}><div class="card-title"><h3>Teammate tickets</h3><a class="btn sm" href="#/tickets/new?parent=${t.id}">+ child</a></div><div class="list">${t.children.map(briefItem).join('')}</div></div>
         <div class="card"><div class="card-title"><h3>Links (${(t.links || []).length})</h3></div>
           ${(t.links || []).length ? `<div class="list">${t.links.map((ln) => `<div class="item"><div class="main">
             <a class="title" href="${ln.kind === 'wiki' ? `#/wiki/${encodeURIComponent(ln.ref)}` : ln.kind === 'question' ? `#/questions/${ln.ref}` : ln.kind === 'ticket' ? `#/tickets/${ln.ref}` : esc(ln.ref)}"${ln.kind === 'url' ? ' target="_blank" rel="noopener"' : ''}>${{ wiki: '📖', question: '❓', ticket: '🎫', url: '🔗' }[ln.kind] || ''} ${ln.kind}:${esc(ln.ref)}${ln.title ? ` — ${esc(ln.title)}` : ''}</a>
             <div class="meta">${ln.note ? `<span>${esc(ln.note)}</span>` : ''}<span class="ts">${chip(ln.created_by || '?')}</span><button class="btn sm ghost" data-unlink="${esc(ln.kind)}|${esc(ln.ref)}" title="remove link">×</button></div></div></div>`).join('')}</div>` : '<div class="muted small">no attached context — link the wiki notes and questions this work rests on (<code>coms ticket link</code>)</div>'}
           <div class="actions" style="margin-top:.6rem"><select id="lk-kind"><option value="wiki">wiki</option><option value="question">question</option><option value="ticket">ticket</option><option value="url">url</option></select><input id="lk-ref" placeholder="slug / id / url" style="max-width:200px"><input id="lk-note" placeholder="note (optional)" style="max-width:180px"><button class="btn sm" id="lk-add">+ link</button></div></div>
         <div class="card ${t.result ? 'tint-g' : ''}" id="resultcard"><div class="card-title"><h3>Result</h3></div><div class="md" id="result">${t.result ? MD.render(t.result) : '<span class="muted">nothing delivered yet — the assignee records the outcome here (<code>coms ticket done</code>)</span>'}</div></div>
+        <div class="card" id="ticket-progress">${progressHTML(runnerData.progress)}</div>
         <div class="card" id="runner-chat"><div class="card-title"><h3>Agent runner chat</h3><span class="badge ${t.ready_for_execution?'in_progress':'blocked'}">${t.ready_for_execution?'ready gate open':'awaiting orchestration'}</span></div>
-          <div class="mono small muted">Your prompts stay here. ACP responses and tool output are in <a href="#/debug?ticket=${t.id}">Debug</a>; only comments the agent deliberately publishes appear in the ticket Comments timeline.</div>
+          <div class="mono small muted">Watch current work in Live progress above. Full responses and tool output are in <a href="#/debug?ticket=${t.id}">Debug</a>; published updates appear in Comments.</div>
           <div id="runner-messages" class="runner-messages">${runnerData.messages.filter(m=>m.role==='user'&&m.kind==='text').map(m=>`<div class="runner-msg user" data-message-id="${m.id}"><b>You</b><pre>${esc(m.body)}</pre><span class="ts">${esc(m.created_at)}</span></div>`).join('') || '<div class="empty">No chat messages yet.</div>'}</div>
           <form id="runner-form" class="runner-form"><textarea id="runner-input" placeholder="Message the ticket agent…" rows="3"></textarea><button class="btn primary">Send to agent</button></form>
           <div class="mono small muted">${runnerData.runs.map(r=>`Run #${r.id}: ${esc(r.status)} · ${esc(r.backend)}${r.error?` · ${esc(r.error)}`:''}`).join('<br>') || 'Queue starts only after Ready for agent execution is enabled and the ticket is not assigned/tagged for a human.'}</div>
@@ -532,6 +563,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           <label>Tags<input id="f-tags" value="${esc(t.tags)}"></label>
           <label>Execution template<select id="f-template"><option value="">Use active backend</option>${templates.map(x=>`<option value="${x.id}"${String(x.id)===String(t.agent_template_id)?' selected':''}>${esc(x.name)}</option>`).join('')}</select></label>
           <label><input id="f-ready" type="checkbox"${t.ready_for_execution?' checked':''}> Ready for agent execution</label>
+          <label>Suggested workers (jobs)<input id="f-workers" type="number" min="1" max="15" value="${esc(t.recommended_workers||'')}" placeholder="Orchestrator decides"></label>
           <label>Title<input id="f-title" value="${esc(t.title)}"></label>
         </div><div class="form-actions" style="margin-top:.8rem"><button class="btn primary" id="savef">Save fields</button></div></div>
         <div class="card tint-y small"><b class="mono">quick moves</b><div class="actions" style="margin-top:.5rem">${TS.filter((s) => s !== t.status).map((s) => `<button class="btn sm" data-mv="${s}">${s.replace('_', ' ')}</button>`).join('')}</div></div>` })}`);
@@ -557,11 +589,12 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       };
     });
     const patch = async (data, msg) => { try { const r = await api('PATCH', `/api/tickets/${id}`, data); toast(msg || 'saved'); if (r && r.open_children_warning && r.open_children_warning.length) { toast(`⚠ ${r.open_children_warning.length} open child ticket(s): ${r.open_children_warning.map((c) => '#' + c.id).join(', ')}`, true); } render(); } catch (e) { fail(e); } };
-    $('#savef').onclick = () => patch({ board_id: Number($('#f-board').value), status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value, ready_for_execution: $('#f-ready').checked, agent_template_id: $('#f-template').value || null });
+    $('#savef').onclick = () => patch({ board_id: Number($('#f-board').value), status: $('#f-status').value, priority: $('#f-priority').value, type: $('#f-type').value, assignee: $('#f-assignee').value, department: $('#f-department').value, tags: $('#f-tags').value, title: $('#f-title').value, ready_for_execution: $('#f-ready').checked, agent_template_id: $('#f-template').value || null, recommended_workers:$('#f-workers').value?Number($('#f-workers').value):null });
     $('#runner-form').onsubmit = async (e) => { e.preventDefault(); const input=$('#runner-input'), body=input.value.trim(); if(!body)return; try { await api('POST', `/api/tickets/${id}/runner`, {body}); input.value=''; await refreshRunner(); } catch(err){fail(err);} };
     async function refreshRunner() {
       const d=await GET(`/api/tickets/${id}/runner`), box=$('#runner-messages');
       if(!box)return;
+      drawProgress($('#ticket-progress'),d.progress);
       const messages=d.messages.filter(m=>m.role==='user'&&m.kind==='text'), scroll=scrollState(box);
       let empty=box.querySelector('.empty');
       if(messages.length)empty?.remove();
@@ -572,6 +605,9 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         node.innerHTML=`<b>You</b><pre>${esc(m.body)}</pre><span class="ts">${esc(m.created_at)}</span>`;box.appendChild(node);
       }
       restoreScroll(box,scroll);
+      const latest=await GET(`/api/tickets/${id}`),childrenBox=$('#ticket-children'),resultBox=$('#result');
+      if(childrenBox&&!hasSelection(childrenBox)){childrenBox.hidden=!latest.children.length;$('.list',childrenBox).innerHTML=latest.children.map(briefItem).join('');}
+      if(resultBox&&latest.result!==t.result&&!resultBox.querySelector('textarea,[contenteditable="true"]')&&!hasSelection(resultBox)){resultBox.innerHTML=MD.render(latest.result)||'<span class="muted">Nothing delivered yet.</span>';t.result=latest.result;}
     }
     poll(refreshRunner,2000);
     document.querySelectorAll('[data-mv]').forEach((b) => b.onclick = () => patch({ status: b.dataset.mv }, `→ ${b.dataset.mv}`));
@@ -718,16 +754,36 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   // ------------------------------------------------------------ AGENTS
   route(/^\/agents$/, async () => {
     setTab('agents'); await loadRefs();
-    const byDept = {};
-    for (const a of AGENTS) (byDept[a.department || ''] ||= []).push(a);
     const deptName = (s) => (DEPTS.find((d) => d.slug === s) || {}).name || (s || 'Unassigned');
     const deptDesc = (s) => (DEPTS.find((d) => d.slug === s) || {}).description || '';
-    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub">${AGENTS.length} agents · ${DEPTS.length} department${DEPTS.length === 1 ? '' : 's'} · reputation = SE-style score from votes & accepted answers</div></div></div>
-      ${Object.keys(byDept).sort().map((d) => `<div class="dept-head"><h2>${esc(deptName(d))}</h2><span class="d">${esc(deptDesc(d))}</span></div>
-        <div class="agent-grid">${byDept[d].sort((a, b) => (a.role === 'lead' ? -1 : 1) - (b.role === 'lead' ? -1 : 1) || a.name.localeCompare(b.name)).map((a) => `<div class="agent-card"><span class="rep" title="reputation">${a.reputation}</span><h3><a href="#/agents/${a.slug}">${esc(a.name)}</a></h3>${badge(a.role)} <span class="mono small muted">${esc(a.slug)}</span><p class="small" style="margin:.5rem 0">${esc(a.description)}</p>
-          <div class="cb">${a.codebases ? 'pkgs: ' + esc(a.codebases) : ''}</div>
-          <div class="meta mono small muted" style="margin-top:.5rem">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen) || 'never'}</div></div>`).join('')}</div>`).join('') || '<div class="empty">No agents registered.</div>'}`);
+    function roster(agents){
+      const byDept={};for(const agent of agents)(byDept[agent.department||'']||=[]).push(agent);
+      return Object.keys(byDept).sort().map(d=>`<div class="dept-head"><h2>${esc(deptName(d))}</h2><span class="d">${esc(deptDesc(d))}</span></div><div class="agent-grid">${byDept[d].sort((a,b)=>(a.role==='orchestrator'?-1:0)-(b.role==='orchestrator'?-1:0)||a.name.localeCompare(b.name)).map(a=>`<div class="agent-card" data-agent-slug="${esc(a.slug)}"><span class="rep" title="reputation">${a.reputation}</span><h3><a href="#/agents/${encodeURIComponent(a.slug)}">${esc(a.name)}</a></h3>${badge(a.role)} <span class="mono small muted">${esc(a.slug)}</span><p class="small">${esc(a.description)}</p>${a.runtime?`<div class="agent-state">${badge(a.runtime.state)} ${esc(a.runtime.summary)}${a.runtime.ticket_id?` <a href="#/tickets/${a.runtime.ticket_id}">#${a.runtime.ticket_id}</a>`:''}</div>`:'<div class="small muted">Available for assignment</div>'}<div class="cb">${a.codebases?'pkgs: '+esc(a.codebases):''}</div><div class="meta mono small muted">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen)||'never'}</div></div>`).join('')}</div>`).join('')||'<div class="empty">The orchestrator registers automatically when the runner starts. Teammates are reused or registered as jobs are delegated.</div>';
+    }
+    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub" id="agent-count">${AGENTS.length} registered agents · shared identities and reusable capabilities</div></div><div class="actions"><a class="btn" href="#/skills">Shared skills</a><a class="btn ok" href="#/agents/new">+ Agent</a></div></div><div class="card" id="agents-progress"></div><div id="agent-roster">${roster(AGENTS)}</div>`);
+    await mountProgress('agents-progress');
+    poll(async()=>{const agents=await GET('/api/agents');AGENTS=agents;const box=$('#agent-roster');if(box&&!hasSelection(box))box.innerHTML=roster(agents);if($('#agent-count'))$('#agent-count').textContent=`${agents.length} registered agents · shared identities and reusable capabilities`;},3000);
   });
+
+  async function agentForm(slug){
+    setTab('agents');const agent=slug?await GET('/api/agents/'+encodeURIComponent(slug)):{};
+    paint(`<div class="pagehead"><h1>${slug?'Edit agent':'Register agent'}</h1></div><form id="agent-form" class="card form"><div class="grid-3"><label>Identity<input id="agent-slug" required pattern="[a-z0-9][a-z0-9._-]{0,79}" value="${esc(agent.slug||'')}"${slug?' readonly':''}></label><label>Name<input id="agent-name" required value="${esc(agent.name||'')}"></label><label>Role<select id="agent-role">${opts(['orchestrator','lead','expert','generalist','human'],agent.role||'expert')}</select></label></div><label>Capabilities<textarea id="agent-description" rows="3">${esc(agent.description||'')}</textarea></label><label>Reusable agent instructions<textarea id="agent-instructions" rows="6">${esc(agent.instructions||'')}</textarea></label><div class="form-actions"><a class="btn" href="#/agents">Cancel</a><button class="btn ok">Save agent</button></div></form>`);
+    $('#agent-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/agents',{slug:$('#agent-slug').value.trim(),name:$('#agent-name').value.trim(),role:$('#agent-role').value,description:$('#agent-description').value,instructions:$('#agent-instructions').value});location.hash='#/agents/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+  }
+  route(/^\/agents\/new$/,()=>agentForm());
+  route(/^\/agents\/([^/]+)\/edit$/,slug=>agentForm(slug));
+
+  route(/^\/skills$/,async()=>{
+    setTab('agents');const skills=await GET('/api/skills');
+    paint(`<div class="pagehead"><div><h1>Shared skills</h1><div class="sub">Reusable procedures available to every agent. Agents can publish new skills as they learn.</div></div><div class="actions"><a class="btn" href="#/agents">Agents</a><a class="btn ok" href="#/skills/new">+ Skill</a></div></div><div class="card"><div class="list">${skills.map(s=>`<div class="item"><div class="main"><a class="title" href="#/skills/${encodeURIComponent(s.slug)}">${esc(s.title)}</a><div class="meta"><span class="mono">${esc(s.slug)} · v${s.version}</span><span>updated ${ago(s.updated_at)} by ${chip(s.updated_by)}</span></div></div></div>`).join('')||'<div class="empty">No shared skills yet.</div>'}</div></div>`);
+  });
+  async function skillPage(slug){
+    setTab('agents');const skill=slug?await GET('/api/skills/'+encodeURIComponent(slug)):{};
+    paint(`<div class="pagehead"><div><h1>${slug?esc(skill.title):'New shared skill'}</h1><div class="sub">${slug?`v${skill.version} · updated by ${esc(skill.updated_by)}`:'A procedure all agents can read and use'}</div></div><a class="btn" href="#/skills">Shared skills</a></div>${slug?`<div class="card md">${MD.render(skill.body)}</div>`:''}<${slug?'details':'div'} class="card"${slug?'':' open'}>${slug?'<summary>Edit skill</summary>':''}<form id="skill-form" class="form"><div class="grid-2"><label>Slug<input id="skill-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" value="${esc(skill.slug||'')}"${slug?' readonly':''}></label><label>Title<input id="skill-title" required value="${esc(skill.title||'')}"></label></div><label>Instructions (Markdown)<textarea id="skill-body" required rows="12">${esc(skill.body||'')}</textarea></label><button class="btn ok">Save shared skill</button><p class="small muted">Updates require the current version to protect teammates' changes.</p></form></${slug?'details':'div'}>`);
+    $('#skill-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/skills',{slug:$('#skill-slug').value.trim(),title:$('#skill-title').value.trim(),body:$('#skill-body').value,version:skill.version||0});if(slug)render();else location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+  }
+  route(/^\/skills\/new$/,()=>skillPage());
+  route(/^\/skills\/([^/]+)$/,slug=>skillPage(slug));
 
   route(/^\/agents\/([^/]+)$/, async (slug) => {
     setTab('agents');
@@ -735,14 +791,15 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const inbox = await GET(`/api/agents/${encodeURIComponent(slug)}/inbox`);
     const pages = (await GET('/api/wiki')).filter((p) => p.author === slug || p.updated_by === slug);
     paint(`<div class="pagehead"><div><h1 style="text-transform:none;font-family:var(--sans)">${esc(a.name)}</h1><div class="sub">${badge(a.role)} <span class="mono">${esc(a.slug)}</span> · dept ${esc(a.department || '—')} · rep <b>${a.reputation}</b> · last seen ${ago(a.last_seen) || 'never'}</div></div>
-        <div class="actions"><a class="btn" href="#/tickets/new?assignee=${encodeURIComponent(slug)}&dept=${encodeURIComponent(a.department)}">+ Ticket for ${esc(slug)}</a></div></div>
+        <div class="actions"><a class="btn" href="#/agents/${encodeURIComponent(slug)}/edit">Edit agent</a><a class="btn" href="#/skills">Shared skills</a><a class="btn" href="#/tickets/new?assignee=${encodeURIComponent(slug)}&dept=${encodeURIComponent(a.department)}">+ Ticket for ${esc(slug)}</a></div></div><div class="card" id="agent-progress"></div>
       ${layout({ id: 'agent', body: `
-        <div class="card"><p>${esc(a.description)}</p><dl class="kv"><dt>codebases</dt><dd>${esc(a.codebases || '—')}</dd><dt>reads first</dt><dd>${esc(a.wiki_pages || '—')}</dd><dt>agent file</dt><dd>${esc(a.agent_file || '—')}</dd></dl></div>
+        <div class="card"><p>${esc(a.description)}</p>${a.instructions?`<h3>Agent instructions</h3><div class="md">${MD.render(a.instructions)}</div>`:''}<dl class="kv"><dt>codebases</dt><dd>${esc(a.codebases || '—')}</dd><dt>reads first</dt><dd>${esc(a.wiki_pages || '—')}</dd><dt>agent file</dt><dd>${esc(a.agent_file || '—')}</dd></dl></div>
         <div class="card"><h3>Assigned tickets</h3>${a.tickets.length ? `<div class="list">${a.tickets.map(ticketItem).join('')}</div>` : '<span class="muted">none</span>'}</div>
         <div class="card"><h3>Inbox preview (what it sees on wake)</h3><div class="mono small">claimable: ${inbox.claimable_tickets.length} · unanswered Qs in dept: ${inbox.unanswered_questions.length}</div></div>`,
         aside: `
         <div class="card tint-y"><h3>Wiki pages</h3>${pages.map((p) => `<div><a href="#/wiki/${p.slug}">${esc(p.title)}</a></div>`).join('') || '<span class="muted">none yet</span>'}</div>
         <div class="card"><h3>Activity</h3><div class="feed">${a.activity.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>` })}`);
+    await mountProgress('agent-progress','?agent='+encodeURIComponent(slug));
   });
 
   route(/^\/orchestrator$/, async () => {
@@ -753,19 +810,23 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
 
   route(/^\/debug$/, async () => {
     setTab('debug'); const q=qs();
-    const data=await GET(`/api/runner/debug${q.ticket?`?ticket=${encodeURIComponent(q.ticket)}`:''}`);
-    const messageView=m=>`<div class="debug-message ${m.kind==='acp-response'?'response':''}"><div><b>${esc(m.role)} · ${esc(m.kind)}</b><span class="ts">${esc(m.created_at)}</span></div><pre>${esc(m.body||'')}</pre></div>`;
-    paint(`<div class="pagehead"><div><h1>Agent debug</h1><div class="sub">ACP transcripts, tool events, review decisions and prior runs${q.ticket?` · ticket #${esc(q.ticket)}`:''}</div></div>${q.ticket?`<a class="btn" href="#/tickets/${encodeURIComponent(q.ticket)}">Back to ticket</a>`:''}</div>
-      <div class="debug-runs">${data.runs.map(r=>`<details class="card debug-run"><summary><b>Run #${r.id} · Ticket #${r.ticket_id} ${esc(r.ticket_title)}</b><span>${badge(r.status)} ${badge(r.priority)} · ${esc(r.backend)} · started ${esc(r.started_at||'—')}</span></summary><div class="debug-run-actions"><a href="#/tickets/${r.ticket_id}">Open ticket</a>${r.session_id?`<span class="mono small">ACP session ${esc(r.session_id)}</span>`:''}</div>${r.error?`<div class="tint-p">${esc(r.error)}</div>`:''}${r.reviews.map(x=>`<div class="debug-review"><b>Orchestrator review: ${esc(x.decision||x.status)}</b> · ${esc(x.backend)}<p>${esc(x.reason)}</p></div>`).join('')}${r.messages.map(messageView).join('')||'<div class="empty">No stored messages for this run.</div>'}</details>`).join('')||'<div class="empty">No agent runs recorded yet.</div>'}</div>
-      ${data.reviews.length?`<div class="card"><h2>Orchestrator review history</h2>${data.reviews.map(x=>`<div class="debug-review"><a href="#/tickets/${x.ticket_id}">Ticket #${x.ticket_id} ${esc(x.ticket_title)}</a> · ${badge(x.status)}${x.decision?` · ${esc(x.decision)}`:''} · ${esc(x.backend)}<p>${esc(x.reason||'Review in progress')}</p><small class="ts">${esc(x.created_at)}${x.finished_at?` · finished ${esc(x.finished_at)}`:''}</small></div>`).join('')}</div>`:''}
-      ${data.unattached_messages.length?`<details class="card debug-run"><summary>Ticket chat and standalone review logs (${data.unattached_messages.length})</summary>${data.unattached_messages.map(m=>`<div class="debug-message"><div><b>Ticket #${m.ticket_id} · ${esc(m.role)} · ${esc(m.kind)}</b><span class="ts">${esc(m.created_at)}</span></div><pre>${esc(m.body||'')}</pre></div>`).join('')}</details>`:''}`);
+    const path=`/api/runner/debug${q.ticket?`?ticket=${encodeURIComponent(q.ticket)}`:''}`;
+    const data=await GET(path);
+    const messageView=m=>`<div class="debug-message ${m.kind==='acp-response'?'response':''}"><div><b>${esc(m.role)} · ${esc(m.kind)}</b><span class="ts">${esc(m.updated_at||m.created_at)}</span></div><pre>${esc(m.body||'')}</pre></div>`;
+    const compact=messages=>{const out=[];for(const message of messages){const last=out[out.length-1];if(last&&last.kind===message.kind&&['acp-response','review-decision'].includes(message.kind)){last.body+=message.body;last.updated_at=message.updated_at||message.created_at;}else out.push({...message});}return out;};
+    const content=data=>`<div class="debug-runs">${data.runs.map(r=>`<details class="card debug-run" data-run-id="${r.id}"><summary><b>Run #${r.id} · Ticket #${r.ticket_id} ${esc(r.ticket_title)}</b><span>${badge(r.status)} ${badge(r.priority)} · ${chip(r.agent_slug)} · ${esc(r.backend)} · started ${esc(r.started_at||'—')}</span></summary><div class="debug-run-actions"><a href="#/tickets/${r.ticket_id}">Open ticket</a>${r.session_id?`<span class="mono small">ACP session ${esc(r.session_id)}</span>`:''}</div>${r.error?`<div class="tint-p">${esc(r.error)}</div>`:''}${r.reviews.map(x=>`<div class="debug-review"><b>Orchestrator review: ${esc(x.decision||x.status)}</b> · ${esc(x.backend)}<p>${esc(x.reason)}</p></div>`).join('')}${r.messages_truncated?`<p class="small muted">Showing the most recent visible events from ${r.message_count} stored entries.</p>`:''}${compact(r.messages).map(messageView).join('')||'<div class="empty">No stored messages for this run.</div>'}</details>`).join('')||'<div class="empty">No agent runs recorded yet.</div>'}</div>
+      ${data.reviews.length?`<div class="card"><h2>Orchestrator review history</h2>${data.reviews.map(x=>`<div class="debug-review"><a href="#/tickets/${x.ticket_id}">Ticket #${x.ticket_id} ${esc(x.ticket_title)}</a> · ${badge(x.status)}${x.decision?` · ${esc(x.decision)}`:''}<p>${esc(x.reason||'Review in progress')}</p><small class="ts">${esc(x.created_at)}${x.finished_at?` · finished ${esc(x.finished_at)}`:''}</small></div>`).join('')}</div>`:''}
+      ${data.unattached_messages.length?`<details class="card debug-run" data-run-id="chat"><summary>Ticket chat and standalone review logs (${data.unattached_messages.length})</summary>${compact(data.unattached_messages).map(messageView).join('')}</details>`:''}`;
+    paint(`<div class="pagehead"><div><h1>Agent debug</h1><div class="sub">Live transcripts, tool events and review decisions${q.ticket?` · ticket #${esc(q.ticket)}`:''}</div></div>${q.ticket?`<a class="btn" href="#/tickets/${encodeURIComponent(q.ticket)}">Back to ticket</a>`:''}</div><div class="card" id="debug-progress"></div><div id="debug-content">${content(data)}</div>`);
+    await mountProgress('debug-progress',q.ticket?'?ticket='+encodeURIComponent(q.ticket):'');
+    poll(async()=>{const next=await GET(path),box=$('#debug-content');if(!box||hasSelection(box))return;const opened=new Set([...box.querySelectorAll('details[open]')].map(x=>x.dataset.runId));const top=window.scrollY;box.innerHTML=content(next);for(const detail of box.querySelectorAll('details'))detail.open=opened.has(detail.dataset.runId);window.scrollTo(window.scrollX,top);},2000);
   });
 
   route(/^\/runner$/, async () => {
     setTab('runner');
     const [s, templates, tickets] = await Promise.all([GET('/api/runner/settings'), GET('/api/runner/templates'), GET('/api/tickets?all=1')]);
     paint(`<div class="pagehead"><div><h1>Agent runner</h1><div class="sub">ACP backend controls, execution templates, active work and ticket transcripts</div></div></div>
-      <div class="layout"><div class="layout-body">
+      <div class="card" id="runner-progress"></div><div class="layout"><div class="layout-body">
         <div class="card"><h2>Backend settings</h2><div class="grid-3">
           <label>Active backend<select id="rb">${['opencode','codex','claude'].map(x=>`<option value="${x}"${s.active_backend===x?' selected':''}>${x}${(s.backends.find(b=>b.id===x)||{}).available?' · detected':''}</option>`).join('')}</select></label>
           <label>Model<div style="display:flex;gap:.35rem"><select id="runner-model" style="min-width:0;flex:1"><option value="">Loading ACP models…</option></select><button class="btn sm" id="refresh-models" type="button" title="Refresh available models">↻</button></div><small id="model-note" class="muted" aria-live="polite">Model list comes from the selected backend.</small></label>
@@ -787,6 +848,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     $('#rb').onchange=loadRunnerModels;$('#refresh-models').onclick=loadRunnerModels;loadRunnerModels();
     $('#save-runner').onclick=async()=>{const payload={active_backend:$('#rb').value,parallel_agents:+$('#rp').value,workspace:$('#rw').value,opencode_api_base_url:$('#opencode-api-url').value.trim(),opencode_api_model:$('#opencode-api-model').value.trim(),clear_opencode_api_key:$('#clear-opencode-api-key').checked};const apiKey=$('#opencode-api-key').value;if(apiKey&&!payload.clear_opencode_api_key)payload.opencode_api_key=apiKey;for(const x of ['opencode','codex','claude']) payload[x+'_command']=$('#cmd-'+x).value.trim();if(loadedModelBackend===payload.active_backend)payload['model_'+payload.active_backend]=$('#runner-model').value; try{await api('PUT','/api/runner/settings',payload);toast('runner settings saved');render();}catch(e){fail(e);}};
     $('#template-form').onsubmit=async e=>{e.preventDefault();try{await api('POST','/api/runner/templates',{name:$('#tn').value,prompt:$('#tp').value,backend:$('#tb').value,enabled:$('#te').value==='1'});toast('template saved');render();}catch(err){fail(err);}};
+    await mountProgress('runner-progress');
   });
 
   // ------------------------------------------------------------ SEARCH / ACTIVITY
@@ -806,7 +868,9 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const q = qs();
     const list = await GET(`/api/activity?limit=200${q.actor ? `&actor=${encodeURIComponent(q.actor)}` : ''}`);
     paint(`<div class="pagehead"><div><h1>Activity</h1><div class="sub">${q.actor ? `actor: ${esc(q.actor)}` : 'everything, newest first'}</div></div></div>
-      <div class="card"><div class="feed">${list.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>`);
+      <div class="card" id="activity-progress"></div><div class="card"><div class="feed" id="activity-feed">${list.map(ev).join('') || '<span class="muted">quiet</span>'}</div></div>`);
+    await mountProgress('activity-progress');
+    poll(async()=>{const events=await GET(`/api/activity?limit=200${q.actor?`&actor=${encodeURIComponent(q.actor)}`:''}`);const feed=$('#activity-feed');if(feed&&!hasSelection(feed))feed.innerHTML=events.map(ev).join('')||'<span class="muted">quiet</span>';},2000);
   });
 
   render();

@@ -43,6 +43,13 @@ def _execution_flag(value):
     raise BadRequest("ready_for_execution must be a boolean")
 
 
+def _worker_count(value):
+    if value in (None, ''): return None
+    if type(value) is not int or not 1 <= value <= 15:
+        raise BadRequest('recommended_workers must be an integer between 1 and 15, or null for automatic staffing')
+    return value
+
+
 def _template_id(conn, value):
     if value in (None, ""): return None
     if type(value) is not int and not (isinstance(value, str) and value.isdigit()): raise BadRequest("invalid agent template")
@@ -178,6 +185,7 @@ def list_agents(conn, department: str | None = None) -> list[dict]:
             "SELECT COUNT(*) FROM wiki_pages WHERE author=?", (a["slug"],)
         ).fetchone()[0]
         a["reputation"] = reputation(conn, a["slug"])
+        a['runtime'] = _one(conn.execute("SELECT key,ticket_id,state,phase,summary,updated_at FROM agent_runtime WHERE agent_slug=? ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,updated_at DESC LIMIT 1", (a['slug'],)))
     return agents
 
 
@@ -190,7 +198,7 @@ def get_agent(conn, slug: str) -> dict:
 
 
 def upsert_agent(conn, slug: str, name: str, **fields) -> dict:
-    allowed = {"department", "role", "description", "codebases", "wiki_pages", "agent_file"}
+    allowed = {"department", "role", "description", "codebases", "wiki_pages", "agent_file", "instructions"}
     data = {k: v for k, v in fields.items() if k in allowed and v is not None}
     ex = _one(conn.execute("SELECT * FROM agents WHERE slug=?", (slug,)))
     if ex:
@@ -207,6 +215,140 @@ def upsert_agent(conn, slug: str, name: str, **fields) -> dict:
         )
     conn.commit()
     return get_agent(conn, slug)
+
+
+def ensure_agent(conn, name: str, role: str = "expert", description: str = "",
+                 slug: str = "", instructions: str = "", *, commit=True) -> dict:
+    """Prefer an existing identity; never overwrite its persona during reuse."""
+    if role not in ("orchestrator", "lead", "expert", "generalist"):
+        raise BadRequest("execution role must be orchestrator, lead, expert, or generalist")
+    if not isinstance(name, str) or not name.strip(): raise BadRequest("agent name is required")
+    candidate = slug or slugify(name)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", candidate): raise BadRequest("invalid agent slug")
+    existing = _one(conn.execute("SELECT * FROM agents WHERE slug=?", (candidate,)))
+    if existing and existing["role"].lower() == "human": raise BadRequest("cannot execute as a human agent")
+    if not existing:
+        existing = _one(conn.execute("SELECT * FROM agents WHERE lower(name)=lower(?) AND lower(role)!='human' ORDER BY id LIMIT 1", (name.strip(),)))
+    # An explicit slug is an identity request. Automatic selection may reuse a
+    # specialist whose described capabilities substantially match the request.
+    if not existing and not slug and description.strip():
+        wanted = set(_search_terms(description)) - {"research", "and", "the", "of", "for", "with", "analysis"}
+        best, score = None, 0
+        for agent in _rows(conn.execute("SELECT * FROM agents WHERE role=? ORDER BY id", (role,))):
+            offered = set(_search_terms(agent['name'] + ' ' + agent['description']))
+            match = len(wanted & offered) / max(1, len(wanted))
+            if match > score: best, score = agent, match
+        if score >= .7: existing = best
+    if existing: return {**existing, "reused": True}
+    stamp = now()
+    conn.execute("INSERT INTO agents(slug,name,role,description,instructions,created_at,last_seen) VALUES(?,?,?,?,?,?,?)",
+                 (candidate, name.strip(), role, description, instructions, stamp, stamp))
+    log_activity(conn, candidate, 'agent.register', 'agent:' + candidate, name.strip() + ' joined the team')
+    if commit: conn.commit()
+    return {**_one(conn.execute('SELECT * FROM agents WHERE slug=?', (candidate,))), "reused": False}
+
+
+def orchestrator_agent(conn, *, commit=True) -> dict:
+    existing = _one(conn.execute("SELECT * FROM agents WHERE role='orchestrator' ORDER BY id LIMIT 1"))
+    if existing: return existing
+    reserved = _one(conn.execute("SELECT * FROM agents WHERE slug='orchestrator'"))
+    if reserved and reserved['role'].lower() != 'human':
+        conn.execute("UPDATE agents SET role='orchestrator' WHERE slug='orchestrator'")
+        log_activity(conn, 'orchestrator', 'agent.role', 'agent:orchestrator', 'Assigned the orchestrator role')
+        if commit: conn.commit()
+        return {**reserved, 'role': 'orchestrator'}
+    return ensure_agent(conn, 'Orchestrator', 'orchestrator',
+                        'Build teams, reuse specialists, delegate work, review evidence and synthesize results.',
+                        slug='team-orchestrator' if reserved else 'orchestrator', commit=commit)
+
+
+def resolve_ticket_agent(conn, ticket: dict, *, commit=True) -> dict:
+    assigned = (ticket.get('assignee') or '').strip()
+    if assigned:
+        existing = _one(conn.execute('SELECT * FROM agents WHERE slug=?', (assigned,)))
+        agent = existing or ensure_agent(conn, assigned.replace('-', ' ').title(),
+                     'orchestrator' if ticket['type'] == 'job' else 'expert', ticket['title'], slug=assigned, commit=False)
+        if agent['role'].lower() == 'human': raise BadRequest('cannot execute as a human agent')
+    elif ticket['type'] == 'job':
+        agent = orchestrator_agent(conn, commit=False)
+    else:
+        agent = ensure_agent(conn, ticket['title'], 'expert', ticket['title'],
+                             commit=False)
+    if assigned != agent['slug']:
+        conn.execute('UPDATE tickets SET assignee=? WHERE id=?', (agent['slug'], ticket['id']))
+        log_activity(conn, agent['slug'], 'ticket.assign', f"ticket:{ticket['id']}", 'Assigned to ' + agent['name'])
+    if commit: conn.commit()
+    return agent
+
+
+def list_skills(conn) -> list[dict]:
+    return _rows(conn.execute('SELECT slug,title,version,updated_by,updated_at,length(body) AS size FROM shared_skills ORDER BY title'))
+
+
+def get_skill(conn, slug: str) -> dict:
+    skill = _one(conn.execute('SELECT * FROM shared_skills WHERE slug=?', (slug,)))
+    if not skill: raise NotFound(f'skill {slug!r} not found')
+    return skill
+
+
+def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None) -> dict:
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', slug): raise BadRequest('invalid skill slug')
+    if not title.strip() or not body.strip(): raise BadRequest('skill title and instructions are required')
+    if len(body) > 128000: raise BadRequest('skill instructions are too large')
+    existing = _one(conn.execute('SELECT * FROM shared_skills WHERE slug=?', (slug,)))
+    stamp = now()
+    if existing:
+        if type(version) is not int or version != existing['version']:
+            raise BadRequest('Skill changed; read the current version before updating it.')
+        revision = version + 1
+        changed = conn.execute('UPDATE shared_skills SET title=?,body=?,version=?,updated_by=?,updated_at=? WHERE slug=? AND version=?',
+                               (title.strip(), body, revision, actor, stamp, slug, version))
+        if changed.rowcount != 1:
+            conn.rollback()
+            raise BadRequest('Skill changed; refresh before updating it.')
+    else:
+        if version not in (None, 0): raise BadRequest('new skills start at version 1')
+        revision = 1
+        try:
+            conn.execute('INSERT INTO shared_skills VALUES(?,?,?,?,?,?,?,?)', (slug, title.strip(), body, revision, actor, actor, stamp, stamp))
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise BadRequest('Skill changed; read the current version before updating it.') from exc
+    conn.execute('INSERT INTO shared_skill_versions VALUES(?,?,?,?,?,?)', (slug, revision, title.strip(), body, actor, stamp))
+    log_activity(conn, actor, 'skill.put', 'skill:' + slug, f'{title.strip()} · version {revision}')
+    touch_agent(conn, actor)
+    conn.commit()
+    return get_skill(conn, slug)
+
+
+def children_delivered(conn, tid: int) -> bool:
+    return not conn.execute("SELECT 1 FROM tickets WHERE parent_id=? AND (status NOT IN ('review','done','wontfix') OR (status!='wontfix' AND trim(result)='')) LIMIT 1", (tid,)).fetchone()
+
+
+def children_resolved(conn, tid: int) -> bool:
+    return not conn.execute("SELECT 1 FROM tickets WHERE parent_id=? AND status NOT IN ('done','wontfix') LIMIT 1", (tid,)).fetchone()
+
+
+def shared_skill_context(conn) -> str:
+    skills = list_skills(conn)
+    lines = ['SHARED SKILLS (available to every teammate; use skill_get for full instructions):']
+    for skill in skills: lines.append(f"- {skill['slug']} v{skill['version']}: {skill['title']}")
+    for slug in ('team-orchestration', 'source-backed-research'):
+        if any(skill['slug'] == slug for skill in skills):
+            lines.append('\n' + get_skill(conn, slug)['body'])
+    lines.append('Read relevant skills before working. Publish a reusable method you actually verified with skill_put; include the current version when updating a skill. Skills are procedures, not unverified research findings.')
+    return '\n'.join(lines)
+
+
+def seed_shared_skills(conn):
+    actor = orchestrator_agent(conn)['slug']
+    defaults = {
+        'team-orchestration': ('Team orchestration', '''When coordinating a job, call agents_list first. Reuse a suitable registered teammate; use agent_ensure to create one only if needed. Assign every child ticket to that teammate and set ready=true for actionable work. Respect the ticket's suggested worker count, adjusting it when necessary and explaining why. Each teammate owns its ticket result or a separate wiki page. Only the lead writes the shared synthesis page; workers must not replace the same page concurrently. After dispatch, finish your turn so the runner can wait without consuming an inference slot. The runner resumes the lead for SYNTHESIS when child results arrive. During SYNTHESIS, read and check those results, resolve missing evidence, publish the combined deliverable, and call ticket_result. Creating tickets is not completed research.'''),
+        'source-backed-research': ('Source-backed research', '''Use current primary sources and cite direct URLs and publication/access dates. Fetch and inspect a source before claiming it supports a fact. Distinguish evidence, inference, and unverified claims. If source access fails, record that limitation rather than inventing citations. For a research worker, publish evidence and links in your own ticket_result or a uniquely named wiki page. For the lead, verify worker claims before synthesis. Capture methods you actually verified as shared skills; do not convert unverified findings into procedural skills.'''),
+    }
+    for slug, (title, body) in defaults.items():
+        if not conn.execute('SELECT 1 FROM shared_skills WHERE slug=?', (slug,)).fetchone():
+            save_skill(conn, slug, title, body, actor)
 
 
 def reputation(conn, slug: str) -> int:
@@ -729,7 +871,7 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
                   tags=None, due_at: str | None = None,
                   parent_id: int | None = None, board_id: int | None = None,
                   ready_for_execution: bool = False,
-                  agent_template_id: int | None = None) -> dict:
+                  agent_template_id: int | None = None, recommended_workers: int | None = None) -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -746,14 +888,15 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
     board_id = get_ticket_board(conn, 1 if board_id is None else board_id)["id"]
     ready_for_execution = _execution_flag(ready_for_execution)
     agent_template_id = _template_id(conn, agent_template_id)
+    recommended_workers = _worker_count(recommended_workers)
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "
-        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at, recommended_workers) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title.strip(), body or "", type_, "open", priority, department or "", assignee or "",
          requester or "", _tags(tags), due_at, parent_id, board_id, ready_for_execution,
-         agent_template_id, ts, ts),
+         agent_template_id, ts, ts, recommended_workers),
     )
     tid = cur.lastrowid
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
@@ -770,8 +913,8 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if not t:
         raise NotFound(f"ticket #{tid} not found")
     allowed = {"title", "body", "type", "status", "priority", "department", "assignee",
-               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id"}
-    data = {k: v for k, v in fields.items() if k in allowed and (v is not None or k == "agent_template_id")}
+               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers"}
+    data = {k: v for k, v in fields.items() if k in allowed and (v is not None or k in ("agent_template_id", "recommended_workers"))}
     if "status" in data and data["status"] not in TICKET_STATUSES:
         raise BadRequest(f"status must be one of {TICKET_STATUSES}")
     if "priority" in data and data["priority"] not in PRIORITIES:
@@ -782,6 +925,7 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
         data["ready_for_execution"] = _execution_flag(data["ready_for_execution"])
     if "agent_template_id" in data:
         data["agent_template_id"] = _template_id(conn, data["agent_template_id"])
+    if 'recommended_workers' in data: data['recommended_workers'] = _worker_count(data['recommended_workers'])
     if "parent_id" in data:
         pid = data["parent_id"]
         if pid in ("", "none", "null", 0, "0"):

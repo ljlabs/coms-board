@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from coms import api, db  # noqa: E402
+from coms import api, db, progress  # noqa: E402
 from coms.workspace import DEFAULT_WORKSPACE, workspace_path
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -204,7 +204,7 @@ def r_agents(conn, m, _mm, q, b, actor):
     if m == "POST":
         return api.upsert_agent(conn, b["slug"], b.get("name") or b["slug"],
                                 **{k: b.get(k) for k in ("department", "role", "description",
-                                                          "codebases", "wiki_pages", "agent_file")})
+                                                          "codebases", "wiki_pages", "agent_file", "instructions")})
 
 
 def r_agent(conn, m, mm, q, b, actor):
@@ -212,7 +212,15 @@ def r_agent(conn, m, mm, q, b, actor):
         a = api.get_agent(conn, mm.group(1))
         a["activity"] = api.activity(conn, 30, mm.group(1))
         a["tickets"] = api.list_tickets(conn, assignee=mm.group(1))
+        a['progress'] = progress.snapshot(conn, agent=mm.group(1))
         return a
+
+
+def r_skills(conn, m, mm, q, b, actor):
+    slug = mm.group(1) if mm.lastindex else None
+    if m == 'GET': return api.get_skill(conn, slug) if slug else api.list_skills(conn)
+    if m in ('POST', 'PUT', 'PATCH'):
+        return api.save_skill(conn, slug or b.get('slug', ''), b.get('title', ''), b.get('body', ''), actor, b.get('version'))
 
 
 def r_inbox(conn, m, mm, q, b, actor):
@@ -307,13 +315,17 @@ def r_tickets(conn, m, _mm, q, b, actor):
         )
     if m == "POST":
         pid = b.get("parent_id")
-        return api.create_ticket(conn, b.get("title", ""), b.get("body", ""), actor,
+        ticket = api.create_ticket(conn, b.get("title", ""), b.get("body", ""), actor,
                                  b.get("type", "task"), b.get("priority", "p2"), b.get("department", ""),
                                  b.get("assignee", ""), b.get("tags"), b.get("due_at"),
                                  parent_id=int(pid) if pid not in (None, "") else None,
                                  board_id=b.get("board_id"),
                                  ready_for_execution=b.get("ready_for_execution", False),
-                                 agent_template_id=b.get("agent_template_id"))
+                                 agent_template_id=b.get("agent_template_id"), recommended_workers=b.get('recommended_workers'))
+        if ticket['ready_for_execution'] and not ticket['assignee']:
+            api.resolve_ticket_agent(conn, ticket)
+            ticket = api.get_ticket(conn, ticket['id'])
+        return ticket
 
 
 def r_ticket(conn, m, mm, q, b, actor):
@@ -323,7 +335,7 @@ def r_ticket(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id") if k in b})
+            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers") if k in b})
 
 
 def r_runner_settings(conn, m, _mm, q, b, actor):
@@ -414,7 +426,11 @@ def r_runner_debug(conn, m, _mm, q, b, actor):
     runs=[]
     for row in rows:
         item=dict(row)
-        item['messages']=[dict(x) for x in conn.execute("SELECT id,role,kind,body,created_at FROM agent_messages WHERE run_id=? ORDER BY id LIMIT 2000",(row['id'],))]
+        # Return the tail, not the first page: old token-by-token transcripts
+        # can exceed the limit within a minute and otherwise freeze this view.
+        item['message_count'] = conn.execute('SELECT count(*) FROM agent_messages WHERE run_id=?', (row['id'],)).fetchone()[0]
+        item['messages']=[dict(x) for x in reversed(conn.execute("SELECT id,role,kind,body,created_at,updated_at FROM agent_messages WHERE run_id=? AND kind!='acp-agent_thought_chunk' AND NOT (kind='review-log' AND body LIKE '%agent_thought_chunk%') ORDER BY id DESC LIMIT 2000",(row['id'],)).fetchall())]
+        item['messages_truncated'] = item['message_count'] > len(item['messages'])
         item['reviews']=[dict(x) for x in conn.execute("SELECT id,status,decision,reason,backend,created_at,finished_at FROM ticket_reviews WHERE ticket_id=? AND source_run_id=? ORDER BY id",(row['ticket_id'],row['id']))]
         runs.append(item)
     misc="WHERE run_id IS NULL"; margs=[]
@@ -425,6 +441,16 @@ def r_runner_debug(conn, m, _mm, q, b, actor):
     reviews_args=[int(q['ticket'])] if q.get('ticket') else []
     reviews=[dict(x) for x in conn.execute("SELECT tr.*,t.title AS ticket_title FROM ticket_reviews tr JOIN tickets t ON t.id=tr.ticket_id "+reviews_where+" ORDER BY tr.id DESC LIMIT 200",reviews_args)]
     return {"runs":runs,"unattached_messages":loose,"reviews":reviews}
+
+
+def r_runner_status(conn, m, _mm, q, b, actor):
+    if m != 'GET': return None
+    from .runner import RUNNER
+    state = progress.snapshot(conn, ticket=q.get('ticket'), agent=q.get('agent'))
+    settings = RUNNER.settings()
+    state['capacity'] = int(settings.get('parallel_agents', '2'))
+    state['runner_running'] = bool(RUNNER.thread and RUNNER.thread.is_alive())
+    return state
 
 
 def r_templates(conn, m, _mm, q, b, actor):
@@ -448,7 +474,8 @@ def r_runner_ticket(conn, m, mm, q, b, actor):
     tid = int(mm.group(1)); api.get_ticket(conn, tid)
     if m == "GET":
         return {"messages":[dict(r) for r in conn.execute("SELECT * FROM agent_messages WHERE ticket_id=? AND role='user' AND kind='text' ORDER BY id",(tid,))],
-                "runs":[dict(r) for r in conn.execute("SELECT * FROM agent_runs WHERE ticket_id=? ORDER BY id DESC",(tid,))]}
+                "runs":[dict(r) for r in conn.execute("SELECT * FROM agent_runs WHERE ticket_id=? ORDER BY id DESC",(tid,))],
+                "progress":progress.snapshot(conn, ticket=tid)}
     if m == "POST":
         from .runner import RUNNER
         try: return RUNNER.chat(tid, b.get("body", ""))
@@ -596,10 +623,13 @@ def r_question_comment_item(conn, m, mm, _q, b, actor):
 
 
 ROUTES = [
+    (r"/api/skills/([a-z0-9-]+)", r_skills),
+    (r"/api/skills", r_skills),
     (r"/api/runner/projects/(\d+)", r_orchestrator_project),
     (r"/api/runner/projects", r_orchestrator_projects),
     (r"/api/runner/models", r_runner_models),
     (r"/api/runner/debug", r_runner_debug),
+    (r"/api/runner/status", r_runner_status),
     (r"/api/runner/sessions", r_orchestrator_sessions),
     (r"/api/runner/sessions/([^/]+)/messages", r_orchestrator_messages),
     (r"/api/runner/sessions/([^/]+)", r_orchestrator_session),

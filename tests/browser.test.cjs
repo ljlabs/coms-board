@@ -21,7 +21,7 @@ before(async () => {
     lines.once('line', port => { resolve(`http://127.0.0.1:${port}`); lines.close(); });
     server.once('exit', code => reject(new Error(`Fixture exited ${code}: ${errors}`)));
   });
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 });
 after(async () => {
   if (browser) await browser.close();
@@ -44,6 +44,38 @@ async function pageFor(route, run, options = {}) {
     assert.deepEqual(errors, [], 'No uncaught browser errors');
   } finally { await page.close(); }
 }
+
+test('Agents discovers registered teammates and polls visible progress', async () => {
+  await pageFor('/agents', async page => {
+    const saved = await page.evaluate(() => fetch('/api/agents', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slug:'browser-expert',name:'Browser expert',role:'expert',description:'Evidence research'})}).then(r=>r.json()));
+    assert.equal(saved.slug,'browser-expert');
+    await page.waitForSelector('[data-agent-slug="browser-expert"]');
+    let summary='Reading current sources', preview='First research update';
+    await page.route('**/api/runner/status', route => route.fulfill({json:{active_count:1,waiting_count:0,generated_at:new Date().toISOString(),items:[{key:'test-run',agent_slug:'browser-expert',backend:'codex',state:'running',phase:'responding',summary,preview,ticket_id:1,ticket_title:'Browser regression ticket',response_chars:21,tool_calls:2,idle_seconds:1}]}}));
+    await page.waitForFunction(() => document.querySelector('#agents-progress').textContent.includes('First research update'));
+    summary='Comparing evidence';preview='Second research update';
+    await page.waitForFunction(() => document.querySelector('#agents-progress').textContent.includes('Second research update'));
+    assert.ok((await page.locator('#agents-progress').textContent()).includes('Comparing evidence'));
+  });
+});
+
+test('Shared skill editor saves a version all agents can read', async () => {
+  await pageFor('/skills/new', async page => {
+    await page.locator('#skill-slug').fill('browser-sourcing');
+    await page.locator('#skill-title').fill('Browser sourcing');
+    await page.locator('#skill-body').fill('Read the primary source and record its date.');
+    await page.locator('#skill-form button').click();
+    await page.waitForFunction(() => location.hash==='#/skills/browser-sourcing' && document.querySelector('.md'));
+    assert.ok((await page.locator('.md').textContent()).includes('primary source'));
+    await page.locator('details summary').click();
+    await page.locator('#skill-body').fill('Record the direct source URL too.');
+    await page.locator('#skill-form button').click();
+    await page.waitForFunction(() => document.querySelector('.pagehead .sub').textContent.includes('v2'));
+    const saved=await page.evaluate(()=>fetch('/api/skills/browser-sourcing').then(r=>r.json()));
+    assert.equal(saved.version,2);
+    assert.equal(saved.body,'Record the direct source URL too.');
+  });
+});
 
 test('ticket polls never duplicate stored prompts; refresh preserves drafts and scroll', async () => {
   await pageFor('/tickets/1', async page => {
