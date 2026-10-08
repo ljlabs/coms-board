@@ -1,8 +1,8 @@
 """SQLite storage for the coms-board (agent wiki + ticket queue + Q&A).
 
-Single-file database, stdlib only. Designed to run on old SQLite builds
-(3.7.x: no FTS5, no JSON1, no UPSERT, no window functions), so the schema
-sticks to plain tables + FTS4 for full-text search.
+Single-file database, stdlib only. Designed to run across the SQLite builds
+bundled with Python on different operating systems. FTS4 is used when present;
+plain tables and LIKE search are the portable fallback.
 """
 from __future__ import annotations
 
@@ -65,8 +65,6 @@ CREATE TABLE IF NOT EXISTS wiki_revisions (
 );
 CREATE INDEX IF NOT EXISTS ix_wiki_rev_page ON wiki_revisions(page_id);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts4(slug, title, body, tags);
-
 CREATE TABLE IF NOT EXISTS ticket_boards (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -102,11 +100,10 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
   author      TEXT NOT NULL DEFAULT '',
   kind        TEXT NOT NULL DEFAULT 'comment',     -- comment | status | assign
   body        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_tc_ticket ON ticket_comments(ticket_id);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS ticket_fts USING fts4(title, body, tags, result);
 
 -- Structured attachments: context a ticket carries so a re-pickup needs no
 -- archaeology. kind: wiki (page slug) | question (id) | ticket (id) | url.
@@ -163,10 +160,9 @@ CREATE TABLE IF NOT EXISTS question_comments (
   target_id   INTEGER NOT NULL,
   author      TEXT NOT NULL DEFAULT '',
   body        TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT
 );
-
-CREATE VIRTUAL TABLE IF NOT EXISTS question_fts USING fts4(kind, ref_id, title, body, tags);
 
 -- Cross-cutting activity feed for the dashboard.
 CREATE TABLE IF NOT EXISTS activity (
@@ -180,6 +176,56 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX IF NOT EXISTS ix_activity_created ON activity(created_at);
 """
 
+_FTS4_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts4(slug, title, body, tags);
+CREATE VIRTUAL TABLE IF NOT EXISTS ticket_fts USING fts4(title, body, tags, result);
+CREATE VIRTUAL TABLE IF NOT EXISTS question_fts USING fts4(kind, ref_id, title, body, tags);
+"""
+
+_PLAIN_SEARCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS wiki_fts (slug TEXT, title TEXT, body TEXT, tags TEXT);
+CREATE TABLE IF NOT EXISTS ticket_fts (
+  docid INTEGER PRIMARY KEY, title TEXT, body TEXT, tags TEXT, result TEXT
+);
+CREATE TABLE IF NOT EXISTS question_fts (
+  kind TEXT, ref_id TEXT, title TEXT, body TEXT, tags TEXT
+);
+"""
+
+
+def _supports_fts4() -> bool:
+    """Check the SQLite module actually linked into this Python runtime."""
+    probe = sqlite3.connect(":memory:")
+    try:
+        probe.execute("CREATE VIRTUAL TABLE coms_fts4_probe USING fts4(content)")
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        probe.close()
+
+
+FTS4_SUPPORTED = _supports_fts4()
+SCHEMA += _FTS4_SCHEMA if FTS4_SUPPORTED else _PLAIN_SEARCH_SCHEMA
+
+
+def fts4_available(conn: sqlite3.Connection, table: str) -> bool:
+    """Return whether an FTS4 table can be queried on this connection."""
+    if not FTS4_SUPPORTED or table not in {"wiki_fts", "ticket_fts", "question_fts"}:
+        return False
+    entry = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                         (table,)).fetchone()
+    if not entry or "VIRTUAL TABLE" not in (entry[0] or "").upper():
+        return False
+    try:
+        conn.execute(f"SELECT 1 FROM {table} LIMIT 0").fetchall()
+        return True
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "no such module" in message or "no such table" in message:
+            return False
+        raise
+
 
 def db_path() -> Path:
     return Path(os.environ.get("COMS_DB", str(DEFAULT_DB)))
@@ -191,6 +237,8 @@ MIGRATIONS = [
     ("tickets", "parent_id", "INTEGER"),  # ticket hierarchy: story > job > task
     ("tickets", "board_id", "INTEGER NOT NULL DEFAULT 1"),
     ("wiki_pages", "folder", "TEXT NOT NULL DEFAULT ''"),  # wiki folders: slash path, '' = unfiled
+    ("ticket_comments", "updated_at", "TEXT"),
+    ("question_comments", "updated_at", "TEXT"),
 ]
 
 
@@ -200,7 +248,8 @@ MIGRATIONS = [
 # virtual table's shadow tables don't survive a plain rename on old SQLite
 # builds. INSERT OR IGNORE + DROP makes this idempotent.
 TABLE_RENAMES = [
-    ("board_comments", "question_comments", None),
+    ("board_comments", "question_comments",
+     ("id", "target_type", "target_id", "author", "body", "created_at")),
     ("board_fts", "question_fts",
      ("kind", "ref_id", "title", "body", "tags")),
 ]
@@ -218,6 +267,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:
+            if old.endswith("_fts"):
+                table_sql = {r[0]: (r[1] or "").upper() for r in conn.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE name IN (?,?)", (old, new))}
+                if not FTS4_SUPPORTED and any("VIRTUAL TABLE" in table_sql.get(t, "")
+                                              for t in (old, new)):
+                    continue
             if cols is None:
                 conn.execute(f"INSERT OR IGNORE INTO {new} SELECT * FROM {old}")
             else:

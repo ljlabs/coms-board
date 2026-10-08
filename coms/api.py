@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from . import db
+
 TICKET_STATUSES = ("open", "in_progress", "blocked", "review", "done", "wontfix")
 # story = human project-level epic; job = an investigation/dispatch run inside a
 # story; the rest (research/task/bug/question/chore) are leaf work items.
@@ -67,6 +69,36 @@ def _fts_query(q: str) -> str:
     if not toks:
         return "zzzz_no_match_zzzz"
     return " ".join(f"{t}*" for t in toks)
+
+
+def _search_terms(q: str) -> list[str]:
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9]+", q) if t]
+
+
+def _like_search(columns: tuple[str, ...], terms: list[str]) -> tuple[str, list[str]]:
+    """Build a portable AND-of-tokens / OR-of-fields LIKE predicate."""
+    if not terms:
+        return "0", []
+    groups = []
+    args: list[str] = []
+    for term in terms:
+        groups.append("(" + " OR ".join(
+            f"LOWER(COALESCE({column},'')) LIKE ?" for column in columns) + ")")
+        args.extend([f"%{term}%"] * len(columns))
+    return " AND ".join(groups), args
+
+
+def _text_snippet(text: str, terms: list[str], width: int = 180) -> str:
+    text = " ".join((text or "").split())
+    lower = text.lower()
+    starts = [lower.find(term) for term in terms if lower.find(term) >= 0]
+    start = max(0, (min(starts) if starts else 0) - 50)
+    snippet = text[start:start + width]
+    if start:
+        snippet = "…" + snippet
+    if start + width < len(text):
+        snippet += "…"
+    return snippet
 
 
 def log_activity(conn, actor: str, kind: str, ref: str, summary: str) -> None:
@@ -285,6 +317,8 @@ def get_wiki(conn, slug: str) -> dict:
 
 
 def _index_wiki(conn, page: dict) -> None:
+    if not db.fts4_available(conn, "wiki_fts"):
+        return
     conn.execute("DELETE FROM wiki_fts WHERE slug=?", (page["slug"],))
     conn.execute(
         "INSERT INTO wiki_fts(slug, title, body, tags) VALUES (?,?,?,?)",
@@ -357,7 +391,8 @@ def delete_wiki(conn, slug: str, actor: str) -> None:
         raise NotFound(f"wiki page {slug!r} not found")
     conn.execute("DELETE FROM wiki_revisions WHERE page_id=?", (p["id"],))
     conn.execute("DELETE FROM wiki_pages WHERE id=?", (p["id"],))
-    conn.execute("DELETE FROM wiki_fts WHERE slug=?", (slug,))
+    if db.fts4_available(conn, "wiki_fts"):
+        conn.execute("DELETE FROM wiki_fts WHERE slug=?", (slug,))
     log_activity(conn, actor, "wiki.delete", f"wiki:{slug}", f"deleted wiki page “{p['title']}”")
     conn.commit()
 
@@ -379,10 +414,19 @@ def wiki_revision(conn, rev_id: int) -> dict:
 def search_wiki(conn, q: str, limit: int = 20) -> list[dict]:
     if not q.strip():
         return []
-    rows = _rows(conn.execute(
-        "SELECT slug, title, tags, snippet(wiki_fts, '[', ']', '…', -1, 24) AS snippet "
-        "FROM wiki_fts WHERE wiki_fts MATCH ? LIMIT ?",
-        (_fts_query(q), limit)))
+    if db.fts4_available(conn, "wiki_fts"):
+        rows = _rows(conn.execute(
+            "SELECT slug, title, tags, snippet(wiki_fts, '[', ']', '…', -1, 24) AS snippet "
+            "FROM wiki_fts WHERE wiki_fts MATCH ? LIMIT ?",
+            (_fts_query(q), limit)))
+    else:
+        terms = _search_terms(q)
+        where, args = _like_search(("slug", "title", "body", "tags"), terms)
+        rows = _rows(conn.execute(
+            f"SELECT slug, title, tags, body FROM wiki_pages WHERE {where} LIMIT ?",
+            (*args, limit)))
+        for row in rows:
+            row["snippet"] = _text_snippet(row.pop("body"), terms) or row["title"]
     for r in rows:
         meta = _one(conn.execute(
             "SELECT department, folder, author, updated_at FROM wiki_pages WHERE slug=?", (r["slug"],)))
@@ -463,8 +507,9 @@ def delete_ticket_board(conn, board_id: int, actor: str) -> None:
                          "(SELECT id FROM tickets WHERE board_id=?)", (board["id"],))
         conn.execute("DELETE FROM ticket_links WHERE kind='ticket' AND ref IN "
                      "(SELECT CAST(id AS TEXT) FROM tickets WHERE board_id=?)", (board["id"],))
-        conn.execute("DELETE FROM ticket_fts WHERE docid IN "
-                     "(SELECT id FROM tickets WHERE board_id=?)", (board["id"],))
+        if db.fts4_available(conn, "ticket_fts"):
+            conn.execute("DELETE FROM ticket_fts WHERE docid IN "
+                         "(SELECT id FROM tickets WHERE board_id=?)", (board["id"],))
         conn.execute("DELETE FROM tickets WHERE board_id=?", (board["id"],))
         conn.execute("DELETE FROM ticket_boards WHERE id=?", (board["id"],))
         log_activity(conn, actor, "board.delete", f"board:{board['id']}",
@@ -472,6 +517,8 @@ def delete_ticket_board(conn, board_id: int, actor: str) -> None:
 
 
 def _index_ticket(conn, t: dict) -> None:
+    if not db.fts4_available(conn, "ticket_fts"):
+        return
     conn.execute("DELETE FROM ticket_fts WHERE docid=?", (t["id"],))
     conn.execute(
         "INSERT INTO ticket_fts(docid, title, body, tags, result) VALUES (?,?,?,?,?)",
@@ -780,8 +827,8 @@ def comment_ticket(conn, tid: int, author: str, body: str) -> dict:
     get_ticket(conn, tid)
     ts = now()
     conn.execute(
-        "INSERT INTO ticket_comments(ticket_id, author, kind, body, created_at) VALUES (?,?,?,?,?)",
-        (tid, author, "comment", body, ts))
+        "INSERT INTO ticket_comments(ticket_id, author, kind, body, created_at) "
+        "VALUES (?,?,?,?,?)", (tid, author, "comment", body, ts))
     conn.execute("UPDATE tickets SET updated_at=? WHERE id=?", (ts, tid))
     log_activity(conn, author, "ticket.comment", f"ticket:{tid}", f"commented on ticket #{tid}")
     touch_agent(conn, author)
@@ -789,21 +836,71 @@ def comment_ticket(conn, tid: int, author: str, body: str) -> dict:
     return get_ticket(conn, tid)
 
 
+def update_ticket_comment(conn, tid: int, comment_id: int, actor: str, body: str) -> dict:
+    if not body.strip():
+        raise BadRequest("comment body required")
+    comment = _one(conn.execute(
+        "SELECT * FROM ticket_comments WHERE id=? AND ticket_id=? AND kind='comment'",
+        (comment_id, tid)))
+    if not comment:
+        raise NotFound(f"comment #{comment_id} not found on ticket #{tid}")
+    if comment["author"] != actor:
+        raise BadRequest("only the comment author may edit this comment")
+    ts = now()
+    conn.execute("UPDATE ticket_comments SET body=?, updated_at=? WHERE id=?",
+                 (body, ts, comment_id))
+    conn.execute("UPDATE tickets SET updated_at=? WHERE id=?", (ts, tid))
+    log_activity(conn, actor, "ticket.comment.edit", f"ticket:{tid}",
+                 f"edited a comment on ticket #{tid}")
+    touch_agent(conn, actor)
+    conn.commit()
+    return get_ticket(conn, tid)
+
+
+def delete_ticket_comment(conn, tid: int, comment_id: int, actor: str) -> dict:
+    comment = _one(conn.execute(
+        "SELECT * FROM ticket_comments WHERE id=? AND ticket_id=? AND kind='comment'",
+        (comment_id, tid)))
+    if not comment:
+        raise NotFound(f"comment #{comment_id} not found on ticket #{tid}")
+    if comment["author"] != actor:
+        raise BadRequest("only the comment author may delete this comment")
+    ts = now()
+    conn.execute("DELETE FROM ticket_comments WHERE id=?", (comment_id,))
+    conn.execute("UPDATE tickets SET updated_at=? WHERE id=?", (ts, tid))
+    log_activity(conn, actor, "ticket.comment.delete", f"ticket:{tid}",
+                 f"deleted a comment on ticket #{tid}")
+    touch_agent(conn, actor)
+    conn.commit()
+    return get_ticket(conn, tid)
+
+
 def search_tickets(conn, q: str, limit: int = 20, board_id: int | None = None) -> list[dict]:
-    board_clause, args = "", [_fts_query(q)]
-    if board_id is not None:
-        board_clause = " AND t.board_id=?"
-        args.append(get_ticket_board(conn, board_id)["id"])
     if not q.strip():
         return []
-    ids = [r[0] for r in conn.execute(
-        "SELECT f.docid FROM ticket_fts f JOIN tickets t ON t.id=f.docid "
-        "WHERE ticket_fts MATCH ?" + board_clause + " LIMIT ?", (*args, limit))]
-    if not ids:
-        return []
+    if db.fts4_available(conn, "ticket_fts"):
+        board_clause, args = "", [_fts_query(q)]
+        if board_id is not None:
+            board_clause = " AND t.board_id=?"
+            args.append(get_ticket_board(conn, board_id)["id"])
+        ids = [r[0] for r in conn.execute(
+            "SELECT f.docid FROM ticket_fts f JOIN tickets t ON t.id=f.docid "
+            "WHERE ticket_fts MATCH ?" + board_clause + " LIMIT ?", (*args, limit))]
+        if not ids:
+            return []
+        return _rows(conn.execute(
+            f"SELECT id, title, status, priority, type, assignee, department, tags, board_id, updated_at "
+            f"FROM tickets WHERE id IN ({','.join('?' * len(ids))})", ids))
+
+    terms = _search_terms(q)
+    where, args = _like_search(("t.title", "t.body", "t.tags", "t.result"), terms)
+    if board_id is not None:
+        where += " AND t.board_id=?"
+        args.append(get_ticket_board(conn, board_id)["id"])
     return _rows(conn.execute(
-        f"SELECT id, title, status, priority, type, assignee, department, tags, board_id, updated_at "
-        f"FROM tickets WHERE id IN ({','.join('?' * len(ids))})", ids))
+        "SELECT t.id, t.title, t.status, t.priority, t.type, t.assignee, t.department, "
+        f"t.tags, t.board_id, t.updated_at FROM tickets t WHERE {where} LIMIT ?",
+        (*args, limit)))
 
 
 # --------------------------------------------------------------------------
@@ -817,6 +914,8 @@ def _score(conn, target_type: str, target_id: int) -> int:
 
 
 def _index_question(conn, kind: str, ref_id: int, title: str, body: str, tags: str) -> None:
+    if not db.fts4_available(conn, "question_fts"):
+        return
     conn.execute("DELETE FROM question_fts WHERE kind=? AND ref_id=?", (kind, str(ref_id)))
     conn.execute(
         "INSERT INTO question_fts(kind, ref_id, title, body, tags) VALUES (?,?,?,?,?)",
@@ -1017,33 +1116,100 @@ def comment_question(conn, target_type: str, target_id: int, author: str, body: 
     row = _one(conn.execute(f"SELECT * FROM {table} WHERE id=?", (target_id,)))
     if not row:
         raise NotFound(f"{target_type} #{target_id} not found")
+    ts = now()
     conn.execute(
-        "INSERT INTO question_comments(target_type, target_id, author, body, created_at) VALUES (?,?,?,?,?)",
-        (target_type, target_id, author, body, now()))
+        "INSERT INTO question_comments(target_type, target_id, author, body, created_at) "
+        "VALUES (?,?,?,?,?)", (target_type, target_id, author, body, ts))
     qid = target_id if target_type == "question" else row["question_id"]
-    conn.execute("UPDATE questions SET updated_at=? WHERE id=?", (now(), qid))
+    conn.execute("UPDATE questions SET updated_at=? WHERE id=?", (ts, qid))
     log_activity(conn, author, "question.comment", f"question:{qid}", f"commented on {target_type} #{target_id}")
     touch_agent(conn, author)
     conn.commit()
     return get_question(conn, qid, author)
 
 
+def _question_id_for_comment(conn, comment: dict) -> int:
+    if comment["target_type"] == "question":
+        return int(comment["target_id"])
+    answer = _one(conn.execute("SELECT question_id FROM answers WHERE id=?",
+                               (comment["target_id"],)))
+    if not answer:
+        raise NotFound("comment target not found")
+    return int(answer["question_id"])
+
+
+def update_question_comment(conn, comment_id: int, actor: str, body: str) -> dict:
+    if not body.strip():
+        raise BadRequest("comment body required")
+    comment = _one(conn.execute("SELECT * FROM question_comments WHERE id=?", (comment_id,)))
+    if not comment:
+        raise NotFound(f"comment #{comment_id} not found")
+    if comment["author"] != actor:
+        raise BadRequest("only the comment author may edit this comment")
+    qid = _question_id_for_comment(conn, comment)
+    ts = now()
+    conn.execute("UPDATE question_comments SET body=?, updated_at=? WHERE id=?",
+                 (body, ts, comment_id))
+    conn.execute("UPDATE questions SET updated_at=? WHERE id=?", (ts, qid))
+    log_activity(conn, actor, "question.comment.edit", f"question:{qid}",
+                 f"edited a comment on question #{qid}")
+    touch_agent(conn, actor)
+    conn.commit()
+    return get_question(conn, qid, actor)
+
+
+def delete_question_comment(conn, comment_id: int, actor: str) -> dict:
+    comment = _one(conn.execute("SELECT * FROM question_comments WHERE id=?", (comment_id,)))
+    if not comment:
+        raise NotFound(f"comment #{comment_id} not found")
+    if comment["author"] != actor:
+        raise BadRequest("only the comment author may delete this comment")
+    qid = _question_id_for_comment(conn, comment)
+    ts = now()
+    conn.execute("DELETE FROM question_comments WHERE id=?", (comment_id,))
+    conn.execute("UPDATE questions SET updated_at=? WHERE id=?", (ts, qid))
+    log_activity(conn, actor, "question.comment.delete", f"question:{qid}",
+                 f"deleted a comment on question #{qid}")
+    touch_agent(conn, actor)
+    conn.commit()
+    return get_question(conn, qid, actor)
+
+
 def search_questions(conn, q: str, limit: int = 20) -> list[dict]:
     if not q.strip():
         return []
-    rows = _rows(conn.execute(
-        "SELECT kind, ref_id, title, snippet(question_fts, '[', ']', '…', -1, 24) AS snippet "
-        "FROM question_fts WHERE question_fts MATCH ? LIMIT ?", (_fts_query(q), limit)))
+    terms = _search_terms(q)
+    if db.fts4_available(conn, "question_fts"):
+        rows = _rows(conn.execute(
+            "SELECT kind, ref_id, title, snippet(question_fts, '[', ']', '…', -1, 24) AS snippet "
+            "FROM question_fts WHERE question_fts MATCH ? LIMIT ?", (_fts_query(q), limit)))
+    else:
+        q_where, q_args = _like_search(("q.title", "q.body", "q.tags"), terms)
+        a_where, a_args = _like_search(("q.title", "a.body", "q.tags"), terms)
+        rows = _rows(conn.execute(
+            "SELECT kind, ref_id, title, body, tags, question_id FROM ("
+            "SELECT 'question' AS kind, CAST(q.id AS TEXT) AS ref_id, q.title AS title, "
+            f"q.body AS body, q.tags AS tags, q.id AS question_id FROM questions q WHERE {q_where} "
+            "UNION ALL "
+            "SELECT 'answer' AS kind, CAST(a.id AS TEXT) AS ref_id, q.title AS title, "
+            f"a.body AS body, q.tags AS tags, q.id AS question_id "
+            "FROM answers a JOIN questions q ON q.id=a.question_id "
+            f"WHERE {a_where}) LIMIT ?", (*q_args, *a_args, limit)))
     out = []
     seen: set[int] = set()
     for r in rows:
-        if r["kind"] == "question":
+        if r.get("question_id") is not None:
+            qid = int(r.pop("question_id"))
+        elif r["kind"] == "question":
             qid = int(r["ref_id"])
         else:
             a = _one(conn.execute("SELECT question_id FROM answers WHERE id=?", (int(r["ref_id"]),)))
             if not a:
                 continue
             qid = a["question_id"]
+        snippet = r.get("snippet")
+        if snippet is None:
+            snippet = _text_snippet(r.pop("body", ""), terms) or r["title"]
         if qid in seen:
             continue
         seen.add(qid)
@@ -1051,7 +1217,7 @@ def search_questions(conn, q: str, limit: int = 20) -> list[dict]:
         if not q_:
             continue
         out.append({"question_id": qid, "kind": r["kind"], "title": r["title"],
-                    "snippet": r["snippet"], **q_,
+                    "snippet": snippet, **q_,
                     "score": _score(conn, "question", qid)})
     return out
 

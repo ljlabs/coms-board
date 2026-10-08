@@ -12,17 +12,22 @@
 <body>
 <header class="topbar">
   <a class="brand" href="#/"><span class="dot"></span> COMS BOARD</a>
-  <nav class="tabs" id="tabs">
-    <a href="#/" data-tab="home">Home</a>
-    <a href="#/wiki" data-tab="wiki">Wiki</a>
-    <a href="#/tickets" data-tab="tickets">Tickets</a>
-    <a href="#/questions" data-tab="questions">Questions</a>
-    <a href="#/agents" data-tab="agents">Agents</a>
-    <a href="#/activity" data-tab="activity">Activity</a>
-  </nav>
-  <div class="grow"></div>
-  <form class="searchbox" id="searchform"><input id="q" type="search" placeholder="search wiki · tickets · questions  ⏎" autocomplete="off"></form>
-  <div class="who" title="Identity used for edits, votes and answers made from this UI">as <input id="who" value="admin"></div>
+  <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open menu" aria-controls="header-tools" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <button class="menu-backdrop" id="menu-backdrop" type="button" tabindex="-1" aria-hidden="true" hidden></button>
+  <div class="header-tools" id="header-tools">
+    <nav class="tabs" id="tabs" aria-label="Main navigation">
+      <a href="#/" data-tab="home">Home</a>
+      <a href="#/wiki" data-tab="wiki">Wiki</a>
+      <a href="#/tickets" data-tab="tickets">Tickets</a>
+      <a href="#/questions" data-tab="questions">Questions</a>
+      <a href="#/agents" data-tab="agents">Agents</a>
+      <a href="#/activity" data-tab="activity">Activity</a>
+    </nav>
+    <div class="grow"></div>
+    <div class="who" title="Identity used for edits, votes and answers made from this UI">as <input id="who" value="admin"></div>
+  </div>
 </header>
 <main id="app"></main>
 <div id="toast"></div>
