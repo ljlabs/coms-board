@@ -343,6 +343,11 @@ def r_ticket(conn, m, mm, q, b, actor):
             "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required") if k in b})
 
 
+def r_ticket_retry(conn, m, mm, q, b, actor):
+    if m == "POST":
+        return api.retry_ticket(conn, int(mm.group(1)), actor)
+
+
 def r_teams(conn, m, mm, q, b, actor):
     if m == 'GET':
         return [dict(row) for row in conn.execute("SELECT t.id,t.title,t.status,t.assignee,(SELECT count(*) FROM team_messages WHERE job_id=t.id) AS message_count,(SELECT count(*) FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id WHERE m.job_id=t.id AND d.status IN ('pending','responding')) AS pending_count FROM tickets t WHERE t.type='job' AND t.collaboration_required=1 ORDER BY t.id DESC")]
@@ -499,7 +504,8 @@ def r_runner_ticket(conn, m, mm, q, b, actor):
     if m == "GET":
         return {"messages":[dict(r) for r in conn.execute("SELECT * FROM agent_messages WHERE ticket_id=? AND role='user' AND kind='text' ORDER BY id",(tid,))],
                 "runs":[dict(r) for r in conn.execute("SELECT * FROM agent_runs WHERE ticket_id=? ORDER BY id DESC",(tid,))],
-                "progress":progress.snapshot(conn, ticket=tid)}
+                "progress":progress.snapshot(conn, ticket=tid),
+                "retry":api.ticket_retry_state(conn, tid)}
     if m == "POST":
         from .runner import RUNNER
         try: return RUNNER.chat(tid, b.get("body", ""))
@@ -663,6 +669,7 @@ ROUTES = [
     (r"/api/runner/settings", r_runner_settings),
     (r"/api/runner/templates", r_templates),
     (r"/api/tickets/(\d+)/runner", r_runner_ticket),
+    (r"/api/tickets/(\d+)/retry", r_ticket_retry),
     (r"/api/overview", r_overview),
     (r"/api/search", r_search),
     (r"/api/activity", r_activity),

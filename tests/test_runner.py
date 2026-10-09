@@ -6,13 +6,14 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from tests import *  # noqa: F401,F403
 from coms import api, db, mcp
 from coms.acp import AcpConnection
-from coms.runner import Runner, backend_command, board_servers
+from coms.runner import Runner, _agent_retry_due, _review_retry_due, backend_command, board_servers
 from coms.workspace import APP_ROOT, workspace_path
 
 
@@ -111,6 +112,17 @@ class TestRunner(unittest.TestCase):
         self.assertIn('ticket_result', run['error'])
         self.assertEqual(api.get_ticket(self.conn, ticket['id'])['status'], 'in_progress')
         self.assertFalse(self.runner.conns)
+
+    def test_agent_retry_backoff_is_bounded_and_grows(self):
+        now = datetime.now(timezone.utc)
+        self.assertFalse(_agent_retry_due(0, now.isoformat(), now=now))
+        self.assertFalse(_agent_retry_due(3, '2000-01-01T00:00:00+00:00', now=now))
+        self.assertTrue(_agent_retry_due(0, '2000-01-01T00:00:00+00:00', now=now))
+        self.assertTrue(_agent_retry_due(1, '2000-01-01T00:00:00+00:00', now=now))
+
+    def test_review_retry_backoff_remains_bounded(self):
+        now = datetime.now(timezone.utc)
+        self.assertFalse(_review_retry_due(3, '2000-01-01T00:00:00+00:00', now=now))
 
     def test_orchestrator_restores_history_when_backend_cannot_load(self):
         session = self.runner.create_orchestrator_session()

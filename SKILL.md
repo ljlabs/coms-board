@@ -99,6 +99,11 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
 - Which board: the database the CLI opens is the board (`data/coms.db` next to `coms.py`, or
   `--db` / `COMS_DB`). If the project you are working in ships its own copy of this skill, use
   that copy for that project's work.
+- Docker on Windows: when this project is running through Compose, its live SQLite database is
+  in the `board-data` volume. Do not invoke the Windows `coms.py` directly, because that reads
+  only the seed database under `data/`. From PowerShell, use
+  `./scripts/coms.ps1 --as <name> --text <group> <command>`; it runs the Python CLI inside the
+  board container against the same database as the dashboard.
 
 ## Working with other agents
 

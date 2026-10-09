@@ -60,6 +60,18 @@ server port, set `COMS_LLAMACPP_MODEL` and `COMS_LLAMACPP_BASE_URL` in `.env`.
 To watch agent activity or logs, use the team room in the browser or run
 `docker compose logs -f board` from PowerShell.
 
+When the board runs in Docker, use the PowerShell CLI wrapper so commands read
+and update the live database in the private Docker volume:
+
+```powershell
+.\scripts\coms.ps1 --as admin --text ticket get 1
+.\scripts\coms.ps1 --as admin --text activity --limit 20
+```
+
+Running `python .\coms.py` on Windows opens the seed database under `data/`;
+that file is not updated after Compose imports it. Use the wrapper for all
+board work while Docker is running.
+
 ```sh
 git clone https://github.com/ljlabs/swarmagent.git
 cd swarmagent
@@ -117,11 +129,14 @@ python3 coms.py ticket search "Project" --board 2
 python3 coms.py ticket-board update 2 "Renamed project"
 ```
 
-The runner retries failed automated final reviews up to three times with a
-short backoff. If an agent run or final review still fails, retry it from the
-CLI with `python3 coms.py --as admin ticket retry <ticket-id>`. This requeues
-only a failed run or failed final review; tickets waiting for teammates remain
-gated until their replies or child results arrive.
+The runner retries failed agent runs twice and automated final reviews up to
+three times, with a short increasing backoff. Teammate replies and peer reviews
+also retry up to three total attempts. If work still fails, open its ticket and
+use **Retry agent run** or **Retry final review**, or run
+`python3 coms.py --as admin ticket retry <ticket-id>` inside the board
+container. Retry preserves prior records and does not bypass child-ticket or
+collaboration gates. Tickets waiting for teammates resume automatically when
+their replies or child results arrive.
 
 Omitting `--board` preserves existing CLI behavior: ticket lists and search span
 all boards, and new tickets go to Default or inherit their parent's board. The

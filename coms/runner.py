@@ -13,9 +13,35 @@ DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
 OPENCODE_LOCAL_PROVIDER_ID = 'coms-local'
 MAX_REVIEW_ATTEMPTS = 3
 REVIEW_RETRY_BASE_SECONDS = 15
+MAX_AGENT_RETRIES = 2
+AGENT_RETRY_BASE_SECONDS = 15
+MAX_TEAM_ATTEMPTS = 3
+TEAM_RETRY_BASE_SECONDS = 15
 
 
-def _review_retry_due(attempt_count, finished_at):
+def _retry_due(retry_count, finished_at, *, max_retries, base_seconds, now=None):
+    retries = int(retry_count or 0)
+    if retries >= max_retries:
+        return False
+    if not finished_at:
+        return True
+    try:
+        finished = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return True
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    delay = base_seconds * (2 ** retries)
+    return (now or datetime.now(timezone.utc)) >= finished + timedelta(seconds=delay)
+
+
+def _agent_retry_due(retry_count, finished_at, *, now=None):
+    """Whether another bounded ticket execution retry is due."""
+    return _retry_due(retry_count, finished_at, max_retries=MAX_AGENT_RETRIES,
+                      base_seconds=AGENT_RETRY_BASE_SECONDS, now=now)
+
+
+def _review_retry_due(attempt_count, finished_at, *, now=None):
     """Return whether a failed final review is eligible for another bounded attempt."""
     attempts = int(attempt_count or 0)
     if attempts >= MAX_REVIEW_ATTEMPTS:
@@ -29,7 +55,12 @@ def _review_retry_due(attempt_count, finished_at):
     if finished.tzinfo is None:
         finished = finished.replace(tzinfo=timezone.utc)
     delay = REVIEW_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1))
-    return datetime.now(timezone.utc) >= finished + timedelta(seconds=delay)
+    return (now or datetime.now(timezone.utc)) >= finished + timedelta(seconds=delay)
+
+
+def _team_retry_status(attempt_count):
+    """Keep a failed team request queued until its bounded attempts are used."""
+    return 'pending' if int(attempt_count or 0) < MAX_TEAM_ATTEMPTS else 'failed'
 
 
 def normalize_opencode_api_base_url(value):
@@ -329,8 +360,10 @@ class Runner:
                     conn=db.connect()
                     self._schedule_team_replies(conn, maximum)
                     if len(self.active)>=maximum: continue
-                    rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND (r.status IN ('queued','running','waiting') OR (r.status='failed' AND r.stage!='collaborate' AND t.updated_at<=r.finished_at))) AND NOT EXISTS (SELECT 1 FROM agent_runs busy WHERE t.assignee!='' AND busy.agent_slug=t.assignee AND busy.status='running') ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT ?",(maximum-len(self.active),)).fetchall()
+                    rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND r.status IN ('queued','running','waiting')) AND NOT EXISTS (SELECT 1 FROM agent_runs busy WHERE t.assignee!='' AND busy.agent_slug=t.assignee AND busy.status='running') ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT 100").fetchall()
                     for row in rows:
+                        if len(self.active)>=maximum: break
+                        if not self._automatic_run_retry_ready(conn, dict(row)): continue
                         if row['parent_id'] and conn.execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='running' AND stage='execute'", (row['parent_id'],)).fetchone(): continue
                         if row['id'] in self.active or 'review:'+str(row['id']) in self.active: continue
                         if 'team:'+row['assignee'] in self.active: continue
@@ -391,8 +424,17 @@ class Runner:
         conn.commit()
         return resumed
 
+    @staticmethod
+    def _automatic_run_retry_ready(conn, ticket):
+        if ticket.get('agent_retry_requested'):
+            return True
+        latest = conn.execute("SELECT status,stage,finished_at FROM agent_runs WHERE ticket_id=? AND stage!='collaborate' ORDER BY id DESC LIMIT 1", (ticket['id'],)).fetchone()
+        if not latest or latest['status'] != 'failed' or latest['stage'] == 'collaborate':
+            return True
+        return _agent_retry_due(ticket.get('agent_retry_count', 0), latest['finished_at'])
+
     def _schedule_team_replies(self, conn, maximum):
-        rows = conn.execute("SELECT d.message_id,d.recipient,a.role FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id JOIN agents a ON a.slug=d.recipient JOIN tickets j ON j.id=m.job_id WHERE d.status='pending' AND j.ready_for_execution=1 AND j.status!='wontfix' AND lower(a.role)!='human' AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.agent_slug=d.recipient AND r.status='running') ORDER BY d.message_id LIMIT 40").fetchall()
+        rows = conn.execute("SELECT d.message_id,d.recipient,a.role FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id JOIN agents a ON a.slug=d.recipient JOIN tickets j ON j.id=m.job_id WHERE d.status='pending' AND d.attempt_count<? AND (d.attempt_count=0 OR julianday(d.updated_at)+(? * (1 << max(0,d.attempt_count-1))) / 86400.0 <= julianday(?)) AND j.ready_for_execution=1 AND j.status!='wontfix' AND lower(a.role)!='human' AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.agent_slug=d.recipient AND r.status='running') ORDER BY d.message_id LIMIT 40", (MAX_TEAM_ATTEMPTS, TEAM_RETRY_BASE_SECONDS, now())).fetchall()
         for row in rows:
             if len(self.active) >= maximum: break
             key = 'team:' + row['recipient']
@@ -405,14 +447,15 @@ class Runner:
         conn = db.connect(); settings = self.settings(); backend = settings.get('active_backend', 'opencode')
         c = None; recorder = None; rid = None
         conn.execute('BEGIN IMMEDIATE')
-        message = conn.execute("SELECT m.* FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.id=? AND d.recipient=? AND d.status='pending'", (message_id, recipient)).fetchone()
+        message = conn.execute("SELECT m.*,d.attempt_count FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.id=? AND d.recipient=? AND d.status='pending' AND d.attempt_count<?", (message_id, recipient, MAX_TEAM_ATTEMPTS)).fetchone()
         if not message or conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (recipient,)).fetchone():
             conn.rollback(); return
         agent = api.get_agent(conn, recipient)
         assigned = conn.execute('SELECT id FROM tickets WHERE assignee=? AND (id=? OR parent_id=?) ORDER BY id LIMIT 1', (recipient, message['job_id'], message['job_id'])).fetchone()
         tid = assigned['id'] if assigned else message['job_id']
         rid = conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,'running',?,?,'collaborate')", (tid, backend, now(), recipient)).lastrowid
-        conn.execute("UPDATE team_deliveries SET status='responding',run_id=?,updated_at=? WHERE message_id=? AND recipient=?", (rid, now(), message_id, recipient)); conn.commit()
+        conn.execute("UPDATE team_deliveries SET status='responding',run_id=?,attempt_count=attempt_count+1,updated_at=? WHERE message_id=? AND recipient=?", (rid, now(), message_id, recipient))
+        conn.execute("UPDATE peer_reviews SET status='requested',reason='',updated_at=? WHERE message_id=? AND status='failed'", (now(), message_id)); conn.commit()
         recorder = progress.Recorder('run:' + str(rid), recipient, tid, rid, backend)
         self.recorders[rid] = recorder
         try:
@@ -437,7 +480,9 @@ class Runner:
             recorder.finish('completed', 'Delivered a peer review' if review else 'Delivered a teammate reply')
         except Exception as exc:
             conn.rollback()
-            conn.execute("UPDATE team_deliveries SET status='failed',error=?,updated_at=? WHERE message_id=? AND recipient=? AND status!='answered'", (str(exc), now(), message_id, recipient))
+            attempts = conn.execute('SELECT attempt_count FROM team_deliveries WHERE message_id=? AND recipient=?', (message_id, recipient)).fetchone()
+            delivery_status = _team_retry_status(attempts['attempt_count'] if attempts else MAX_TEAM_ATTEMPTS)
+            conn.execute("UPDATE team_deliveries SET status=?,error=?,updated_at=? WHERE message_id=? AND recipient=? AND status!='answered'", (delivery_status, str(exc), now(), message_id, recipient))
             conn.execute("UPDATE peer_reviews SET status='failed',reason=?,updated_at=? WHERE message_id=? AND status='requested'", (str(exc), now(), message_id))
             conn.execute("UPDATE agent_runs SET status='failed',error=?,finished_at=? WHERE id=?", (str(exc), now(), rid)); conn.commit()
             if recorder: recorder.finish('failed', str(exc))
@@ -458,6 +503,14 @@ class Runner:
             with self.lock: self.active.pop(tid,None)
             return
         t=dict(current)
+        previous_run=conn.execute("SELECT status,stage FROM agent_runs WHERE ticket_id=? AND stage!='collaborate' ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
+        retry_count=int(t.get('agent_retry_count') or 0)
+        if t.get('agent_retry_requested'):
+            retry_count=0
+            api.log_activity(conn, 'runner', 'runner.retry', f'ticket:{tid}', f'manual retry started for ticket #{tid}')
+        elif previous_run and previous_run['status']=='failed' and previous_run['stage']!='collaborate':
+            retry_count+=1
+            api.log_activity(conn, 'runner', 'runner.retry', f'ticket:{tid}', f'automatic retry {retry_count}/{MAX_AGENT_RETRIES} started for ticket #{tid}')
         job=team.job_for_ticket(conn, tid)
         agent = api.resolve_ticket_agent(conn, t, commit=False)
         if conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (agent['slug'],)).fetchone():
@@ -469,7 +522,7 @@ class Runner:
         template=conn.execute('SELECT * FROM agent_templates WHERE id=? AND enabled=1',(t.get('agent_template_id'),)).fetchone() if t.get('agent_template_id') else None
         if template and template['backend']: backend=template['backend']
         cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,?,'running',?,?,?)",(tid,template['id'] if template else None,backend,now(),agent['slug'],stage)); rid=cur.lastrowid
-        conn.execute("UPDATE tickets SET status='in_progress',updated_at=? WHERE id=?",(now(),tid)); conn.commit()
+        conn.execute("UPDATE tickets SET status='in_progress',updated_at=?,agent_retry_count=?,agent_retry_requested=0 WHERE id=?",(now(),retry_count,tid)); conn.commit()
         self._message(tid,rid,'system','status',f'Runner started with {backend}; priority {t["priority"]}.')
         recorder = progress.Recorder('run:' + str(rid), agent['slug'], tid, rid, backend)
         self.recorders[rid] = recorder

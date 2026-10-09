@@ -48,7 +48,7 @@ def delegate(conn, job_id, actor, name, capabilities, title, body):
     urls = list(dict.fromkeys(re.findall(r'https://[^\s<>]+', job['body'])))
     assignment = (body.strip() + f'\n\nParent research job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\nStarting source URLs:\n' + '\n'.join(urls) +
                   f'\n\nYour team room belongs to job #{job_id}. Read team_roster, ask a substantive question with team_send, then end this turn while waiting. Read the answer on resumption. Retrieve actual evidence with source_fetch. Publish and link your own evidence page and request peer review before ticket_result. Cite source IDs, URLs and retrieval dates; distinguish evidence, inference and limitations. Do not invent verification or backtests. Publish a shared method only after using it successfully. The lead owns the combined synthesis.')
-    ticket = api.create_ticket(conn, title, assignment, actor, type_='research', assignee=agent['slug'], parent_id=job_id, ready_for_execution=True)
+    ticket = api.create_ticket(conn, title, assignment, actor, type_='research', assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True)
     send(conn, job_id, actor, '*', f"{'Reused' if agent['reused'] else 'Registered'} {agent['name']} ({agent['slug']}): {capabilities}. Assigned ticket #{ticket['id']}: {title}.", kind='note')
     return {'agent': agent, 'ticket': ticket}
 
@@ -154,7 +154,7 @@ def context(conn, tid, actor, *, instructions=True):
         'recipient': m['recipient'], 'recipient_name': m['recipient_name'],
         'kind': m['kind'], 'reply_to': m['reply_to'],
         'preview': (m['body'][:360] + ('…' if len(m['body']) > 360 else '')),
-        'deliveries': [{k: d.get(k) for k in ('recipient', 'status', 'error')} for d in m['deliveries']],
+        'deliveries': [{k: d.get(k) for k in ('recipient', 'status', 'attempt_count', 'error')} for d in m['deliveries']],
     } for m in data['messages'][-24:]]
     data['members'] = [{k: a[k] for k in ('slug', 'name', 'role', 'description', 'ticket_ids')} for a in data['members']]
     data['reviews'] = [{
@@ -172,6 +172,10 @@ def validate_delivery(conn, tid, actor):
     ticket = api.get_ticket(conn, tid)
     job = job_for_ticket(conn, tid)
     if not job or not job.get('collaboration_required'): return
+    # Legacy or explicitly non-collaborative children are accepted by their
+    # recorded result/status. New delegated tickets opt into this stricter
+    # evidence/review contract in team.delegate.
+    if ticket['type'] != 'job' and not ticket.get('collaboration_required'): return
     pages = [dict(row) for row in conn.execute("SELECT w.* FROM ticket_links l JOIN wiki_pages w ON w.slug=l.ref WHERE l.ticket_id=? AND l.kind='wiki' AND w.updated_by=? AND w.updated_at>=?", (tid, actor, job['created_at']))]
     if not pages: raise api.BadRequest('Delivery needs an actual wiki page written by you and attached with ticket_link; summaries alone do not count')
     reviewed = [p for p in pages if conn.execute("SELECT 1 FROM peer_reviews WHERE ticket_id=? AND artifact_slug=? AND artifact_version=? AND status='accepted'", (tid, p['slug'], p['updated_at'])).fetchone()]
@@ -180,7 +184,8 @@ def validate_delivery(conn, tid, actor):
     if ticket['type'] == 'job':
         if not api.children_resolved(conn, tid): raise api.BadRequest('Finish teammate tickets and reviews before final synthesis delivery')
         for child in api.list_tickets(conn, parent_id=tid, include_closed=True):
-            if child['status'] != 'wontfix': validate_delivery(conn, child['id'], child['assignee'])
+            if child['status'] != 'wontfix' and child.get('collaboration_required'):
+                validate_delivery(conn, child['id'], child['assignee'])
         latest = conn.execute('SELECT max(updated_at) FROM tickets WHERE parent_id=?', (tid,)).fetchone()[0]
         if latest and not any(p['updated_at'] >= latest for p in pages): raise api.BadRequest('Write a fresh synthesis after the teammate results and reviews')
         skills = conn.execute("SELECT 1 FROM shared_skills WHERE slug NOT IN ('team-orchestration','source-backed-research') AND created_at>? AND created_by IN (SELECT sender FROM team_messages WHERE job_id=?) LIMIT 1", (job['created_at'], job['id'])).fetchone()

@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from coms import api, db, mcp
-from coms.runner import Runner
+from coms import api, db, mcp, team
+from coms.runner import Runner, _team_retry_status
 from coms.acp import AcpConnection, AcpError
 from coms import progress
 from coms.server import r_runner_debug
@@ -64,6 +64,25 @@ class TestTeamRuntime(unittest.TestCase):
         self.assertTrue(child['assignee'])
         self.assertEqual(api.get_agent(self.conn, child['assignee'])['role'], 'expert')
 
+    def test_team_delegate_marks_new_child_for_collaborative_delivery(self):
+        parent = api.create_ticket(self.conn, 'Research job', '', 'admin', type_='job')
+        lead = api.resolve_ticket_agent(self.conn, parent)
+        with patch.dict(os.environ, {'COMS_AGENT': lead['slug']}):
+            result = team.delegate(self.conn, parent['id'], lead['slug'], 'Evidence Specialist',
+                                   'Source-backed crypto market research', 'Collect primary evidence',
+                                   'Research exchange mechanics')
+        self.assertTrue(result['ticket']['collaboration_required'])
+
+    def test_legacy_non_collaborative_child_is_not_retroactively_rejected(self):
+        parent = api.create_ticket(self.conn, 'Research job', '', 'admin', type_='job', collaboration_required=True)
+        child = api.create_ticket(self.conn, 'Legacy worker', '', 'admin', parent_id=parent['id'],
+                                  collaboration_required=False)
+        child = api.update_ticket(self.conn, child['id'], 'admin', status='done',
+                                  result='Previously reviewed result')
+        # Root delivery validates the parent artifact and completed child states;
+        # it must not impose today's evidence workflow on a legacy ticket.
+        team.validate_delivery(self.conn, child['id'], child['assignee'])
+
     def test_skills_are_shared_and_updates_require_current_version(self):
         with patch.dict(os.environ, {'COMS_AGENT': 'first'}):
             mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Read primary sources.'})
@@ -107,7 +126,7 @@ class TestTeamRuntime(unittest.TestCase):
         self.assertEqual(result['runs'][0]['message_count'], 2105)
 
     def test_parent_waits_without_delivery_and_resumes_for_synthesis(self):
-        parent = api.create_ticket(self.conn, 'Research team', 'Coordinate workers.', 'admin', type_='job', ready_for_execution=True)
+        parent = api.create_ticket(self.conn, 'Research team', 'Coordinate workers.', 'admin', type_='job', ready_for_execution=True, collaboration_required=False)
         fake = Mock(session_id='s')
         created = []
         def delegate(*args, **kwargs):
@@ -131,6 +150,40 @@ class TestTeamRuntime(unittest.TestCase):
         self.assertIn('SYNTHESIS', prompt)
         self.assertIn('Verified evidence links', prompt)
         self.assertEqual(api.get_ticket(self.conn, parent['id'])['status'], 'review')
+
+    def test_waiting_parent_resumes_after_children_are_done(self):
+        parent = api.create_ticket(self.conn, 'Research team', '', 'admin', type_='job', ready_for_execution=True)
+        child = api.create_ticket(self.conn, 'Evidence worker', '', 'orchestrator', parent_id=parent['id'], ready_for_execution=True)
+        api.update_ticket(self.conn, child['id'], 'worker', result='Reviewed findings', status='done')
+        self.conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,started_at,agent_slug,stage) VALUES(?,'opencode','waiting',?,'orchestrator','synthesize')", (parent['id'], api.now()))
+        self.conn.commit()
+        self.assertEqual(self.runner._resume_waiting(), [parent['id']])
+        self.assertEqual(self.conn.execute('SELECT status FROM agent_runs WHERE ticket_id=?', (parent['id'],)).fetchone()['status'], 'completed')
+
+    def test_manual_retry_is_durable_and_eligible_for_agent_tickets(self):
+        ticket = api.create_ticket(self.conn, 'Retry me', '', 'admin', assignee='risk-expert', ready_for_execution=True)
+        self.conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,finished_at,error,agent_slug,stage) VALUES(?,'opencode','failed',?,'Missing ticket_result','risk-expert','execute')", (ticket['id'], api.now()))
+        self.conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,finished_at,error,agent_slug,stage) VALUES(?,'opencode','failed',?,'Teammate response failed','risk-expert','collaborate')", (ticket['id'], api.now()))
+        self.conn.commit()
+        retried = api.retry_ticket(self.conn, ticket['id'], 'admin')
+        self.assertEqual(retried['retry_kind'], 'agent run')
+        self.assertEqual(api.get_ticket(self.conn, ticket['id'])['agent_retry_requested'], 1)
+        state = api.ticket_retry_state(self.conn, ticket['id'])
+        self.assertFalse(state['eligible'])
+        self.assertIn('queued', state['reason'])
+        self.assertEqual(state['kind'], 'agent run')
+
+    def test_team_delivery_retry_attempts_are_bounded(self):
+        parent = api.create_ticket(self.conn, 'Research team', '', 'admin', type_='job', ready_for_execution=True)
+        api.upsert_agent(self.conn, 'reviewer', 'Reviewer', role='expert')
+        message = self.conn.execute("INSERT INTO team_messages(job_id,sender,recipient,kind,body,created_at) VALUES(?,'orchestrator','reviewer','question','Question','now')", (parent['id'],)).lastrowid
+        self.conn.execute("INSERT INTO team_deliveries(message_id,recipient,status,attempt_count,updated_at) VALUES(?, 'reviewer','pending',2,'2000-01-01T00:00:00+00:00')", (message,))
+        self.conn.commit()
+        with patch.object(self.runner, '_worker') as worker:
+            self.runner._schedule_team_replies(self.conn, 1)
+        worker.assert_called_once()
+        self.assertEqual(_team_retry_status(1), 'pending')
+        self.assertEqual(_team_retry_status(3), 'failed')
 
     def test_parent_cannot_be_reviewed_while_workers_are_unfinished(self):
         parent = api.create_ticket(self.conn, 'Job', '', 'admin', type_='job')

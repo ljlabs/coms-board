@@ -89,7 +89,9 @@ CREATE TABLE IF NOT EXISTS tickets (
   due_at      TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
-  closed_at   TEXT
+  closed_at   TEXT,
+  agent_retry_count INTEGER NOT NULL DEFAULT 0,
+  agent_retry_requested INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_tickets_status ON tickets(status);
 CREATE INDEX IF NOT EXISTS ix_tickets_assignee ON tickets(assignee);
@@ -120,7 +122,8 @@ CREATE INDEX IF NOT EXISTS ix_team_messages_job ON team_messages(job_id,id);
 CREATE TABLE IF NOT EXISTS team_deliveries (
   message_id INTEGER NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   run_id INTEGER, response_id INTEGER, error TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL, PRIMARY KEY(message_id,recipient)
+  updated_at TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id,recipient)
 );
 CREATE TABLE IF NOT EXISTS peer_reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, ticket_id INTEGER NOT NULL,
@@ -204,7 +207,6 @@ CREATE TABLE IF NOT EXISTS orchestrator_turns (
 );
 CREATE INDEX IF NOT EXISTS ix_orch_turns_session ON orchestrator_turns(session_id,started_at);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS ticket_fts USING fts4(title, body, tags, result);
 -- Structured attachments: context a ticket carries so a re-pickup needs no
 -- archaeology. kind: wiki (page slug) | question (id) | ticket (id) | url.
 CREATE TABLE IF NOT EXISTS ticket_links (
@@ -345,6 +347,9 @@ MIGRATIONS = [
     ("tickets", "ready_for_execution", "INTEGER NOT NULL DEFAULT 0"),
     ("tickets", "recommended_workers", "INTEGER"),
     ("tickets", "agent_template_id", "INTEGER"),
+    ("tickets", "agent_retry_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("tickets", "agent_retry_requested", "INTEGER NOT NULL DEFAULT 0"),
+    ("team_deliveries", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),
     ("orchestrator_messages", "session_id", "TEXT NOT NULL DEFAULT 'default'"),
@@ -382,6 +387,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    # Older releases marked transient collaboration failures terminally. Give
+    # those unattempted requests the same bounded retry path as new requests.
+    conn.execute("UPDATE team_deliveries SET status='pending' WHERE status='failed' AND attempt_count=0")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_session ON orchestrator_messages(session_id,id)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_turn ON orchestrator_messages(session_id,turn_id,id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_orch_tool_identity ON orchestrator_messages(session_id,turn_id,tool_call_id)")

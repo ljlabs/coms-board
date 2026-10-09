@@ -1010,6 +1010,7 @@ def retry_ticket(conn, tid: int, actor: str) -> dict:
         raise BadRequest(f"ticket #{tid} is assigned or tagged for a human and cannot be retried by the agent runner")
 
     stamp = now()
+    agent_retry_requested = 0
     if ticket["status"] == "review":
         run = _one(conn.execute(
             "SELECT id FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage!='collaborate' ORDER BY id DESC LIMIT 1",
@@ -1021,16 +1022,17 @@ def retry_ticket(conn, tid: int, actor: str) -> dict:
             (tid, run["id"])))
         if not review or review["status"] != "failed":
             raise BadRequest(f"ticket #{tid} has no failed final review to retry; queued and waiting reviews run automatically")
-        conn.execute("UPDATE ticket_reviews SET attempt_count=0 WHERE id=?", (review["id"],))
+        conn.execute("UPDATE ticket_reviews SET status='queued',decision='',reason='',ticket_version=?,attempt_count=0,created_at=?,finished_at='' WHERE id=?", (stamp, stamp, review["id"]))
         retry_kind = "final review"
     elif ticket["status"] in ("open", "in_progress"):
         run = _one(conn.execute(
-            "SELECT status,stage FROM agent_runs WHERE ticket_id=? ORDER BY id DESC LIMIT 1", (tid,)))
+            "SELECT status,stage FROM agent_runs WHERE ticket_id=? AND stage!='collaborate' ORDER BY id DESC LIMIT 1", (tid,)))
         if not run or run["status"] != "failed":
             if run and run["status"] == "waiting":
                 raise BadRequest(f"ticket #{tid} is waiting for teammate replies or child results; it will resume automatically when those arrive")
             raise BadRequest(f"ticket #{tid} has no failed agent run to retry")
         retry_kind = "agent run"
+        agent_retry_requested = 1
     else:
         if ticket["type"] == "job" and not children_resolved(conn, tid):
             unresolved = conn.execute(
@@ -1039,13 +1041,44 @@ def retry_ticket(conn, tid: int, actor: str) -> dict:
             raise BadRequest(f"job #{tid} is {ticket['status']} and has unfinished child tickets ({ids}); retry a failed child instead")
         raise BadRequest(f"ticket #{tid} is {ticket['status']}; only failed agent runs or final reviews can be retried")
 
-    conn.execute("UPDATE tickets SET updated_at=? WHERE id=?", (stamp, tid))
+    conn.execute("UPDATE tickets SET updated_at=?,agent_retry_requested=? WHERE id=?", (stamp, agent_retry_requested, tid))
     log_activity(conn, actor, "ticket.retry", f"ticket:{tid}", f"queued {retry_kind} retry for ticket #{tid}")
     touch_agent(conn, actor)
     conn.commit()
     result = get_ticket(conn, tid)
     result["retry_kind"] = retry_kind
     return result
+
+
+def ticket_retry_state(conn, tid: int) -> dict:
+    """Describe whether a failed ticket run or final review can be retried."""
+    ticket = get_ticket(conn, tid)
+    assignee = (ticket.get("assignee") or "").lower()
+    agent = _one(conn.execute("SELECT role FROM agents WHERE slug=?", (ticket.get("assignee") or "",)))
+    human = (not assignee or assignee.startswith("human") or
+             (agent and agent["role"].lower() == "human") or
+             "human" in (ticket.get("tags") or "").lower())
+    if not ticket["ready_for_execution"] or human:
+        return {"eligible": False, "kind": "", "reason": "Ticket is not ready for automated execution or is reserved for a human.", "error": ""}
+    if ticket["status"] == "review":
+        run = _one(conn.execute(
+            "SELECT id FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage!='collaborate' ORDER BY id DESC LIMIT 1",
+            (tid,)))
+        review = _one(conn.execute(
+            "SELECT status,reason FROM ticket_reviews WHERE ticket_id=? AND source_run_id=? ORDER BY id DESC LIMIT 1",
+            (tid, run["id"]))) if run else None
+        if review and review["status"] == "failed":
+            return {"eligible": True, "kind": "final review", "reason": "The automated final review failed.", "error": review["reason"]}
+    elif ticket["status"] in ("open", "in_progress"):
+        run = _one(conn.execute(
+            "SELECT status,stage,error FROM agent_runs WHERE ticket_id=? AND stage!='collaborate' ORDER BY id DESC LIMIT 1", (tid,)))
+        if run and run["status"] == "failed" and run["stage"] != "collaborate":
+            if ticket.get("agent_retry_requested"):
+                return {"eligible": False, "kind": "agent run", "reason": "A retry is already queued.", "error": run["error"]}
+            return {"eligible": True, "kind": "agent run", "reason": "The latest agent run failed.", "error": run["error"]}
+        if run and run["status"] == "waiting":
+            return {"eligible": False, "kind": "", "reason": "Waiting for teammate replies or child results; the runner will resume when they arrive.", "error": ""}
+    return {"eligible": False, "kind": "", "reason": "There is no failed agent run or final review to retry.", "error": ""}
 
 
 def comment_ticket(conn, tid: int, author: str, body: str) -> dict:

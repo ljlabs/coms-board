@@ -65,6 +65,19 @@ class TestServer(unittest.TestCase):
         closed = self.req("PATCH", f"/api/tickets/{j['id']}", {"status": "done"})
         self.assertIn("open_children_warning", closed)
 
+    def test_failed_ticket_can_be_retried_over_http(self):
+        from coms import api
+        conn = db.connect()
+        ticket = api.create_ticket(conn, 'Retry over HTTP', '', 'admin', assignee='agent-a', ready_for_execution=True)
+        conn.execute("INSERT INTO agent_runs(ticket_id,backend,status,finished_at,error,agent_slug,stage) VALUES(?,'opencode','failed',?,'Agent did not deliver','agent-a','execute')", (ticket['id'], api.now()))
+        conn.commit()
+        retried = self.req('POST', f"/api/tickets/{ticket['id']}/retry", {})
+        self.assertEqual(retried['retry_kind'], 'agent run')
+        state = self.req('GET', f"/api/tickets/{ticket['id']}/runner")['retry']
+        self.assertFalse(state['eligible'])
+        self.assertIn('queued', state['reason'])
+        self.assertEqual(state['kind'], 'agent run')
+
     def test_links_over_http(self):
         t = self.req("POST", "/api/tickets", {"title": "linked work"})
         self.req("POST", "/api/wiki", {"title": "Note Page", "body": "b"})
