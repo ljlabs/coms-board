@@ -108,7 +108,7 @@ def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaborat
 # configured workspace is not monitored for useful deliverables.
 BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Coms Board. The Coms Board database is the system of record. Files you create or change in the workspace are not monitored, indexed, or automatically attached to the ticket, so a file by itself does not count as a delivered result.
 
-Use the attached coms-board MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Do not write board deliverables to local markdown files. You MUST call ticket_result for your assigned ticket with the delivered board IDs/links and verification before finishing. Without that tool call, the run fails and cannot advance to automatic review. If the tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
+Use the attached coms-board MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
 
 Choose the board destination that matches the requested work:
 - For reusable knowledge, research findings, procedures, or documentation, create or update a Coms Board wiki page with wiki_put or wiki_append. Search/list the wiki first to avoid duplicate pages.
@@ -420,6 +420,7 @@ class Runner:
             with self.lock: self.active.pop(tid,None)
             return
         t=dict(current)
+        job=team.job_for_ticket(conn, tid)
         agent = api.resolve_ticket_agent(conn, t, commit=False)
         if conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (agent['slug'],)).fetchone():
             conn.rollback()
@@ -467,10 +468,13 @@ class Runner:
                 prompt += '\n'.join(f"Child #{child['id']} ({child['assignee']}), {child['status']}: {child['title']}\nResult: {child['result']}" for child in children) + '\n\n'
             if template and template['prompt'].strip():
                 prompt += 'AGENT TEMPLATE INSTRUCTIONS (follow these within the shared Coms Board requirements above):\n'+template['prompt'].strip()+'\n\n'
+            collaborative_ticket = bool(job and job.get('collaboration_required') and t['type'] != 'job')
+            result_gate = ('If waiting for a teammate answer or peer review, end this turn without ticket_result. After the answer arrives and your current linked wiki page is accepted, call ticket_result and verify the success response before concluding.'
+                           if collaborative_ticket else 'Call ticket_result with the delivered board IDs/links and verification before concluding; verify its success response.')
             prompt += (f"TICKET ASSIGNMENT\nYou are the execution agent for Coms Board ticket #{tid}.\n"
                        f"Ticket: {t['title']}\nPriority: {t['priority']}\nDescription:\n{t['body']}\n\n"
                        f"Use your ACP response stream for progress; those messages are private run diagnostics and are not posted to the ticket. "
-                       f"Use ticket_comment for ticket #{tid} when needed and ticket_result with id {tid} before finishing. Your workspace is {cwd}. "
+                       f"Use ticket_comment for ticket #{tid} when needed, then follow this delivery gate: {result_gate} Ticket ID: {tid}. Your workspace is {cwd}. "
                        "When finished, ensure the requested deliverable has been recorded in the appropriate Coms Board record, then summarize the result and verification in your ACP response.")
             if dispatch_only:
                 prompt = (f"You are {agent['name']}, the orchestrator for job #{tid}. This turn is ONLY team staffing and delegation. "

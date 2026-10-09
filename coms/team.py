@@ -147,10 +147,25 @@ def context(conn, tid, actor, *, instructions=True):
     job = job_for_ticket(conn, tid)
     if not job or not job.get('collaboration_required'): return ''
     data = room(conn, job['id'])
-    data['messages'] = data['messages'][-30:]
+    # Keep prompts small enough for local models: full source bodies and long
+    # teammate artifacts remain available through source_get/wiki_get on demand.
+    data['messages'] = [{
+        'id': m['id'], 'sender': m['sender'], 'sender_name': m['sender_name'],
+        'recipient': m['recipient'], 'recipient_name': m['recipient_name'],
+        'kind': m['kind'], 'reply_to': m['reply_to'],
+        'preview': (m['body'][:360] + ('…' if len(m['body']) > 360 else '')),
+        'deliveries': [{k: d.get(k) for k in ('recipient', 'status', 'error')} for d in m['deliveries']],
+    } for m in data['messages'][-24:]]
     data['members'] = [{k: a[k] for k in ('slug', 'name', 'role', 'description', 'ticket_ids')} for a in data['members']]
+    data['reviews'] = [{
+        'id': r['id'], 'ticket_id': r['ticket_id'], 'artifact_slug': r['artifact_slug'],
+        'author': r['author'], 'reviewer': r['reviewer'], 'status': r['status'],
+        'current': r['current'], 'reason_preview': r['reason'][:360],
+    } for r in data['reviews']]
+    data['sources'] = [{k: s.get(k) for k in ('id', 'reader', 'url', 'final_url', 'title', 'status', 'error', 'retrieved_at')}
+                       for s in data['sources']]
     return ('TEAM CONVERSATION\n' + json.dumps(data, ensure_ascii=False) +
-        ('\nUse team_roster and team_read. If you have not received a teammate answer yet, ask one substantive question with team_send to another specialist; the runner wakes them to respond. Use existing answers instead of repeating completed exchanges. Publish your own linked evidence page, then request its peer review with team_request_review. If waiting for replies or a review, finish your turn WITHOUT ticket_result; the runner will resume you. Address changes_requested before requesting a fresh review. Capture a method actually used successfully as a shared skill with supporting source IDs. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
+        ('\nThe conversation, review and source entries above are compact indexes. Read full details with team_read, wiki_get and source_get before relying on them. Ask one substantive question if you have not received a teammate answer. Finish all wiki edits before requesting its current-revision review. After requesting review, do not edit that page until the reviewer replies; the runner ends your turn and resumes it automatically. If a reply or review is pending, finish WITHOUT ticket_result. Once a teammate has answered and the current page has an accepted review, call ticket_result and verify the tool succeeded. Revise rejected work before requesting a fresh review. Capture a method actually used successfully as a shared skill. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
 
 
 def validate_delivery(conn, tid, actor):
