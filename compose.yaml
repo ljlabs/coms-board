@@ -1,0 +1,67 @@
+services:
+  import-board-data:
+    build: .
+    image: swarmagent:local
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    environment:
+      COMS_DB: /data/coms.db
+      COMS_IN_DOCKER: "1"
+    volumes:
+      - board-data:/data
+      - type: bind
+        source: ./data
+        target: /seed
+        read_only: true
+        bind:
+          create_host_path: false
+    entrypoint: ["python3", "/app/docker_import.py"]
+    restart: "no"
+
+  board:
+    build: .
+    image: swarmagent:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 4g
+    cpus: 4.0
+    ports:
+      - "127.0.0.1:${SWARM_PORT:-18765}:8765"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      COMS_DB: /data/coms.db
+      COMS_IN_DOCKER: "1"
+      COMS_PUBLIC_PORT: ${SWARM_PORT:-18765}
+      COMS_LLAMACPP_BASE_URL: ${COMS_LLAMACPP_BASE_URL:-http://host.docker.internal:11434/v1}
+      COMS_LLAMACPP_MODEL: ${COMS_LLAMACPP_MODEL:-LFM2.5-2.6B-Q8_0.gguf}
+      HOME: /home/board
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - board-data:/data
+      - agent-state:/home/board
+      - type: bind
+        source: ${SWARM_WORKSPACE:-./agent-workspace}
+        target: /workspace
+        read_only: ${SWARM_WORKSPACE_READ_ONLY:-true}
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    depends_on:
+      import-board-data:
+        condition: service_completed_successfully
+
+volumes:
+  board-data:
+  agent-state:

@@ -14,6 +14,7 @@ import argparse
 import ipaddress
 import json
 import mimetypes
+import os
 import re
 import sys
 import threading
@@ -85,7 +86,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             authority = urlsplit("//" + host)
             local = authority.hostname == "localhost" or ipaddress.ip_address(authority.hostname).is_loopback
-            trusted = local and authority.port == self.server.server_port
+            public_port = int(os.environ.get("COMS_PUBLIC_PORT", self.server.server_port))
+            trusted = local and authority.port == public_port
         except ValueError: trusted = False
         origin = self.headers.get("Origin")
         if origin and origin != "http://" + host: trusted = False
@@ -356,6 +358,13 @@ def r_team(conn, m, mm, q, b, actor):
 def r_runner_settings(conn, m, _mm, q, b, actor):
     if m == "GET":
         values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+        if os.environ.get("COMS_IN_DOCKER") == "1":
+            model = os.environ.get("COMS_LLAMACPP_MODEL", "LFM2.5-2.6B-Q8_0.gguf").strip()
+            values.update(workspace="/workspace",
+                          opencode_api_base_url=os.environ.get("COMS_LLAMACPP_BASE_URL", "http://host.docker.internal:11434/v1"),
+                          opencode_api_model=model,
+                          model_opencode="coms-local/" + model,
+                          opencode_api_key="")
         values.setdefault("active_backend", "opencode"); values.setdefault("parallel_agents", "2")
         values.setdefault("workspace", str(DEFAULT_WORKSPACE))
         values.setdefault("opencode_api_base_url", "http://localhost:11434/v1")
@@ -694,7 +703,8 @@ def main(argv=None) -> int:
     p.add_argument("-ws", "--workspace", metavar="PATH",
                    help="set and save the absolute agent workspace directory")
     a = p.parse_args(argv)
-    if a.host != "localhost":
+    docker_bind = os.environ.get("COMS_IN_DOCKER") == "1" and a.host == "0.0.0.0"
+    if a.host != "localhost" and not docker_bind:
         try: local = ipaddress.ip_address(a.host).is_loopback
         except ValueError: local = False
         if not local: p.error("This unauthenticated dashboard must bind to a loopback address.")

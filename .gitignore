@@ -13,6 +13,9 @@
 *.sqlite-shm
 *.runner.lock
 data/*.log
+.container-workspace/
+agent-workspace/*
+!agent-workspace/.gitkeep
 
 # Local application settings and task notes
 .kiro/

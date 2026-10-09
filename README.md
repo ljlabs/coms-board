@@ -24,6 +24,42 @@ dashboard.
 
 Requires Python 3.10+.
 
+### Windows Docker setup
+
+Docker Desktop can run the board and its OpenCode agent processes inside a
+container. From PowerShell in the project folder, run:
+
+```powershell
+docker compose up --build -d
+docker compose ps
+```
+
+Then open `http://localhost:18765/`. The port is published on `127.0.0.1`
+only. On its first start, a one-shot container copies `data/coms.db` into a
+private Docker volume; it removes the saved hosted API key from that private
+copy because the local llama.cpp endpoint does not need it. Later starts keep
+the container's volume. `docker compose down` stops the board and keeps all
+board data. Do not use `docker compose down --volumes` unless you intend to
+erase the private Docker volume; the original `data/coms.db` is not changed by
+the container after the first import.
+
+The image runs as an unprivileged user with a read-only root filesystem, no
+Linux capabilities, a bounded process count and memory, and no Docker socket or
+Windows home-directory mount. Only the separate `agent-workspace` folder is
+mounted from Windows, read-only by default. To let coding agents write to a
+workspace, set `SWARM_WORKSPACE_READ_ONLY=false` in a local `.env` file. Keep
+`SWARM_WORKSPACE` pointed at a dedicated project folder; writable mode allows
+agents to change files inside that folder.
+
+The container connects to llama.cpp at
+`http://host.docker.internal:11434/v1` with model
+`LFM2.5-2.6B-Q8_0.gguf`. Docker Desktop resolves `host.docker.internal` to the
+Windows host. Keep llama.cpp listening on the host as configured; do not
+publish the Coms Board port on a LAN interface. For another local model or
+server port, set `COMS_LLAMACPP_MODEL` and `COMS_LLAMACPP_BASE_URL` in `.env`.
+To watch agent activity or logs, use the team room in the browser or run
+`docker compose logs -f board` from PowerShell.
+
 ```sh
 git clone https://github.com/ljlabs/swarmagent.git
 cd swarmagent

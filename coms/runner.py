@@ -233,7 +233,10 @@ class Runner:
         settings=self.settings(); cmd=backend_command(backend, settings)
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
         research = api.get_ticket(db.connect(), ticket_id)['type'] == 'research'
-        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor,'COMS_BOARD_ONLY':'1' if research or dispatch_only or collaboration_message_id is not None else '0'}), mcp_servers=board_servers(actor,ticket_id,run_id,collaboration_message_id=collaboration_message_id,dispatch_only=dispatch_only))
+        ticket=api.get_ticket(db.connect(), ticket_id)
+        job=team.job_for_ticket(db.connect(), ticket_id)
+        board_only=ticket['type']=='research' or bool(job and job.get('collaboration_required')) or dispatch_only or collaboration_message_id is not None
+        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor,'COMS_BOARD_ONLY':'1' if board_only else '0'}), mcp_servers=board_servers(actor,ticket_id,run_id,collaboration_message_id=collaboration_message_id,dispatch_only=dispatch_only))
         try:
             c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,self.settings()); return c
         except Exception:
@@ -278,7 +281,13 @@ class Runner:
             for c in connections: c.close()
         self._warm_active_backend()
     def settings(self):
-        conn=db.connect(); rows=conn.execute('SELECT key,value FROM runner_settings').fetchall(); return {r[0]:r[1] for r in rows}
+        conn=db.connect(); rows=conn.execute('SELECT key,value FROM runner_settings').fetchall(); settings={r[0]:r[1] for r in rows}
+        if os.environ.get('COMS_IN_DOCKER') == '1':
+            model=os.environ.get('COMS_LLAMACPP_MODEL','LFM2.5-2.6B-Q8_0.gguf').strip()
+            settings.update(opencode_api_base_url=os.environ.get('COMS_LLAMACPP_BASE_URL','http://host.docker.internal:11434/v1'),
+                            opencode_api_model=model, model_opencode=OPENCODE_LOCAL_PROVIDER_ID+'/'+model,
+                            opencode_api_key='', workspace='/workspace')
+        return settings
     def _message(self, tid, rid, role, kind, body):
         conn=db.connect(); conn.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,rid,role,kind,str(body),now())); conn.commit()
     def _worker(self, key, function, *args):
