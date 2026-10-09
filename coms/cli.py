@@ -253,6 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--ready", action="store_true", help="release ticket to the agent execution queue")
     x.add_argument("--board", type=int, help="project board id (default: Default or parent's board)")
     x = t.add_parser("claim"); x.add_argument("id", type=int)
+    x = t.add_parser("retry", help="retry a failed agent run or final review")
+    x.add_argument("id", type=int)
     x = t.add_parser("update"); x.add_argument("id", type=int)
     x.add_argument("--status", choices=api.TICKET_STATUSES); x.add_argument("--priority", choices=api.PRIORITIES)
     x.add_argument("--assignee"); x.add_argument("--title"); x.add_argument("--body"); x.add_argument("--tags")
@@ -401,6 +403,10 @@ def main(argv=None) -> int:
             elif c == "claim":
                 _need_identity(me)
                 _out(args, api.claim_ticket(conn, args.id, me), _t_ticket)
+            elif c == "retry":
+                _need_identity(me)
+                result = api.retry_ticket(conn, args.id, me)
+                _out(args, result, lambda t: f"Queued {t['retry_kind']} retry for ticket #{t['id']}; the runner will pick it up automatically.")
             elif c == "update":
                 _need_identity(me)
                 t = api.update_ticket(conn, args.id, me, status=args.status, priority=args.priority,

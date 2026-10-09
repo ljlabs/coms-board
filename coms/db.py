@@ -357,6 +357,7 @@ MIGRATIONS = [
     ("orchestrator_messages", "updated_at", "TEXT NOT NULL DEFAULT ''"),
     ("orchestrator_messages", "version", "INTEGER NOT NULL DEFAULT 0"),
     ("ticket_reviews", "ticket_version", "TEXT NOT NULL DEFAULT ''"),
+    ("ticket_reviews", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

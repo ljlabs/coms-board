@@ -1,6 +1,7 @@
 """ACP-backed ticket runner for Coms Board."""
 from __future__ import annotations
 import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid, urllib.error, urllib.parse, urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import api, db, progress, team
 from .acp import AcpConnection, AcpError
@@ -10,6 +11,25 @@ from .orchestrator_transcript import Transcript, begin_turn, history_before, mes
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
 OPENCODE_LOCAL_PROVIDER_ID = 'coms-local'
+MAX_REVIEW_ATTEMPTS = 3
+REVIEW_RETRY_BASE_SECONDS = 15
+
+
+def _review_retry_due(attempt_count, finished_at):
+    """Return whether a failed final review is eligible for another bounded attempt."""
+    attempts = int(attempt_count or 0)
+    if attempts >= MAX_REVIEW_ATTEMPTS:
+        return False
+    if not finished_at:
+        return True
+    try:
+        finished = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return True
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    delay = REVIEW_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1))
+    return datetime.now(timezone.utc) >= finished + timedelta(seconds=delay)
 
 
 def normalize_opencode_api_base_url(value):
@@ -318,20 +338,38 @@ class Runner:
                         threading.Thread(target=self._worker,args=(row['id'],self._work,dict(row)),daemon=True).start()
                     slots=maximum-len(self.active)
                     if slots>0:
-                        review_rows=conn.execute("SELECT t.*,a.role AS agent_role,coalesce((SELECT id FROM agent_runs ar WHERE ar.ticket_id=t.id AND ar.status='completed' AND ar.stage!='collaborate' ORDER BY ar.id DESC LIMIT 1),0) AS review_run_id FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee LEFT JOIN ticket_reviews tr ON tr.ticket_id=t.id AND tr.source_run_id=coalesce((SELECT id FROM agent_runs ar2 WHERE ar2.ticket_id=t.id AND ar2.status='completed' AND ar2.stage!='collaborate' ORDER BY ar2.id DESC LIMIT 1),0) AND tr.ticket_version=t.updated_at WHERE t.status='review' AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND (tr.id IS NULL OR (tr.status='failed' AND tr.reason='Server stopped before review finished.')) ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.updated_at LIMIT ?",(slots,)).fetchall()
+                        review_rows=conn.execute("""SELECT t.*,a.role AS agent_role,
+                            coalesce((SELECT id FROM agent_runs ar WHERE ar.ticket_id=t.id AND ar.status='completed' AND ar.stage!='collaborate' ORDER BY ar.id DESC LIMIT 1),0) AS review_run_id,
+                            tr.id AS prior_review_id,tr.status AS prior_review_status,
+                            tr.attempt_count AS prior_review_attempt_count,
+                            tr.finished_at AS prior_review_finished_at,tr.ticket_version AS prior_review_ticket_version
+                            FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee
+                            LEFT JOIN ticket_reviews tr ON tr.ticket_id=t.id
+                              AND tr.source_run_id=coalesce((SELECT id FROM agent_runs ar2 WHERE ar2.ticket_id=t.id AND ar2.status='completed' AND ar2.stage!='collaborate' ORDER BY ar2.id DESC LIMIT 1),0)
+                              AND tr.ticket_version=t.updated_at
+                            WHERE t.status='review' AND t.assignee NOT LIKE 'human%'
+                              AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%'
+                              AND (tr.id IS NULL OR (tr.status='failed' AND tr.attempt_count<?
+                                AND (tr.finished_at='' OR julianday(tr.finished_at)+(? * (1 << max(0,tr.attempt_count-1))) / 86400.0 <= julianday(?))))
+                            ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.updated_at LIMIT ?""",
+                            (MAX_REVIEW_ATTEMPTS,REVIEW_RETRY_BASE_SECONDS,now(),slots)).fetchall()
                         for row in review_rows:
+                            if row['prior_review_status']=='failed' and not _review_retry_due(row['prior_review_attempt_count'],row['prior_review_finished_at']): continue
                             if row['id'] in self.active: continue
                             lead_slug = api.orchestrator_agent(conn)['slug']
                             if 'team:'+lead_slug in self.active or self.orchestrator_busy: continue
                             if conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (lead_slug,)).fetchone(): continue
                             if not api.children_resolved(conn, row['id']): continue
                             key='review:'+str(row['id']); review_key=row['review_run_id']
-                            prior=conn.execute('SELECT id,status FROM ticket_reviews WHERE ticket_id=? AND source_run_id=?',(row['id'],review_key)).fetchone()
+                            prior=conn.execute('SELECT id,status,attempt_count,ticket_version FROM ticket_reviews WHERE ticket_id=? AND source_run_id=?',(row['id'],review_key)).fetchone()
                             if prior and prior['status'] in ('queued','running'): continue
                             if prior:
-                                review_id=prior['id']; conn.execute("UPDATE ticket_reviews SET backend=?,status='queued',decision='',reason='',ticket_version=?,created_at=?,finished_at='' WHERE id=?",(settings.get('active_backend','opencode'),row['updated_at'],now(),review_id)); conn.commit()
+                                review_id=prior['id']
+                                attempt_count=1 if prior['ticket_version']!=row['updated_at'] else int(prior['attempt_count'] or 0)+1
+                                if attempt_count>MAX_REVIEW_ATTEMPTS: continue
+                                conn.execute("UPDATE ticket_reviews SET backend=?,status='queued',decision='',reason='',ticket_version=?,attempt_count=?,created_at=?,finished_at='' WHERE id=?",(settings.get('active_backend','opencode'),row['updated_at'],attempt_count,now(),review_id)); conn.commit()
                             else:
-                                cur=conn.execute("INSERT INTO ticket_reviews(ticket_id,source_run_id,backend,status,ticket_version,created_at) VALUES(?,?,?,'queued',?,?)",(row['id'],review_key,settings.get('active_backend','opencode'),row['updated_at'],now())); review_id=cur.lastrowid; conn.commit()
+                                cur=conn.execute("INSERT INTO ticket_reviews(ticket_id,source_run_id,backend,status,ticket_version,attempt_count,created_at) VALUES(?,?,?,'queued',?,1,?)",(row['id'],review_key,settings.get('active_backend','opencode'),row['updated_at'],now())); review_id=cur.lastrowid; conn.commit()
                             self.active[key]=True
                             threading.Thread(target=self._worker,args=(key,self._review_ticket,dict(row),review_id,review_key),daemon=True).start()
             except Exception:

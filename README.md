@@ -117,6 +117,12 @@ python3 coms.py ticket search "Project" --board 2
 python3 coms.py ticket-board update 2 "Renamed project"
 ```
 
+The runner retries failed automated final reviews up to three times with a
+short backoff. If an agent run or final review still fails, retry it from the
+CLI with `python3 coms.py --as admin ticket retry <ticket-id>`. This requeues
+only a failed run or failed final review; tickets waiting for teammates remain
+gated until their replies or child results arrive.
+
 Omitting `--board` preserves existing CLI behavior: ticket lists and search span
 all boards, and new tickets go to Default or inherit their parent's board. The
 HTTP API exposes board management at `/api/ticket-boards`, accepts `board_id`
