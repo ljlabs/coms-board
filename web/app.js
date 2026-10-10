@@ -387,10 +387,60 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       if (!confirm(`Delete board “${board.name}” and ALL ${board.ticket_count} tickets, including comments and links? This cannot be undone. Wiki pages are kept.`)) return;
       try { await api('DELETE', `/api/ticket-boards/${board.id}`); rememberBoard(1); toast('board deleted'); location.hash = '#/tickets?board=1'; } catch (e) { fail(e); }
     };
+    wireKanban(tix);
   });
   function kanban(tix) {
     const cols = [['open', 'Open'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['review', 'Review'], ['done', 'Done'], ['wontfix', 'Won’t fix']];
-    return `<div class="kanban">${cols.map(([s, l]) => { const items = tix.filter((t) => t.status === s).slice(0, ['done', 'wontfix'].includes(s) ? 15 : 100); return `<div class="colm"><h3>${l}<span>${items.length}</span></h3>${items.map((t) => `<div class="kcard"><a href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="m">${badge(t.priority)}${badge(t.type)}${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''}${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</div></div>`).join('')}</div>`; }).join('')}</div>`;
+    return `<div class="kanban">${cols.map(([s, l]) => { const items = tix.filter((t) => t.status === s).slice(0, ['done', 'wontfix'].includes(s) ? 15 : 100); return `<div class="colm" data-status="${s}" aria-label="${l} tickets"><h3>${l}<span>${items.length}</span></h3>${items.map((t) => `<div class="kcard" draggable="true" data-ticket-id="${t.id}" aria-label="Ticket #${t.id}: ${esc(t.title)}. Drag to a status column to move it"><a href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="m">${badge(t.priority)}${badge(t.type)}${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''}${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</div></div>`).join('')}</div>`; }).join('')}</div>`;
+  }
+  function wireKanban(tix) {
+    const board = $('.kanban');
+    if (!board) return;
+    let draggedId = null;
+    const clearDropTargets = () => board.querySelectorAll('.colm.drop-target').forEach((col) => col.classList.remove('drop-target'));
+    board.addEventListener('dragstart', (e) => {
+      const card = e.target.closest('.kcard');
+      if (!card || !e.dataTransfer) return;
+      draggedId = card.dataset.ticketId;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', draggedId);
+      card.classList.add('is-dragging');
+    });
+    board.addEventListener('dragend', (e) => {
+      const card = e.target.closest('.kcard');
+      if (card) card.classList.remove('is-dragging');
+      draggedId = null;
+      clearDropTargets();
+    });
+    board.addEventListener('dragover', (e) => {
+      const col = e.target.closest('.colm');
+      if (!col || !draggedId) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      clearDropTargets();
+      col.classList.add('drop-target');
+    });
+    board.addEventListener('dragleave', (e) => {
+      const col = e.target.closest('.colm');
+      if (col && !col.contains(e.relatedTarget)) col.classList.remove('drop-target');
+    });
+    board.addEventListener('drop', async (e) => {
+      const col = e.target.closest('.colm');
+      if (!col || !draggedId) return;
+      e.preventDefault();
+      clearDropTargets();
+      const ticket = tix.find((t) => String(t.id) === draggedId);
+      const status = col.dataset.status;
+      if (!ticket || ticket.status === status) return;
+      try {
+        const updated = await api('PATCH', `/api/tickets/${ticket.id}`, { status });
+        toast(`ticket #${ticket.id} moved to ${status.replace('_', ' ')}`);
+        if (updated.open_children_warning && updated.open_children_warning.length) {
+          toast(`⚠ ${updated.open_children_warning.length} open child ticket(s): ${updated.open_children_warning.map((child) => '#' + child.id).join(', ')}`, true);
+        }
+        await render();
+      } catch (err) { fail(err); }
+    });
   }
 
   route(/^\/tickets\/new$/, async () => {
