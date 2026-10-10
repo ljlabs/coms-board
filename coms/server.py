@@ -365,7 +365,10 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
         values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
         if os.environ.get("COMS_IN_DOCKER") == "1":
             model = os.environ.get("COMS_LLAMACPP_MODEL", "LFM2.5-2.6B-Q8_0.gguf").strip()
-            values.update(workspace="/workspace",
+            docker_workspace=values.get("workspace", "/workspace")
+            try: docker_workspace=workspace_path({"workspace":docker_workspace},create_default=False)
+            except ValueError: docker_workspace="/workspace"
+            values.update(workspace=docker_workspace,
                           opencode_api_base_url=os.environ.get("COMS_LLAMACPP_BASE_URL", "http://host.docker.internal:11434/v1"),
                           opencode_api_model=model,
                           model_opencode="coms-local/" + model,
@@ -419,6 +422,9 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
         with RUNNER.lock:
             if RUNNER.active or RUNNER.orchestrator_busy:
                 raise api.BadRequest("Wait for active agents to finish before changing runner settings.")
+            if "workspace" in b:
+                try: b["workspace"] = workspace_path(b,create_default=False)
+                except ValueError as exc: raise api.BadRequest(str(exc))
             for c in RUNNER.conns.values(): c.close()
             RUNNER.conns.clear()
             for key, value in b.items():
@@ -524,16 +530,31 @@ def r_orchestrator_projects(conn, m, _mm, q, b, actor):
     from .runner import RUNNER
     if m == "GET": return RUNNER.orchestrator_projects()
     if m == "POST":
-        try: return RUNNER.create_orchestrator_project(b.get("name", ""))
+        try: return RUNNER.create_orchestrator_project(b.get("name", ""), b.get("workspace", ""))
         except ValueError as e: raise api.BadRequest(str(e))
 
 
 def r_orchestrator_project(conn, m, mm, q, b, actor):
     from .runner import RUNNER
     project_id=int(mm.group(1))
+    if m in ("PATCH", "PUT", "POST"):
+        try: return RUNNER.update_orchestrator_project(project_id,b.get("workspace"))
+        except ValueError as e: raise api.BadRequest(str(e))
     if m=="DELETE":
         if not RUNNER.delete_orchestrator_project(project_id): raise api.NotFound("project not found")
         return {"deleted":project_id}
+
+
+def r_workspace_folders(_conn, m, _mm, q, b, _actor):
+    from .runner import RUNNER
+    try:
+        if m == "GET": return RUNNER.workspace_folders(q.get("path"))
+        if m == "POST": return RUNNER.manage_workspace_folder('create',b.get("path"),b.get("name"))
+        if m == "PATCH": return RUNNER.manage_workspace_folder('rename',b.get("path"),b.get("name"))
+        if m == "DELETE":
+            if b.get("confirm") is not True: raise api.BadRequest("confirm folder deletion")
+            return RUNNER.manage_workspace_folder('delete',b.get("path"))
+    except ValueError as e: raise api.BadRequest(str(e))
 
 
 def r_orchestrator_sessions(conn, m, _mm, q, b, actor):
@@ -659,6 +680,7 @@ ROUTES = [
     (r"/api/skills", r_skills),
     (r"/api/runner/projects/(\d+)", r_orchestrator_project),
     (r"/api/runner/projects", r_orchestrator_projects),
+    (r"/api/runner/workspace-folders", r_workspace_folders),
     (r"/api/runner/models", r_runner_models),
     (r"/api/runner/debug", r_runner_debug),
     (r"/api/runner/status", r_runner_status),

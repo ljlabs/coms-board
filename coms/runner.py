@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import api, db, progress, team
 from .acp import AcpConnection, AcpError
-from .workspace import DEFAULT_WORKSPACE, workspace_path
+from .workspace import DEFAULT_WORKSPACE, workspace_directory_browser, workspace_folder_change, workspace_folder_target, workspace_path
 from .orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -335,9 +335,12 @@ class Runner:
         conn=db.connect(); rows=conn.execute('SELECT key,value FROM runner_settings').fetchall(); settings={r[0]:r[1] for r in rows}
         if os.environ.get('COMS_IN_DOCKER') == '1':
             model=os.environ.get('COMS_LLAMACPP_MODEL','LFM2.5-2.6B-Q8_0.gguf').strip()
+            docker_workspace=settings.get('workspace','/workspace')
+            try: docker_workspace=workspace_path({'workspace':docker_workspace},create_default=False)
+            except ValueError: docker_workspace='/workspace'
             settings.update(opencode_api_base_url=os.environ.get('COMS_LLAMACPP_BASE_URL','http://host.docker.internal:11434/v1'),
                             opencode_api_model=model, model_opencode=OPENCODE_LOCAL_PROVIDER_ID+'/'+model,
-                            opencode_api_key='', workspace='/workspace')
+                            opencode_api_key='', workspace=docker_workspace)
         return settings
     def _message(self, tid, rid, role, kind, body):
         conn=db.connect(); conn.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,rid,role,kind,str(body),now())); conn.commit()
@@ -728,6 +731,68 @@ class Runner:
                 self.active.pop('review:'+str(tid),None)
                 self.review_conns.pop(tid,None)
 
+    def _folder_protected_paths(self):
+        paths=[db.db_path().resolve().parent]
+        if os.environ.get('COMS_IN_DOCKER')=='1': paths.append(Path('/home/board'))
+        return paths
+    def workspace_folders(self,path=None):
+        return workspace_directory_browser(path,protected_paths=self._folder_protected_paths())
+    def manage_workspace_folder(self,action,path,name=None):
+        protected=self._folder_protected_paths()
+        with self.lock:
+            if action=='create':
+                return workspace_folder_change(action,path,name,protected_paths=protected)
+            if self.active or self.orchestrator_busy:
+                raise ValueError('Wait for active agents to finish before renaming or deleting folders.')
+            source=workspace_folder_target(path,protected_paths=protected)
+            conn=db.connect()
+            references=[('root',None,'the root workspace',self.settings().get('workspace',str(DEFAULT_WORKSPACE)))]
+            references.extend(('project',row['id'],f"project “{row['name']}”",row['workspace']) for row in conn.execute('SELECT id,name,workspace FROM orchestrator_projects') if row['workspace'])
+            affected=[]
+            for kind,identifier,label,raw in references:
+                try: suffix=Path(raw).expanduser().resolve().relative_to(source)
+                except (ValueError,OSError,RuntimeError): continue
+                affected.append((kind,identifier,label,suffix))
+            if action=='delete':
+                if affected:
+                    raise ValueError(f'This folder is used by {affected[0][2]}. Choose another workspace before deleting it.')
+                return workspace_folder_change(action,path,protected_paths=protected)
+            if action!='rename': raise ValueError('unknown folder action')
+            result=None
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                result=workspace_folder_change(action,path,name,protected_paths=protected)
+                destination=Path(result['path'])
+                if str(destination)!=str(source):
+                    for kind,identifier,_label,suffix in affected:
+                        moved=str(destination/suffix)
+                        if kind=='root':
+                            conn.execute('INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)',('workspace',moved))
+                        else:
+                            conn.execute('UPDATE orchestrator_projects SET workspace=?,updated_at=? WHERE id=?',(moved,now(),identifier))
+                    for row in conn.execute('SELECT id,workspace FROM orchestrator_sessions WHERE workspace!=? ',('',)).fetchall():
+                        try: suffix=Path(row['workspace']).expanduser().resolve().relative_to(source)
+                        except (ValueError,OSError,RuntimeError): continue
+                        conn.execute("UPDATE orchestrator_sessions SET workspace=?,acp_session_id='' WHERE id=?",(str(destination/suffix),row['id']))
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                if result and result['path']!=str(source):
+                    try: workspace_folder_change('rename',result['path'],source.name,protected_paths=protected)
+                    except ValueError as rollback_error:
+                        raise ValueError(f"Folder moved to {result['path']}, but workspace settings could not be saved or restored: {rollback_error}") from exc
+                raise
+            if affected and result['path']!=str(source):
+                # Discard idle connections that may still hold the old cwd.
+                for connection in self.conns.values(): connection.close()
+                self.conns.clear()
+                with self.model_lock:
+                    for connection in self.model_conns.values(): connection.close()
+                    self.model_conns.clear()
+                with self.orchestrator_conn_lock:
+                    if self.orchestrator_conn: self.orchestrator_conn.close()
+                    self.orchestrator_conn=None; self.orchestrator_conn_key=None
+            return result
     def orchestrator_projects(self):
         conn=db.connect(); return [dict(r) for r in conn.execute('SELECT * FROM orchestrator_projects ORDER BY name')]
     def orchestrator_sessions(self):
@@ -739,11 +804,36 @@ class Runner:
         conn.execute('UPDATE orchestrator_sessions SET project_id=NULL WHERE project_id=?',(int(project_id),))
         conn.execute('DELETE FROM orchestrator_projects WHERE id=?',(int(project_id),)); conn.commit()
         return True
-    def create_orchestrator_project(self,name):
-        name=name.strip()
-        if not name: raise ValueError('project name required')
-        conn=db.connect(); ts=now(); conn.execute('INSERT INTO orchestrator_projects(name,created_at,updated_at) VALUES(?,?,?)',(name,ts,ts)); conn.commit()
-        return dict(conn.execute('SELECT * FROM orchestrator_projects WHERE name=?',(name,)).fetchone())
+    def create_orchestrator_project(self,name,workspace=''):
+        with self.lock:
+            name=name.strip()
+            if not name: raise ValueError('project name required')
+            path=workspace_path({'workspace':workspace},create_default=False) if workspace not in (None,'') else ''
+            conn=db.connect(); ts=now()
+            try:
+                cursor=conn.execute('INSERT INTO orchestrator_projects(name,workspace,created_at,updated_at) VALUES(?,?,?,?)',(name,path,ts,ts)); conn.commit()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise ValueError('A project with this name already exists.') from exc
+            return dict(conn.execute('SELECT * FROM orchestrator_projects WHERE id=?',(cursor.lastrowid,)).fetchone())
+    def update_orchestrator_project(self,project_id,workspace):
+        with self.lock:
+            conn=db.connect()
+            project=conn.execute('SELECT * FROM orchestrator_projects WHERE id=?',(int(project_id),)).fetchone()
+            if not project: raise ValueError('project not found')
+            path=''
+            if workspace not in (None,''):
+                path=workspace_path({'workspace':workspace},create_default=False)
+            conn.execute('UPDATE orchestrator_projects SET workspace=?,updated_at=? WHERE id=?',(path,now(),int(project_id))); conn.commit()
+            return dict(conn.execute('SELECT * FROM orchestrator_projects WHERE id=?',(int(project_id),)).fetchone())
+    def _orchestrator_workspace(self,session,settings,conn=None):
+        project_id=session.get('project_id')
+        if project_id:
+            conn=conn or db.connect()
+            project=conn.execute('SELECT workspace FROM orchestrator_projects WHERE id=?',(project_id,)).fetchone()
+            if project and project['workspace']:
+                settings={**settings,'workspace':project['workspace']}
+        return workspace_path(settings)
     def create_orchestrator_session(self,title='New chat',project_id=None):
         conn=db.connect(); sid=uuid.uuid4().hex; ts=now()
         if project_id is not None and not conn.execute('SELECT 1 FROM orchestrator_projects WHERE id=?',(project_id,)).fetchone(): raise ValueError('project not found')
@@ -760,9 +850,10 @@ class Runner:
         settings=self.settings(); backend=settings.get('active_backend','opencode')
         out['backend']=backend; out['model']=settings.get('model_'+backend) or 'ACP default'
         try:
-            out['workspace']=workspace_path(settings,create_default=False); out['workspace_error']=''
+            out['workspace']=self._orchestrator_workspace(out,settings,conn); out['workspace_error']=''
         except ValueError as exc:
-            out['workspace']=settings.get('workspace',str(DEFAULT_WORKSPACE.resolve())); out['workspace_error']=str(exc)
+            project=conn.execute('SELECT workspace FROM orchestrator_projects WHERE id=?',(out.get('project_id'),)).fetchone() if out.get('project_id') else None
+            out['workspace']=(project['workspace'] if project and project['workspace'] else settings.get('workspace',str(DEFAULT_WORKSPACE.resolve()))); out['workspace_error']=str(exc)
         with self.lock:
             out['busy']=self.orchestrator_busy and self.orchestrator_session==sid
             out['runner_busy']=self.orchestrator_busy
@@ -847,7 +938,7 @@ class Runner:
             conn=db.connect(); session=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
             if not session: raise ValueError('session not found')
             settings=self.settings(); backend=settings.get('active_backend','opencode')
-            cwd=workspace_path(settings)
+            cwd=self._orchestrator_workspace(dict(session),settings,conn)
             turn,user=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
             self.orchestrator_busy=True; self.orchestrator_session=sid
             try:
@@ -862,10 +953,13 @@ class Runner:
         try:
             if turn_id is not None: transcript=Transcript(sid,turn_id)
             settings=self.settings(); backend=settings.get('active_backend','opencode')
-            cwd=workspace_path(settings)
             if turn_id is None:
+                cwd=self._orchestrator_workspace(session,settings)
                 turn,_=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
                 turn_id=turn['id']
+            else:
+                turn=db.connect().execute('SELECT workspace FROM orchestrator_turns WHERE id=?',(turn_id,)).fetchone()
+                cwd=turn['workspace'] if turn and turn['workspace'] else self._orchestrator_workspace(session,settings)
             transcript=Transcript(sid,turn_id)
             agent = api.orchestrator_agent(db.connect())
             recorder = progress.Recorder('chat:' + turn_id, agent['slug'], backend=backend)

@@ -20,6 +20,7 @@ agent-workspace/*
 # Local application settings and task notes
 .kiro/
 .Codex/
+.env
 
 # --- Python ---
 __pycache__/

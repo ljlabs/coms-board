@@ -191,7 +191,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_messages (
 );
 CREATE TABLE IF NOT EXISTS orchestrator_projects (
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  workspace TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS orchestrator_sessions (
   id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'New chat', project_id INTEGER,
@@ -353,6 +354,7 @@ MIGRATIONS = [
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),
     ("orchestrator_messages", "session_id", "TEXT NOT NULL DEFAULT 'default'"),
+    ("orchestrator_projects", "workspace", "TEXT NOT NULL DEFAULT ''"),
     ("orchestrator_sessions", "workspace", "TEXT NOT NULL DEFAULT ''"),
     ("orchestrator_messages", "turn_id", "TEXT"),
     ("orchestrator_messages", "acp_message_id", "TEXT"),

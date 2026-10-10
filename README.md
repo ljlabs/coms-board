@@ -208,9 +208,11 @@ total limit; a timeout stays visible and leaves the ticket in review.
 
 Orchestrator responses appear as an ordered conversation: assistant commentary,
 tool calls, and the final answer each keep their own entry. Completed tools
-appear as compact activity rows. Expand a row to see the command and output
-together in a shell panel, with copy and status controls. Workspace and raw
-input are available under **Details**; nonzero exit codes remain visible.
+appear as compact activity rows. Expand a row to switch between **Input** and
+**Output**, and between **Formatted** and **Raw** data. Shell input shows its
+command and working directory; output stays readable as terminal text. The
+workspace and nonzero exit status remain visible in the panel, with a copy
+button for the selected view.
 Errors and interrupted turns appear in the conversation;
 raw diagnostics are available under **Debug logs**. The header shows the
 resolved workspace before sending a message. Tool updates preserve reading
@@ -233,7 +235,13 @@ closes work by default when the acceptance criteria appear satisfied, and
 leaves a reasoned review comment when a concrete issue needs human judgment.
 
 The default workspace is a sibling directory named `workspace`, created on first
-use. A configured workspace must be an existing absolute directory separate
+use. The Orchestrator chat list has collapsible project groups; create a chat
+inside a group, move existing chats between groups, or delete a chat from its
+row. Unsorted chats use the root workspace. A project can choose its own
+workspace folder or inherit the root workspace. Use **Choose folder** in the
+group or chat header to browse directories visible to the server and save that
+folder; the Runner settings page continues to accept a path directly. A
+configured workspace must be an existing absolute directory separate
 from this application: the application directory, its children and its parents
 are rejected, including symlinks to those paths. This policy applies to model
 discovery, execution, review, and restored orchestrator sessions. Existing
@@ -245,6 +253,27 @@ custom command strings and a different workspace path. Install and authenticate
 your chosen backend before marking a ticket ready. Agents run with the local
 user's filesystem permissions, so use a trusted workspace and monitor the
 ticket transcript and runner logs.
+
+Use **+ Project** to open the Create project modal, name the project, and add a
+source folder with the graphical picker. The name and workspace are saved
+together. Without a source folder, the project inherits the root workspace.
+The compose icon beside a project name creates a chat directly in that project,
+including when its group is collapsed.
+
+The folder picker also has **New folder** and rename/delete icons beside each
+folder. Renaming a folder updates root and project workspace paths under it.
+Deletion asks for confirmation and only removes empty folders that are not
+assigned as a workspace. Rename/delete wait until active agents finish;
+application/runtime folders, symbolic links, and mounted roots are protected.
+Folder changes require write permission. For the Docker workspace, set
+`SWARM_WORKSPACE_READ_ONLY=false` in your local `.env` and recreate the board
+container. This also lets agents write files in that shared workspace.
+
+The folder browser can only show folders accessible to the server process. When
+running with Docker Compose, the default host folder is mounted at `/workspace`,
+so the browser can choose that folder and its subfolders. To use another host
+folder, configure its bind mount before starting the container; a browser choice
+cannot add a new Docker mount to an already-running container.
 
 Records live in `data/coms.db`. The database and its journal files are local
 data, excluded from version control — back them up separately if they matter.

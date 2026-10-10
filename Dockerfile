@@ -22,4 +22,4 @@ USER 10001:10001
 EXPOSE 8765
 HEALTHCHECK --interval=20s --timeout=3s --start-period=20s --retries=3 \
     CMD ["python3", "/app/docker_healthcheck.py"]
-CMD ["python3", "-m", "coms.server", "--host", "0.0.0.0", "--port", "8765", "--workspace", "/workspace"]
+CMD ["python3", "-m", "coms.server", "--host", "0.0.0.0", "--port", "8765"]
