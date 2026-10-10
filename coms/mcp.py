@@ -86,18 +86,19 @@ TOOLS = [
     tool("schedule_run_now", "Queue an immediate run of a scheduled task, even when its recurrence is paused.", {"id": I}, ["id"], True),
     tool("schedule_delete", "Delete a recurring schedule while retaining its execution history.", {"id": I}, ["id"], True),
     tool("team_roster", "List teammates on a job, with distinct names, identities, capabilities and assigned tickets.", {"job_id": I}, ['job_id']),
-    tool("team_delegate", "Delegate one specialty: reuse a suitable registered agent or register a distinct personally named teammate, then create an actionable child assignment. Parent, readiness and shared research requirements are automatic.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
-    tool("team_read", "Read the job conversation, replies, peer reviews and actually retrieved source index.", {"job_id": I, "after_id": I}, ['job_id']),
+    tool("team_delegate", "Delegate one specialty to a named teammate. Creates a ready child task with inherited workspace and collaboration requirements. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
+    tool("team_read", "Read a bounded job index with recent messages, pending requests, progress, reviews and sources. Use message_id for a full message (offset pages long bodies), source_after_id for more sources, and source_get/wiki_get for evidence. Act on the assignment instead of repeatedly polling unchanged output.", {"job_id": I, "after_id": I, "message_id": I, "offset": I, "source_after_id": I}, ['job_id']),
     tool("team_send", "Ask one teammate a substantive question. The runner wakes the recipient for a response. Finish your turn if waiting; you resume after replies.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
     tool("team_note", "Post a useful update or staffing decision to the shared job conversation; does not demand replies.", {"job_id": I, "body": S}, ['job_id', 'body'], True),
     tool("team_reply", "Answer a question addressed to you; records a visible reply and releases the waiting sender.", {"message_id": I, "body": S}, ['message_id', 'body'], True),
     tool("team_request_review", "After your final wiki edit, request another teammate's review of that exact revision. The runner ends your turn while it is pending; do not edit the page until the reviewer responds. Then revise if needed or, after acceptance, call ticket_result.", {"job_id": I, "ticket_id": I, "artifact_slug": S, "reviewer": S}, ['job_id', 'ticket_id', 'artifact_slug', 'reviewer'], True),
     tool("team_review", "Read the exact requested revision with wiki_get and inspect cited evidence with source_get before deciding. Use this review ID in your assigned response turn; give concrete findings.", {"review_id": I, "decision": {"type": "string", "enum": ['accepted', 'changes_requested']}, "body": S}, ['review_id', 'decision', 'body'], True),
     tool("source_fetch", "Retrieve a public HTTPS source and record its real content/status/access date for peer inspection. Failed URLs are not verified evidence.", {"job_id": I, "url": S}, ['job_id', 'url'], True),
+    tool("source_read_file", "Read UTF-8 text within your assigned workspace and record numbered file lines and a SHA256 hash as reviewable evidence. Cite the returned URL/ID in your wiki page. Defaults to at most 200 lines; request an explicit range of at most 200 lines. Native tools remain available for workspace work and tests.", {"job_id": I, "path": S, "start_line": I, "end_line": I}, ['job_id', 'path'], True),
     tool("source_get", "Read the content and retrieval status of a recorded research source.", {"source_id": I}, ['source_id']),
 ]
 
-COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
+COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch', 'source_read_file'}
 DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_file_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
 MONITOR_TOOLS = {'ticket_get', 'agents_list', 'team_roster', 'team_read', 'team_send', 'team_note', 'team_reply', 'wiki_get', 'source_get'}
 
@@ -218,8 +219,8 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == 'team_roster': result = team.roster(conn, args['job_id'])
     elif name == 'team_delegate':
         if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
-        result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'])
-    elif name == 'team_read': result = team.room(conn, args['job_id'], args.get('after_id', 0))
+        result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'], type_=args.get('type', 'task'))
+    elif name == 'team_read': result = team.read_room(conn, args['job_id'], args.get('after_id', 0), message_id=args.get('message_id'), offset=args.get('offset', 0), source_after_id=args.get('source_after_id', 0))
     elif name == 'team_send': result = team.send(conn, args['job_id'], actor, args['to'], args['body'])
     elif name == 'team_note': result = team.send(conn, args['job_id'], actor, '*', args['body'], kind='note')
     elif name == 'team_reply': result = team.reply(conn, args['message_id'], actor, args['body'])
@@ -231,8 +232,10 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
             request = conn.execute('SELECT message_id FROM peer_reviews WHERE id=?', (args['review_id'],)).fetchone()
             if not request or request['message_id'] != int(response_to): raise ValueError('Decide the peer review assigned to this response turn')
         result = team.review(conn, args['review_id'], actor, args['decision'], args['body'], int(os.environ.get('COMS_RUN_ID', '0')))
-    elif name in ('source_fetch', 'source_get'):
-        result = team.fetch_source(conn, args['job_id'], actor, args['url']) if name == 'source_fetch' else team.source_get(conn, args['source_id'])
+    elif name in ('source_fetch', 'source_get', 'source_read_file'):
+        if name == 'source_fetch': result = team.fetch_source(conn, args['job_id'], actor, args['url'])
+        elif name == 'source_read_file': result = team.read_file_source(conn, args['job_id'], actor, args['path'], args.get('start_line', 1), args.get('end_line'), ticket_id=int(assigned) if assigned else None)
+        else: result = team.source_get(conn, args['source_id'])
         if not readonly and os.environ.get('COMS_RUN_ID'):
             conn.execute('INSERT OR IGNORE INTO source_reads VALUES(?,?,?)', (actor, int(os.environ['COMS_RUN_ID']), result['id']))
             conn.commit()

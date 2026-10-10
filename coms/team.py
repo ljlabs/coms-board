@@ -1,8 +1,10 @@
 """Durable team dialogue, recipient wakeups, peer reviews and retrieved evidence."""
 import ipaddress
+import hashlib
 import json
 import re
 import socket
+from pathlib import Path
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -33,12 +35,14 @@ def member(conn, job_id, actor):
         raise api.BadRequest('Agent is not a member of this job team')
 
 
-def delegate(conn, job_id, actor, name, capabilities, title, body):
+def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='task'):
     job = api.get_ticket(conn, job_id)
     if job['type'] != 'job' or job['assignee'] != actor:
         raise api.BadRequest('Only the assigned job lead can delegate teammates')
     if not name.strip() or not capabilities.strip() or not body.strip():
         raise api.BadRequest('Provide a distinct personal name, capabilities and an actionable scope')
+    if type_ not in ('task', 'research'):
+        raise api.BadRequest('Delegate a task or research assignment')
     agent = api.ensure_agent(conn, name, 'expert', capabilities, commit=False)
     if agent['slug'] == actor: raise api.BadRequest('Delegate to a specialist other than yourself')
     # Retrying a dispatched assignment must not create another identical worker.
@@ -46,9 +50,10 @@ def delegate(conn, job_id, actor, name, capabilities, title, body):
     if existing:
         return {'agent': agent, 'ticket': api.get_ticket(conn, existing['id'])}
     urls = list(dict.fromkeys(re.findall(r'https://[^\s<>]+', job['body'])))
-    assignment = (body.strip() + f'\n\nParent research job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\nStarting source URLs:\n' + '\n'.join(urls) +
-                  f'\n\nYour team room belongs to job #{job_id}. Read team_roster, ask a substantive question with team_send, then end this turn while waiting. Read the answer on resumption. Retrieve actual evidence with source_fetch. Publish and link your own evidence page and request peer review before ticket_result. Cite source IDs, URLs and retrieval dates; distinguish evidence, inference and limitations. Do not invent verification or backtests. Share useful methods with the lead; the orchestrator publishes shared skills. The lead owns the combined synthesis.')
-    ticket = api.create_ticket(conn, title, assignment, actor, type_='research', assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True)
+    assignment = (body.strip() + f'\n\nParent job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\n' +
+                  ('Starting source URLs:\n' + '\n'.join(urls) + '\n' if urls else '') +
+                  f'\nYour team room belongs to job #{job_id}. Use native tools to inspect the workspace and run requested tests. Record local file evidence with source_read_file, or retrieve relevant public HTTPS evidence with source_fetch. Cite the returned source URLs/IDs and file lines; distinguish evidence, inference and limitations. Read team_roster and ask one substantive question with team_send, then end this turn while waiting. Use existing answers on resumption. Publish and link your own evidence page and request peer review before ticket_result. Do not invent verification. Share useful methods with the lead; the orchestrator publishes shared skills. The lead owns the combined synthesis.')
+    ticket = api.create_ticket(conn, title, assignment, actor, type_=type_, assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True, workspace=job.get('workspace', ''))
     send(conn, job_id, actor, '*', f"{'Reused' if agent['reused'] else 'Registered'} {agent['name']} ({agent['slug']}): {capabilities}. Assigned ticket #{ticket['id']}: {title}.", kind='note')
     return {'agent': agent, 'ticket': ticket}
 
@@ -78,6 +83,43 @@ def room(conn, job_id, after_id=0):
     return {'job_id': int(job_id), 'members': roster(conn, job_id), 'messages': messages,
             'reviews': reviews, 'sources': sources, 'tickets':children,
             'progress':progress.snapshot(conn,ticket=job_id),'recent_tools':recent_tools}
+
+
+def read_room(conn, job_id, after_id=0, *, message_id=None, offset=0, source_after_id=0):
+    """Bound MCP/prompt context; the dashboard retains the full room contract."""
+    if min(after_id, offset, source_after_id) < 0:
+        raise api.BadRequest('Team read cursors must be nonnegative')
+    if message_id is not None:
+        row = conn.execute('SELECT * FROM team_messages WHERE job_id=? AND id=?', (job_id, message_id)).fetchone()
+        if not row: raise api.NotFound('Team message not found in this job')
+        message = {k: (value[:240] if isinstance(value, str) and k != 'body' else value) for k, value in dict(row).items()}
+        message['body_length'] = len(message['body'])
+        message['body'] = message['body'][offset:offset + 8000]
+        while message['body'] and len(json.dumps(message, ensure_ascii=False).encode('utf-8')) > 24000:
+            message['body'] = message['body'][:len(message['body']) // 2]
+        message['next_offset'] = offset + len(message['body']) if offset + len(message['body']) < message['body_length'] else None
+        return {'job_id': int(job_id), 'messages': [message]}
+    data = room(conn, job_id, after_id)
+    data['counts'] = {key: len(data[key]) for key in ('members', 'reviews', 'sources', 'tickets')}
+    data['counts']['messages'] = conn.execute('SELECT count(*) FROM team_messages WHERE job_id=?', (job_id,)).fetchone()[0]
+    data['messages'] = [{**m, 'body': m['body'][:800], 'body_length': len(m['body']), 'deliveries': [
+            {k: (d.get(k, '')[:200] if isinstance(d.get(k), str) else d.get(k)) for k in ('recipient', 'status', 'attempt_count', 'error')} for d in m['deliveries'][:8]]}
+            for m in data['messages'][-12:]]
+    data['pending_requests'] = [dict(row) for row in conn.execute("SELECT m.id,m.sender,m.recipient,m.kind,substr(m.body,1,400) AS body,d.status,d.attempt_count FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND d.status IN ('pending','responding','failed') ORDER BY m.id DESC LIMIT 12", (job_id,))]
+    data['members'] = [{k: str(a[k])[:240] for k in ('slug', 'name', 'role', 'description', 'ticket_ids')} for a in data['members'][:40]]
+    data['tickets'] = [{**t, 'title': t['title'][:160], 'result': t['result'][:240]} for t in data['tickets'][:40]]
+    data['reviews'] = [{k: (r[k][:240] if isinstance(r[k], str) else r[k]) for k in ('id', 'ticket_id', 'artifact_slug', 'author', 'reviewer', 'status', 'current', 'reason')} for r in data['reviews'][-12:]]
+    data['sources'] = [{k: (value[:500] if isinstance(value, str) else value) for k, value in s.items()} for s in data['sources'] if s['id'] > source_after_id][:20]
+    data['progress']['items'] = [{k: (item.get(k, '')[:240] if isinstance(item.get(k), str) else item.get(k)) for k in ('ticket_id', 'agent_slug', 'stage', 'state', 'phase', 'summary', 'updated_at', 'idle_seconds')} for item in data['progress']['items'][:16]]
+    data['recent_tools'] = [{**t, 'title': t['title'][:160]} for t in data['recent_tools'][:12]]
+    data['truncated'] = True
+    # Limit encoded bytes, including non-ASCII text. Prefer keeping assignments
+    # and pending requests visible; full messages/evidence have targeted reads.
+    for bucket in (data['recent_tools'], data['progress']['items'], data['messages'], data['reviews'], data['sources'], data['members'], data['tickets'], data['pending_requests']):
+        while len(json.dumps(data, ensure_ascii=False).encode('utf-8')) > 31900 and len(bucket) > 1:
+            bucket.pop(0 if bucket is data['messages'] else -1)
+    data['next_source_after_id'] = data['sources'][-1]['id'] if data['sources'] else source_after_id
+    return data
 
 
 def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, commit=True):
@@ -124,7 +166,7 @@ def request_review(conn, job_id, tid, actor, artifact_slug, reviewer):
     prior = conn.execute("SELECT * FROM peer_reviews WHERE ticket_id=? AND artifact_slug=? AND artifact_version=? AND reviewer=? AND status IN ('requested','accepted') ORDER BY id DESC LIMIT 1", (tid, artifact_slug, artifact['updated_at'], reviewer)).fetchone()
     if prior: return dict(prior)
     message = send(conn, job_id, actor, reviewer,
-        f'Please peer review [[{artifact_slug}]] for ticket #{tid}. Read the current page with wiki_get and the actual research_sources with source_get. Challenge unsupported claims, missing citations and misleading completion claims. Use team_review with accepted or changes_requested and concrete reasons. Explicitly reported source-access limitations are acceptable; invented verification is not.', kind='review_request', commit=False)
+        f'Please peer review [[{artifact_slug}]] for ticket #{tid}. Read the current page with wiki_get and the recorded file or web evidence with source_get. Use native tools or source_read_file to check current workspace files when relevant. Challenge unsupported claims, missing citations and misleading completion claims. Use team_review with accepted or changes_requested and concrete reasons. Explicitly reported source-access limitations are acceptable; invented verification is not.', kind='review_request', commit=False)
     stamp = api.now()
     rid = conn.execute('INSERT INTO peer_reviews(job_id,ticket_id,artifact_slug,artifact_version,author,reviewer,message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)', (job_id, tid, artifact_slug, artifact['updated_at'], actor, reviewer, message['id'], stamp, stamp)).lastrowid
     conn.commit()
@@ -161,7 +203,7 @@ def pending(conn, tid, actor):
 def context(conn, tid, actor, *, instructions=True):
     job = job_for_ticket(conn, tid)
     if not job or not job.get('collaboration_required'): return ''
-    data = room(conn, job['id'])
+    data = read_room(conn, job['id'])
     # Keep prompts small enough for local models: full source bodies and long
     # teammate artifacts remain available through source_get/wiki_get on demand.
     data['messages'] = [{
@@ -214,7 +256,7 @@ def validate_delivery(conn, tid, actor):
         if not answered: raise api.BadRequest('Ask another teammate a substantive question with team_send and receive a reply before delivery')
         sources = [dict(row) for row in conn.execute("SELECT * FROM research_sources WHERE job_id=? AND reader=? AND status='ok'", (job['id'], actor))]
         if not any(s['url'] in p['body'] or s['final_url'] in p['body'] for s in sources for p in pages):
-            raise api.BadRequest('Cite at least one source you actually retrieved with source_fetch in your linked evidence page')
+            raise api.BadRequest('Cite at least one source recorded with source_read_file or source_fetch in your linked evidence page')
 
 
 class _Text(HTMLParser):
@@ -267,6 +309,45 @@ def fetch_source(conn, job_id, actor, url):
     api.log_activity(conn, actor, 'source.' + status, f'ticket:{job_id}', url + (': ' + error if error else ''))
     conn.commit()
     return dict(conn.execute('SELECT * FROM research_sources WHERE id=?', (sid,)).fetchone())
+
+
+def read_file_source(conn, job_id, actor, path, start_line=1, end_line=None, *, ticket_id=None):
+    """Persist actual workspace text using the existing auditable source schema."""
+    from .workspace import workspace_path, DEFAULT_WORKSPACE
+    member(conn, job_id, actor)
+    ticket = api.get_ticket(conn, ticket_id or job_id)
+    job = job_for_ticket(conn, ticket['id'])
+    if not job or job['id'] != job_id:
+        raise api.BadRequest('Read file evidence only within your assigned job')
+    if ticket_id and ticket['assignee'] != actor:
+        raise api.BadRequest('Read file evidence from your assigned ticket workspace')
+    settings = dict(conn.execute('SELECT key,value FROM runner_settings'))
+    root = Path(workspace_path({'workspace': ticket.get('workspace') or job.get('workspace') or settings.get('workspace', str(DEFAULT_WORKSPACE))})).resolve()
+    candidate = Path(path)
+    candidate = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if not candidate.is_relative_to(root):
+        raise api.BadRequest('File evidence must stay within the assigned workspace')
+    if start_line < 1 or (end_line is not None and (end_line < start_line or end_line - start_line >= 200)):
+        raise api.BadRequest('Choose a valid range of at most 200 file lines')
+    try:
+        with candidate.open('rb') as stream:
+            raw = stream.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024: raise api.BadRequest('File evidence supports text files up to 2 MiB')
+        text = raw.decode('utf-8-sig')
+        if '\x00' in text: raise api.BadRequest('File evidence must be UTF-8 text')
+    except (OSError, UnicodeError) as exc:
+        raise api.BadRequest(f'Cannot read UTF-8 file evidence: {exc}') from exc
+    lines = text.splitlines()
+    end_line = end_line if end_line is not None else min(len(lines), start_line + 199)
+    if start_line > len(lines) or end_line > len(lines): raise api.BadRequest('Requested lines are outside the file')
+    excerpt = '\n'.join(f'{i + 1}: {lines[i]}' for i in range(start_line - 1, end_line))
+    if len(excerpt.encode('utf-8')) > 24000: raise api.BadRequest('File excerpt is too large; request fewer lines')
+    url = candidate.as_uri() + f'#L{start_line}-L{end_line}'
+    body = f'File: {candidate}\nSHA256: {hashlib.sha256(raw).hexdigest()}\nLines: {start_line}-{end_line}\n\n{excerpt}'
+    sid = conn.execute("INSERT INTO research_sources(job_id,reader,url,final_url,title,status,body,retrieved_at) VALUES(?,?,?,?,?,'ok',?,?)", (job_id, actor, url, url, candidate.name, body, api.now())).lastrowid
+    api.log_activity(conn, actor, 'source.ok', f'ticket:{job_id}', url)
+    conn.commit()
+    return source_get(conn, sid)
 
 
 def source_get(conn, source_id):

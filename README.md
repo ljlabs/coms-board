@@ -225,17 +225,24 @@ run now and delete controls are available in the dashboard.
 
 The lead's first turn exposes delegation tools only. `team_delegate` reuses a
 suitable specialist or registers a named teammate and creates a ready child
-ticket with the job's source URLs and collaboration requirements. Workers
-start after staffing finishes, so they can see the complete team roster.
-Research and response sessions expose board tools only through OpenCode;
-workspace edits and hidden backend subagents cannot substitute for board
-deliverables. Specialists cannot overwrite another teammate's wiki page.
+task with the job's workspace, source URLs and collaboration requirements;
+pass `type=research` for public-source research. Workers start after staffing
+finishes, so they can see the complete team roster. Every agent retains native
+tools for workspace inspection, commands and assigned work; the runner never
+disables tool support by role or ticket type. Board deliverables use MCP tools.
+Specialists cannot overwrite another teammate's wiki page. Execution turns
+have a 15-minute hard deadline, including continuously streaming backends;
+failed turns release their connection and use the existing bounded retries.
 
 New jobs require collaboration. Research delivery requires an answered
 teammate question, an attached evidence page with current peer approval, and
-a citation to content actually retrieved through `source_fetch`. The source
-record includes its real status, content and retrieval time; reviewers inspect
-it with `source_get`. The lead must wait for child reviews, write and attach a
+a citation to content recorded through `source_fetch` (public HTTPS) or
+`source_read_file` (workspace text). File records include numbered lines, a
+SHA256 hash and retrieval time; cite the returned URL and source ID. Reviewers
+inspect either kind with `source_get` and can use native tools to check current
+workspace files. `team_read` returns a bounded index; `message_id` and `offset`
+read long messages, and `source_after_id` pages the source index. The lead must
+wait for child reviews, write and attach a
 fresh synthesis, obtain its peer approval, and ensure the team published a new
 shared procedure. These checks verify recorded actions; factual quality still
 depends on the research and peer critique.

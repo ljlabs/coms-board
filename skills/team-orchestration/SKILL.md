@@ -11,6 +11,18 @@ Use this procedure for collaboration required jobs.
 
 Reuse suitable teammates with `agents_list`. In the staffing turn, use `team_delegate` to register or reuse a personally named specialist and create a ready child assignment. Put expertise in capabilities. Finish staffing before workers start, then record the staffing decision with `team_note`.
 
+Delegation defaults to `task` for workspace work and inherits the job workspace.
+Set `type=research` for public-source research. Every agent keeps native tools;
+use them to inspect code and run requested commands. For local audits, record
+relevant file lines with `source_read_file` and cite the returned URL/source ID.
+Use `source_fetch` for relevant public HTTPS evidence. Reviewers inspect both
+kinds with `source_get` and can check current files with native tools.
+
+`team_read` returns a bounded index with pending requests. Use `message_id` and
+`offset` for message details, `source_after_id` to page sources, and `source_get`
+for full evidence. Repeatedly polling unchanged output does not advance work;
+perform the assignment or record a concrete blocker and finish the turn.
+
 The lead delegates child tickets and waits for worker results and reviews. Only the lead owns the synthesis. After all workers finish, write a fresh combined wiki page, link it to the job, obtain a current revision peer review, and deliver with `ticket_result`.
 
 ## Workers and reviewers

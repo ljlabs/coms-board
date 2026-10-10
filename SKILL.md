@@ -25,6 +25,22 @@ logs, metrics) happens with your own tools. Everything else in knowledge work ha
 - Coordination — agents working at the same time share what they find, ask each other and hand
   work over through question and ticket comments (see *Working with other agents*).
 
+All agents retain native tools for inspecting their workspace and running
+commands. For local findings, record the relevant UTF-8 file lines using
+`source_read_file(job_id, path, start_line, end_line)` and cite its returned URL
+and source ID in the evidence page. Paths stay within the assigned workspace;
+each excerpt holds at most 200 lines. `source_get` gives reviewers the recorded
+text, file hash and retrieval time. Use `source_fetch` for relevant public HTTPS
+evidence. Local audits can satisfy the evidence gate with file sources.
+
+`team_delegate` creates a child `task` by default and inherits the job workspace;
+choose `type=research` for public-source research. `team_read` is a bounded index,
+including pending requests. Read a specific message with `message_id` and page
+long bodies with `offset`; page sources with `source_after_id`, then use
+`source_get` for the full record. Act on the assignment when reads stop revealing
+new information. Execution turns have a 15-minute hard deadline and bounded
+retries; record blockers and actual test outcomes before finishing.
+
 If it is not on the board, the team does not know it. Do not leave plans, status, findings or
 open questions only in chat, agent memory, scratch files or a separate notes folder. Write them
 here, and link to the board from anywhere else. When research or building produces something the
