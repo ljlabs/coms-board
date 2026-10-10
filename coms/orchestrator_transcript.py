@@ -9,6 +9,25 @@ from . import db
 from .api import now
 
 
+_changes = threading.Condition()
+_revision = 0
+
+
+def publish_change():
+    """Wake live readers only after a transcript transaction has committed."""
+    global _revision
+    with _changes:
+        _revision += 1
+        _changes.notify_all()
+
+
+def wait_for_change(revision=None, timeout=1):
+    with _changes:
+        if revision == _revision:
+            _changes.wait_for(lambda: revision != _revision, timeout=timeout)
+        return _revision
+
+
 def message_dict(row):
     out = dict(row)
     try:
@@ -17,6 +36,29 @@ def message_dict(row):
         out['data'] = {}
     if not isinstance(out['data'], dict): out['data'] = {}
     return out
+
+
+def conversation_messages(conn, sid):
+    """Expose older thought chunks that were stored as diagnostic events."""
+    result = []
+    rows = conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND "
+                        "(kind!='log' OR body LIKE '%\"agent_thought_chunk\"%') ORDER BY id", (sid,))
+    for row in rows:
+        entry = message_dict(row)
+        if entry['kind'] == 'log':
+            try: event = json.loads(entry['body'])
+            except (TypeError, ValueError): continue
+            if not isinstance(event, dict) or event.get('sessionUpdate') != 'agent_thought_chunk': continue
+            content = event.get('content')
+            if not isinstance(content, dict) or content.get('type') != 'text' or not isinstance(content.get('text'), str): continue
+            entry.update(kind='thinking', role='assistant', body=content['text'], data={'legacy': True})
+            if result and result[-1]['kind'] == 'thinking' and result[-1]['data'].get('legacy') and result[-1]['turn_id'] == entry['turn_id']:
+                result[-1]['body'] += entry['body']
+                result[-1]['version'] += entry['version']
+                result[-1]['updated_at'] = entry['updated_at']
+                continue
+        result.append(entry)
+    return result
 
 
 def _insert(conn, sid, turn_id, role, kind, body='', *, data=None,
@@ -41,6 +83,7 @@ def begin_turn(sid, text, backend, model, workspace):
                      'VALUES(?,?,?,?,?,?,?)',(turn_id,sid,user_id,backend,model,workspace,ts))
         conn.execute("UPDATE orchestrator_sessions SET title=CASE WHEN title='New chat' THEN ? ELSE title END,updated_at=? WHERE id=?",
                      (text[:60],ts,sid))
+    publish_change()
     return (dict(conn.execute('SELECT * FROM orchestrator_turns WHERE id=?',(turn_id,)).fetchone()),
             message_dict(conn.execute('SELECT * FROM orchestrator_messages WHERE id=?',(user_id,)).fetchone()))
 
@@ -57,6 +100,7 @@ class Transcript:
         self.user_id = turn['user_message_id']
         self.current_text = None
         self.current_message = None
+        self.current_kind = None
         self.lock = threading.RLock()
         self.finished = turn['status'] != 'running'
 
@@ -66,6 +110,7 @@ class Transcript:
                          (state,now(),self.current_text))
         self.current_text = None
         self.current_message = None
+        self.current_kind = None
 
     def _log(self, conn, event):
         _insert(conn,self.sid,self.turn_id,'system','log',json.dumps(event,ensure_ascii=False))
@@ -74,6 +119,7 @@ class Transcript:
         with self.lock:
             with db.connect() as conn:
                 _insert(conn,self.sid,self.turn_id,'system','log',str(line))
+            publish_change()
 
     def _tool(self, conn, event):
         ident = event.get('toolCallId')
@@ -110,7 +156,8 @@ class Transcript:
             if self.finished: return
             with db.connect() as conn:
                 kind = event.get('sessionUpdate')
-                if kind == 'agent_message_chunk':
+                if kind in ('agent_message_chunk', 'agent_thought_chunk'):
+                    message_kind = 'thinking' if kind == 'agent_thought_chunk' else 'text'
                     content = event.get('content')
                     if not isinstance(content,dict): return
                     body = content.get('text') if content.get('type') == 'text' else None
@@ -118,13 +165,14 @@ class Transcript:
                     if body == '': return
                     ident = event.get('messageId')
                     if ident is not None and not isinstance(ident,str): ident = None
-                    if self.current_text and ident is not None and ident != self.current_message:
+                    if self.current_text and (message_kind != self.current_kind or (ident is not None and ident != self.current_message)):
                         self._seal(conn)
                     if not self.current_text:
-                        self.current_text = _insert(conn,self.sid,self.turn_id,'assistant','text',body or '',
+                        self.current_text = _insert(conn,self.sid,self.turn_id,'assistant',message_kind,body or '',
                                                     state='streaming',acp_message_id=ident,
                                                     data={} if body is not None else {'blocks':[content]})
                         self.current_message = ident
+                        self.current_kind = message_kind
                     elif body is not None:
                         row=conn.execute('SELECT * FROM orchestrator_messages WHERE id=?',(self.current_text,)).fetchone()
                         data=message_dict(row)['data']
@@ -159,6 +207,7 @@ class Transcript:
                         _insert(conn,self.sid,self.turn_id,'system','plan',data=data)
                 else:
                     self._log(conn,event)
+            publish_change()
 
     def permission(self, params, decision):
         with self.lock:
@@ -167,6 +216,7 @@ class Transcript:
             if not isinstance(tool,dict): return
             with db.connect() as conn:
                 self._tool(conn,{**tool,'permission':decision})
+            publish_change()
 
     def finish(self, stop_reason='', *, error='', status=None):
         with self.lock:
@@ -196,7 +246,7 @@ class Transcript:
                     explanation = 'The backend ended this turn without reporting a final tool result.'
                 if status=='failed' and not explanation:
                     explanation = 'The backend stopped unexpectedly' + (f' ({stop_reason}).' if stop_reason else '.')
-                public = conn.execute("SELECT 1 FROM orchestrator_messages WHERE turn_id=? AND role IN ('assistant','tool') LIMIT 1",(self.turn_id,)).fetchone()
+                public = conn.execute("SELECT 1 FROM orchestrator_messages WHERE turn_id=? AND kind IN ('text','tool_call') AND role IN ('assistant','tool') LIMIT 1",(self.turn_id,)).fetchone()
                 if not public and not explanation:
                     explanation = 'The backend ended this turn without public output.'
                 if explanation:
@@ -204,6 +254,7 @@ class Transcript:
                 conn.execute('UPDATE orchestrator_turns SET status=?,stop_reason=?,error=?,finished_at=? WHERE id=?',
                              (status,stop_reason,error,now(),self.turn_id))
             self.finished = True
+            publish_change()
 
 
 def history_before(sid, user_message_id):

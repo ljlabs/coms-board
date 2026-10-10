@@ -169,6 +169,9 @@
         node.classList.add('chat-error');node.innerHTML='<div class="chat-role">Response status</div><div class="chat-text"></div>';
       } else if (m.kind==='plan') {
         node.classList.add('chat-plan');node.innerHTML='<div class="chat-role">Plan</div><div class="chat-plan-entries"></div>';
+      } else if (m.kind==='thinking') {
+        node.classList.add('chat-thinking');
+        node.innerHTML='<details class="chat-thinking-section"><summary><svg class="chat-thinking-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg><span>Thinking</span><small class="chat-thinking-state"></small></summary><div class="chat-thinking-body"><div class="chat-text"></div><div class="chat-content-blocks"></div></div></details>';
       } else {
         node.classList.add(m.role==='assistant'?'assistant':'user');
         node.innerHTML='<div class="chat-role"></div><div class="chat-text"></div><div class="chat-content-blocks"></div>';
@@ -216,6 +219,7 @@
         node._hasBlocks=Boolean(data.blocks?.length);
         if (node.querySelector('.chat-content-blocks')) contentBlocks(node.querySelector('.chat-content-blocks'),data.blocks || [],m.role==='assistant');
         node.dataset.state=m.state || 'completed';
+        if (m.kind==='thinking') setText(node.querySelector('.chat-thinking-state'),m.state==='streaming'?'In progress':m.state==='completed'?'Complete':labels[m.state] || 'Complete');
       }
       node._signature=signature;
     }
@@ -255,7 +259,7 @@
     let activeId=h.sessionId || sessions[0]?.id;
     if (!activeId) {activeId=(await api('POST','/api/runner/sessions',{title:'New chat'})).id;sessions=await GET('/api/runner/sessions');}
     let detail=await GET(`/api/runner/sessions/${encodeURIComponent(activeId)}`);
-    let sending=false, loadedLogs=false, requestSerial=0;
+    let sending=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
     const path=`/api/runner/sessions/${encodeURIComponent(activeId)}`;
     const expandedGroups=new Set([detail.project_id?`project:${detail.project_id}`:'root']);
     let pickerTarget=null,pickerData=null,folderRequestSerial=0,folderAction=null,folderSaving=false,projectWorkspace='',creatingProject=false;
@@ -284,6 +288,45 @@
       <dialog id="chat-folder-edit" class="chat-project-dialog chat-folder-edit" aria-labelledby="folder-edit-title"><form id="folder-edit-form"><div class="chat-folder-head"><b id="folder-edit-title">New folder</b><button type="button" class="chat-delete" data-close-folder-edit aria-label="Close folder action">×</button></div><div class="chat-project-form-body"><small id="folder-edit-path"></small><div id="folder-edit-name-field"><label for="folder-edit-name">Folder name</label><input id="folder-edit-name" name="name" required maxlength="255" autocomplete="off"></div><p id="folder-edit-description"></p><p id="folder-edit-error" role="alert" hidden></p></div><div class="chat-project-form-actions"><button type="button" class="btn" data-close-folder-edit>Cancel</button><button type="submit" class="btn primary" id="folder-edit-save">Create folder</button></div></form></dialog>
     </section>`);
     const box=$('#chat-messages');
+    const activity=document.createElement('div');activity.id='chat-activity';activity.className='chat-activity';activity.hidden=true;
+    activity.setAttribute('role','status');activity.setAttribute('aria-live','polite');
+    activity.innerHTML='<div class="chat-loading-art" aria-hidden="true"></div><span>Thinking…</span>';
+    box.parentElement.append(activity);
+    const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
+    let animation=null,animationLoading=false;
+    function updateActivity() {
+      const working=Boolean(sending || detail.busy || detail.active_turn_id);
+      activity.hidden=!working;
+      box.parentElement.classList.toggle('chat-is-working',working);
+      const activeMessages=(detail.messages || []).filter(message=>message.turn_id===detail.active_turn_id);
+      const latest=activeMessages[activeMessages.length-1];
+      setText(activity.querySelector('span'),sending?'Sending…':latest?.kind==='text'?'Responding…':latest?.kind==='tool_call'?'Working…':'Thinking…');
+      if (animation) {
+        if (reducedMotion.matches) animation.goToAndStop(45,true);
+        else if (working && !document.hidden) animation.play();
+        else animation.pause();
+      } else if (working && !animationLoading && window.lottie) {
+        animationLoading=true;
+        GET('/animations/chat-loading-neobrutalist.json').then(data=>{
+          if (!box.isConnected || h.signal?.aborted) return;
+          animation=window.lottie.loadAnimation({container:activity.querySelector('.chat-loading-art'),renderer:'svg',loop:true,autoplay:false,animationData:data,rendererSettings:{progressiveLoad:true,hideOnTransparent:true}});
+          animation.setSubframe(false);
+          animation.addEventListener('DOMLoaded',updateActivity);
+          updateActivity();
+        }).catch(()=>{ /* The text status remains visible if the artwork cannot load. */ });
+      }
+    }
+    document.addEventListener('visibilitychange',updateActivity);
+    document.addEventListener('selectionchange',queueStreamRender);
+    reducedMotion.addEventListener('change',updateActivity);
+    h.onCleanup?.(()=>{
+      document.removeEventListener('visibilitychange',updateActivity);
+      document.removeEventListener('selectionchange',queueStreamRender);
+      reducedMotion.removeEventListener('change',updateActivity);
+      animation?.destroy();
+      streamSource?.close();
+      if (renderFrame!==null) cancelAnimationFrame(renderFrame);
+    });
     const groups=$('#orch-sidebar .chat-projects');
     function renderGroups() { groups.innerHTML=projectList(); }
     function renderProjectWorkspace() {
@@ -302,7 +345,10 @@
     $('#chat-latest').onclick=()=>{box.scrollTop=box.scrollHeight;onScroll();};
 
     function applyDetail() {
+      const scroll=h.scrollState(box);
+      updateActivity();
       transcript.sync(detail);
+      h.restoreScroll(box,scroll);onScroll();
       const otherBusy=detail.runner_busy && !detail.busy;
       const states={completed:'ready',running:'working',failed:'failed',interrupted:'interrupted',cancelled:'cancelled',refused:'declined',limited:'limit reached'};
       const status=$('#chat-status');setText(status,detail.busy?'working':otherBusy?'runner busy':states[detail.state] || 'ready');
@@ -322,6 +368,41 @@
       const next=await GET(path+(includeLogs?'?include_logs=1':''));
       if (serial!==requestSerial || !box.isConnected) return;
       detail=next;$('#chat-connection').hidden=true;applyDetail();
+    }
+    function queueStreamRender() {
+      if (renderFrame!==null) return;
+      renderFrame=requestAnimationFrame(()=>{renderFrame=null;if (box.isConnected) applyDetail();});
+    }
+    function startStream() {
+      if (!window.EventSource || h.signal?.aborted) return;
+      streamSource=new EventSource(path+'/events');
+      function receive(event,snapshot) {
+        if (!box.isConnected || h.signal?.aborted) return;
+        try {
+          const next=JSON.parse(event.data);
+          ++requestSerial; // An older poll must not replace a newly streamed patch.
+          if (snapshot) detail={...next,logs:loadedLogs?detail.logs:next.logs};
+          else {
+            const messages=new Map(detail.messages.map(message=>[String(message.id),message]));
+            for (const id of next.removed || []) messages.delete(String(id));
+            for (const message of next.messages || []) messages.set(String(message.id),message);
+            detail={...detail,...next,messages:[...messages.values()].sort((a,b)=>a.id-b.id)};
+          }
+          streamHealthy=true;$('#chat-connection').hidden=true;queueStreamRender();
+        } catch (error) {streamHealthy=false;connectionError(error);}
+      }
+      streamSource.addEventListener('snapshot',event=>receive(event,true));
+      streamSource.addEventListener('update',event=>receive(event,false));
+      streamSource.addEventListener('session-deleted',()=>{
+        streamSource.close();streamHealthy=false;
+        connectionError(new Error('This chat was deleted. Choose another chat.'));
+      });
+      streamSource.onerror=()=>{
+        if (!box.isConnected || h.signal?.aborted) return;
+        streamHealthy=false;
+        setText($('#chat-connection'),'Reconnecting to live responses…');$('#chat-connection').hidden=false;
+      };
+      h.signal?.addEventListener('abort',()=>streamSource.close(),{once:true});
     }
     async function loadFolders(pathValue='') {
       const serial=++folderRequestSerial;
@@ -468,7 +549,7 @@
       sending=true;applyDetail();
       try {
         const result=await api('POST',path+'/messages',{body});
-        // The response carries the canonical stored ID; polling cannot duplicate it.
+        // Streaming and the send response share canonical IDs, avoiding duplicates.
         if (result.message && !detail.messages.some(m=>m.id===result.message.id)) detail.messages.push(result.message);
         if (input.value.trim()===body) input.value='';
         detail.busy=true;detail.runner_busy=true;applyDetail();
@@ -477,7 +558,16 @@
       finally {sending=false;if (box.isConnected) applyDetail();}
     };
     $('#chat-input').onkeydown=event=>{if (event.key==='Enter' && !event.shiftKey && !event.isComposing) {event.preventDefault();$('#chat-form').requestSubmit();}};
-    poll(async()=>{try {await fetchDetail();}catch(error){connectionError(error);}},1400);
+    startStream();
+    poll(async()=>{
+      try {
+        if (!streamHealthy) await fetchDetail();
+        else if (loadedLogs && transcript.diagnostics.open) {
+          const next=await GET(path+'?include_logs=1');
+          if (box.isConnected) {detail.logs=next.logs;detail.log_count=next.log_count;queueStreamRender();}
+        }
+      } catch(error) {connectionError(error);}
+    },1400);
   }
   window.OrchestratorChat={mount};
 })();

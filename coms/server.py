@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -124,7 +125,70 @@ class Handler(BaseHTTPRequestHandler):
         u = urlsplit(self.path)
         if not u.path.startswith("/api/"):
             return self._static(u.path)
+        stream = re.fullmatch(r"/api/runner/sessions/([^/]+)/events", u.path)
+        if stream:
+            return self._orchestrator_events(stream.group(1))
         self._dispatch("GET", u.path, parse_qs(u.query, keep_blank_values=True), {})
+
+    def _orchestrator_events(self, sid):
+        """Stream canonical message patches; reconnects begin with a snapshot."""
+        from .runner import RUNNER
+        from .orchestrator_transcript import wait_for_change
+        revision = wait_for_change()
+        detail = RUNNER.orchestrator_detail(sid)
+        if detail is None: return self._json(404, {"error": "session not found"})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+        self.connection.settimeout(30)
+        versions, previous_meta = {}, None
+        last_write = time.monotonic()
+
+        def send(event, payload):
+            raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+            self.wfile.write(f"event: {event}\ndata: {raw}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            first = True
+            while True:
+                if detail is None:
+                    send('session-deleted', {'id': sid})
+                    break
+                messages = detail['messages']
+                current = {entry['id']: entry['version'] for entry in messages}
+                meta = {key: value for key, value in detail.items() if key not in ('messages', 'logs')}
+                meta_signature = json.dumps(meta, sort_keys=True)
+                changed = [entry for entry in messages if versions.get(entry['id']) != entry['version']]
+                removed = sorted(versions.keys() - current.keys())
+                if first:
+                    send('snapshot', detail)
+                elif changed or removed or meta_signature != previous_meta:
+                    send('update', {**meta, 'messages': changed, 'removed': removed})
+                elif time.monotonic() - last_write >= 10:
+                    self.wfile.write(b': heartbeat\n\n')
+                    self.wfile.flush()
+                else:
+                    revision = wait_for_change(revision)
+                    detail = RUNNER.orchestrator_detail(sid)
+                    continue
+                versions, previous_meta = current, meta_signature
+                first = False
+                last_write = time.monotonic()
+                # Coalesce fast token bursts while keeping delivery interactive.
+                time.sleep(0.04)
+                revision = wait_for_change(revision)
+                detail = RUNNER.orchestrator_detail(sid)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+            pass
+        except Exception:
+            traceback.print_exc()
+        finally:
+            conn = getattr(db._local, 'conn', None)
+            if conn: conn.close(); db._local.__dict__.clear()
 
     def do_POST(self):
         if not self._trusted_request(): return

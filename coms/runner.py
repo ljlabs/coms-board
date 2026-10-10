@@ -6,7 +6,7 @@ from pathlib import Path
 from . import api, db, progress, team
 from .acp import AcpConnection, AcpError
 from .workspace import DEFAULT_WORKSPACE, workspace_directory_browser, workspace_folder_change, workspace_folder_target, workspace_path
-from .orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
+from .orchestrator_transcript import Transcript, begin_turn, conversation_messages, history_before, message_dict, publish_change, recover_turns
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
@@ -843,7 +843,7 @@ class Runner:
         conn=db.connect(); row=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
         if not row: return None
         out=dict(row)
-        out['messages']=[message_dict(r) for r in conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND kind!='log' ORDER BY id",(sid,))]
+        out['messages']=conversation_messages(conn,sid)
         out['logs']=[message_dict(r) for r in conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND kind='log' ORDER BY id",(sid,))] if include_logs else []
         out['log_count']=conn.execute("SELECT count(*) FROM orchestrator_messages WHERE session_id=? AND kind='log'",(sid,)).fetchone()[0]
         out['turns']=[dict(r) for r in conn.execute('SELECT * FROM orchestrator_turns WHERE session_id=? ORDER BY started_at,id',(sid,))]
@@ -902,7 +902,7 @@ class Runner:
                         update = p.get('update') or {}
                         recorder = self.orchestrator_context.get('recorder')
                         if recorder: recorder.notification(update)
-                        if update.get('sessionUpdate') != 'agent_thought_chunk': transcript.apply(update)
+                        transcript.apply(update)
                 def request(msg,respond):
                     if msg.get('method')!='session/request_permission': raise AcpError('Method not found',code=-32601)
                     params=msg.get('params') or {}
@@ -1001,6 +1001,7 @@ class Runner:
                 with self.orchestrator_conn_lock:
                     c.close(); self.orchestrator_conn=None; self.orchestrator_conn_key=None
             with self.lock: self.orchestrator_busy=False; self.orchestrator_session=None
+            publish_change()
             conn=getattr(db._local,'conn',None)
             # Direct callers/tests retain their connection; background workers
             # release the per-thread database handle when the turn is finished.

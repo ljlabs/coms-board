@@ -220,6 +220,20 @@ position and expanded cards, and reopening a chat restores the stored entries.
 Older responses that were already merged into one bubble remain as stored;
 their original message boundaries and tool details cannot be reconstructed.
 
+Assistant responses and tool updates stream through a same-origin server-sent
+event feed while the backend responds. Reconnecting restores the canonical
+stored conversation; polling remains available if streaming is disconnected.
+Backend thinking traces appear under **Thinking**, collapsed initially, and stay
+separate from the assistant's answer. Expand a section to read its trace while
+it arrives. Traces are shown only when the selected backend supplies them;
+older thought chunks stored in diagnostic logs also appear in these sections.
+
+The supplied `animations/chat-loading-neobrutalist.json` plays at the bottom right above the
+composer while the current chat is sending, thinking, or responding. The player
+and web asset are bundled locally; no CDN is needed. Playback stops when the
+response finishes or the page is hidden, and reduced-motion preferences use a
+still frame. The composer remains available for drafting the next message.
+
 The orchestrator creates prioritized tickets; each ticket remains out of the
 execution queue until **Ready for agent execution** is enabled on that ticket.
 Human assignees and tickets tagged `human` are always excluded. Ticket chat

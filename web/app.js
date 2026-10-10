@@ -837,8 +837,10 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
 
   route(/^\/orchestrator$/, async () => {
     setTab('orchestrator');
+    const owner=view;
     await OrchestratorChat.mount({api,GET,paint,poll,scrollState,restoreScroll,hasSelection,ago,fail,
-      refresh:render,esc,sessionId:qs().session});
+      refresh:render,esc,sessionId:qs().session,signal:owner.controller.signal,
+      onCleanup:callback=>owner.cleanup.push(callback)});
   });
 
   route(/^\/debug$/, async () => {
