@@ -153,8 +153,8 @@
         node.innerHTML='<details class="chat-tool-call"><summary class="chat-tool-summary"><svg class="chat-tool-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="3"/><path d="m6 7 3 3-3 3m5 0h3"/></svg><span class="chat-tool-title"></span><svg class="chat-tool-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary><div class="chat-tool-panel"><div class="chat-tool-panel-head"><div class="chat-tool-context"></div><button type="button" class="chat-tool-copy" aria-label="Copy tool data" title="Copy tool data"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="3" width="10" height="11" rx="2"/><path d="M12 14v3H3V6h3"/></svg></button></div><div class="chat-tool-controls"><div class="chat-tool-tabs" role="group" aria-label="Tool data"><button type="button" data-tool-view="input">Input</button><button type="button" data-tool-view="output">Output</button></div><div class="chat-tool-tabs chat-tool-format" role="group" aria-label="Data format"><button type="button" data-tool-format="formatted">Formatted</button><button type="button" data-tool-format="raw">Raw</button></div></div><div class="chat-tool-payload"><pre></pre><div class="chat-tool-content-blocks"></div></div><div class="chat-tool-footer"><div class="chat-tool-workspace"></div><div class="chat-tool-result"><span class="chat-tool-result-icon" aria-hidden="true"></span><span class="chat-tool-status" role="status"></span><span class="chat-tool-exit"></span></div></div></div></details>';
         const fields=document.createElement('div');fields.className='chat-tool-fields';fields.hidden=true;node.querySelector('.chat-tool-payload').prepend(fields);
         const more=document.createElement('button');more.type='button';more.className='chat-tool-more';more.hidden=true;node.querySelector('.chat-tool-payload').insertBefore(more,node.querySelector('.chat-tool-content-blocks'));
-        node.querySelector('.chat-tool-call').open=['pending','in_progress'].includes(m.state || m.data?.status);
-        node._toolView=['pending','in_progress'].includes(m.state || m.data?.status)?'input':'output';node._toolFormat='formatted';node._toolFull={input:false,output:false};
+        node.querySelector('.chat-tool-call').open=false;
+        node._toolView='output';node._toolFormat='formatted';node._toolFull={input:false,output:false};
         node.querySelectorAll('[data-tool-view]').forEach(button=>button.onclick=()=>{node._toolView=button.dataset.toolView;showToolPayload(node);});
         node.querySelectorAll('[data-tool-format]').forEach(button=>button.onclick=()=>{node._toolFormat=button.dataset.toolFormat;showToolPayload(node);});
         const copy=node.querySelector('.chat-tool-copy');
@@ -176,6 +176,28 @@
         node.classList.add(m.role==='assistant'?'assistant':'user');
         node.innerHTML='<div class="chat-role"></div><div class="chat-text"></div><div class="chat-content-blocks"></div>';
         setText(node.querySelector('.chat-role'),m.role==='assistant'?'Orchestrator':'You');
+        if (m.kind==='text' && ['user','assistant'].includes(m.role)) {
+          node.classList.add('chat-text-message');
+          const bubble=document.createElement('div');bubble.className='chat-bubble';
+          bubble.append(...node.childNodes);node.append(bubble);
+          const actions=document.createElement('div');actions.className='chat-message-actions';
+          actions.innerHTML='<span class="chat-copy-feedback" role="status" aria-live="polite"></span><button type="button" class="chat-message-copy" aria-label="Copy message" title="Copy message"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="3" width="10" height="11"/><path d="M12 14v3H3V6h3"/></svg></button>';
+          node.append(actions);
+          const copy=actions.querySelector('button'),feedback=actions.querySelector('.chat-copy-feedback');
+          copy.onclick=async()=>{
+            copy.disabled=true;
+            clearTimeout(copy._feedbackTimer);
+            let label;
+            try {await navigator.clipboard.writeText(node._messageText || '');label='Copied';}
+            catch (_) {label='Copy unavailable';}
+            if (!node.isConnected) return;
+            setText(feedback,label);copy.title=label;copy.setAttribute('aria-label',label);copy.disabled=false;
+            copy.classList.toggle('is-copied',label==='Copied');
+            copy._feedbackTimer=setTimeout(()=>{
+              setText(feedback,'');copy.title='Copy message';copy.setAttribute('aria-label','Copy message');copy.classList.remove('is-copied');
+            },1800);
+          };
+        }
       }
       update(node,m);return node;
     }
@@ -216,6 +238,7 @@
         if (m.role==='assistant') { if (node._body!==m.body || node._hasBlocks!==Boolean(data.blocks?.length)) text.innerHTML=data.blocks?.length?'':MD.render(m.body || ''); }
         else setText(text,m.body || '');
         node._body=m.body;
+        node._messageText=m.body || (data.blocks || []).filter(block=>block?.type==='text').map(block=>block.text || '').join('\n\n');
         node._hasBlocks=Boolean(data.blocks?.length);
         if (node.querySelector('.chat-content-blocks')) contentBlocks(node.querySelector('.chat-content-blocks'),data.blocks || [],m.role==='assistant');
         node.dataset.state=m.state || 'completed';
@@ -269,14 +292,14 @@
       const items=sessions.filter(s=>String(s.project_id || '')===String(isRoot?'':project.id));
       const workspace=isRoot?rootWorkspace:(project.workspace || 'Uses root workspace');
       const heading=isRoot?'Unsorted':project.name;
-      return `<details class="chat-project" data-group-key="${key}"${expandedGroups.has(key)?' open':''}><summary class="chat-project-head"><span class="chat-project-name">${esc(heading)}</span><span class="chat-project-count">${items.length}</span><button class="chat-project-add" type="button" data-new-chat-project="${isRoot?'':project.id}" aria-label="New chat in ${esc(heading)}" title="New chat in ${esc(heading)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4H4v12h12v-6M11 9l6-6 2 2-6 6-3 1z"/></svg></button>${!isRoot?`<button class="chat-delete" type="button" data-delete-project="${project.id}" aria-label="Delete project ${esc(project.name)}" title="Delete project">×</button>`:''}</summary><div class="chat-project-body"><div class="chat-project-workspace"><span><b>Workspace</b><small>${esc(workspace)}</small></span><button class="btn sm" type="button" data-pick-workspace="${isRoot?'root':project.id}">Choose folder</button>${!isRoot?`<button class="chat-inherit" type="button" data-inherit-workspace="${project.id}"${project.workspace?'':' hidden'}>Use root</button>`:''}</div><div class="chat-project-chats">${items.map(sessionLink).join('') || '<small class="muted">Use the new chat icon above to start a chat.</small>'}</div></div></details>`;
+      return `<details class="chat-project" data-group-key="${key}"${expandedGroups.has(key)?' open':''}><summary class="chat-project-head"><span class="chat-project-name">${esc(heading)}</span><span class="chat-project-count">${items.length}</span><button class="chat-project-add" type="button" data-new-chat-project="${isRoot?'':project.id}" aria-label="New chat in ${esc(heading)}" title="New chat in ${esc(heading)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4H4v12h12v-6M11 9l6-6 2 2-6 6-3 1z"/></svg></button>${!isRoot?`<button class="chat-delete" type="button" data-delete-project="${project.id}" aria-label="Delete project ${esc(project.name)}" title="Delete project">×</button>`:''}</summary><div class="chat-project-body"><div class="chat-project-workspace"><span><b>Workspace</b><small>${esc(workspace)}</small></span><button class="btn sm" type="button" data-pick-workspace="${isRoot?'root':project.id}">Choose folder</button></div><div class="chat-project-chats">${items.map(sessionLink).join('') || '<small class="muted">Use the new chat icon above to start a chat.</small>'}</div></div></details>`;
     }
     function projectList() {
       return groupMarkup(null)+projects.map(groupMarkup).join('');
     }
     paint(`<section class="chat-page" id="orch-page">
       <aside class="chat-sidebar" id="orch-sidebar"><div class="chat-side-head"><b>Chats</b><button class="btn sm" id="new-project">+ Project</button></div><button class="btn primary chat-new" id="new-chat">＋ New chat</button><div class="chat-projects">${projectList()}</div></aside>
-      <div class="chat-main"><div class="chat-head"><button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button><div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div><label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label><span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span><button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button><button type="button" class="chat-inherit" id="reset-current-workspace" hidden>Use root</button></div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="Message the orchestrator" placeholder="Message the orchestrator…"></textarea><button class="btn primary">Send</button></form></div>
+      <div class="chat-main"><div class="chat-head"><button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button><div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div><label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label><span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span><button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button></div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="Message the orchestrator" placeholder="Message the orchestrator…"></textarea><button class="btn primary">Send</button></form></div>
       <dialog id="project-create" class="chat-project-dialog" aria-labelledby="project-create-title"><form id="project-create-form">
         <div class="chat-folder-head"><b id="project-create-title">Create project</b><button type="button" class="chat-delete" data-close-project aria-label="Close create project">×</button></div>
         <div class="chat-project-form-body"><label for="project-name">Project name</label><input id="project-name" name="name" placeholder="Project name" required maxlength="200" autocomplete="off">
@@ -358,7 +381,6 @@
       setText($('#chat-subtitle'),detail.busy?'Orchestrator is responding':otherBusy?'Another chat is using the orchestrator':`ACP · ${detail.backend || 'default'} · ${detail.model || 'ACP default'}`);
       setText($('#chat-workspace span'),`Workspace: ${detail.workspace || 'unavailable'}${detail.workspace_error?` · ${detail.workspace_error}`:''}`);
       $('#move-project').value=detail.project_id || '';
-      $('#reset-current-workspace').hidden=!projects.find(project=>String(project.id)===String(detail.project_id))?.workspace;
       const current=sessions.find(s=>s.id===activeId);
       if (current && current.title!==detail.title) {current.title=detail.title;current.updated_at=detail.updated_at;renderGroups();}
     }
@@ -490,11 +512,6 @@
     transcript.diagnostics.addEventListener('toggle',()=>{if (transcript.diagnostics.open) {loadedLogs=true;fetchDetail(true).catch(connectionError);}});
     $('#new-chat').onclick=async()=>{try {const session=await api('POST','/api/runner/sessions',{title:'New chat',project_id:detail.project_id || null});location.hash=`#/orchestrator?session=${encodeURIComponent(session.id)}`;}catch(error){fail(error);}};
     $('#pick-current-workspace').onclick=()=>openFolderPicker(detail.project_id?String(detail.project_id):'root');
-    $('#reset-current-workspace').onclick=async()=>{
-      if (!detail.project_id) return;
-      try {await api('PATCH',`/api/runner/projects/${encodeURIComponent(detail.project_id)}`,{workspace:''});projects=await GET('/api/runner/projects');renderGroups();await fetchDetail();}
-      catch(error){fail(error);}
-    };
     $('#folder-up').onclick=()=>{if(pickerData?.parent)loadFolders(pickerData.parent);};
     $('#folder-new').onclick=()=>{if(pickerData?.can_create)openFolderAction('create',pickerData.path);};
     $('#folder-entries').onclick=event=>{
@@ -509,8 +526,6 @@
       if (create) {event.preventDefault();event.stopPropagation();try {const session=await api('POST','/api/runner/sessions',{title:'New chat',project_id:create.dataset.newChatProject || null});location.hash=`#/orchestrator?session=${encodeURIComponent(session.id)}`;}catch(error){fail(error);}return;}
       const pick=event.target.closest('[data-pick-workspace]');
       if (pick) {event.preventDefault();event.stopPropagation();openFolderPicker(pick.dataset.pickWorkspace==='root'?'root':pick.dataset.pickWorkspace);return;}
-      const inherit=event.target.closest('[data-inherit-workspace]');
-      if (inherit) {event.preventDefault();event.stopPropagation();try {await api('PATCH',`/api/runner/projects/${encodeURIComponent(inherit.dataset.inheritWorkspace)}`,{workspace:''});projects=await GET('/api/runner/projects');renderGroups();await fetchDetail();}catch(error){fail(error);}return;}
       const button=event.target.closest('[data-delete-chat],[data-delete-project]');if (!button) return;event.preventDefault();
       try {
         if (button.dataset.deleteChat) {

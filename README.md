@@ -207,8 +207,10 @@ messages and coalesces streamed text. Automatic reviews have a three-minute
 total limit; a timeout stays visible and leaves the ticket in review.
 
 Orchestrator responses appear as an ordered conversation: assistant commentary,
-tool calls, and the final answer each keep their own entry. Completed tools
-appear as compact activity rows. Expand a row to switch between **Input** and
+tool calls, and the final answer each keep their own entry. Every user and
+assistant text bubble has a copy icon outside its lower right corner for copying
+the complete message text. Tool calls start collapsed, including running tools,
+with **Output** and **Formatted** selected. Expand a row to switch between **Input** and
 **Output**, and between **Formatted** and **Raw** data. Shell input shows its
 command and working directory; output stays readable as terminal text. The
 workspace and nonzero exit status remain visible in the panel, with a copy
