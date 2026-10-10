@@ -311,11 +311,24 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .timeline .tl .who { font-family: var(--mono); font-size: .75rem; }
 .timeline .tl.status .txt, .timeline .tl.assign .txt { font-family: var(--mono); font-size: .8rem; background: var(--paper); border: 2px solid var(--ink); display: inline-block; padding: .1rem .5rem; }
 .kanban { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem; }
-.kanban .colm { border: var(--line); background: var(--paper-2); box-shadow: var(--shadow-sm); min-height: 200px; }
+.kanban .colm { border: var(--line); background: var(--paper-2); box-shadow: var(--shadow-sm); min-height: 200px; min-width: 0; }
 .kanban .colm h3 { margin: 0; padding: .5rem .7rem; border-bottom: var(--line); font-size: .8rem; display: flex; justify-content: space-between; }
-.kanban .kcard { border: 2px solid var(--ink); margin: .6rem; padding: .5rem .6rem; background: var(--paper); font-size: .85rem; }
+.kanban .kcard { border: 2px solid var(--ink); margin: .6rem; padding: .5rem .6rem; background: var(--paper); font-size: .85rem; overflow-wrap: anywhere; }
 .kanban .kcard a { text-decoration: none; font-weight: 700; } .kanban .kcard a:hover { text-decoration: underline; }
 .kanban .kcard .m { font-family: var(--mono); font-size: .68rem; color: var(--muted); margin-top: .25rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+.kanban-help { margin: 0; }
+.kanban-status { min-height: 1.5em; margin: .3rem 0 .6rem; }
+.kanban-status.error { color: #a21c1c; }
+.kanban .kcard[draggable="true"] { cursor: grab; }
+.kanban .kcard.dragging { opacity: .45; border-style: dashed; cursor: grabbing; }
+.kanban .kcard.saving { background: var(--yellow); }
+.kanban .colm.ticket-drop-active { background: var(--cyan); outline: 3px dashed var(--ink); outline-offset: 4px; }
+.kanban .colm.ticket-drop-active h3 { background: var(--yellow); }
+.kanban-move { display: grid; gap: .25rem; margin-top: .65rem; font: 700 .65rem var(--mono); text-transform: uppercase; }
+.kanban-move select { min-width: 0; width: 100%; border: 2px solid var(--ink); padding: .3rem; background: var(--paper-2); box-shadow: 2px 2px 0 var(--ink); font: 700 .7rem var(--mono); cursor: pointer; }
+.kanban-move select:focus-visible { outline: 3px solid var(--violet); outline-offset: 3px; }
+.kanban-move select:disabled { opacity: .6; cursor: wait; }
+.kanban-overflow { margin: .6rem; font-family: var(--mono); }
 
 /* ---------- agents */
 .progress-counts { display:flex; flex-wrap:wrap; gap:.8rem; margin-bottom:1rem; }

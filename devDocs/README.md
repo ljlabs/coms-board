@@ -19,6 +19,8 @@ adds durable behavior that needs its own design note.
   contracts.
 - [Ticket runner chat](ticket-runner-chat.md): shared conversation rendering,
   stage labels, and follow-ups after a restart.
+- [Ticket board moves](ticket-board-moves.md): drag-and-drop status changes and
+  keyboard/touch controls.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent
   access.
 - [Feature template](FEATURE_TEMPLATE.md): starting point for a new feature note.

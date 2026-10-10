@@ -493,7 +493,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <select id="fd"><option value="">dept: any</option>${DEPTS.map((d) => `<option value="${d.slug}"${q.dept === d.slug ? ' selected' : ''}>${esc(d.name)}</option>`).join('')}</select>
         <select id="ft"><option value="">type: any</option>${TT.map((t) => `<option value="${t}"${q.type === t ? ' selected' : ''}>${t}</option>`).join('')}</select>
         ${q.tag ? `<span class="chip on">tag: ${esc(q.tag)}</span> <a class="btn sm ghost" href="${link('tag', undefined)}">×</a>` : ''}
-        <span class="muted mono small">${tix.length} tickets</span></div>
+        <span class="muted mono small" id="ticket-count">${tix.length} tickets</span></div>
       ${view === 'board' ? kanban(tix) : (tix.length ? `<div class="list">${tix.map(ticketItem).join('')}</div>` : '<div class="empty">no tickets match</div>')}`);
     const showView = (mode) => { localStorage.setItem('coms.tview', mode); const target = link('view', mode); if (location.hash === target) render(); else location.hash = target; };
     $('#vl').onclick = () => showView('list');
@@ -508,10 +508,105 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       if (!confirm(`Delete board “${board.name}” and ALL ${board.ticket_count} tickets, including comments and links? This cannot be undone. Wiki pages are kept.`)) return;
       try { await api('DELETE', `/api/ticket-boards/${board.id}`); rememberBoard(1); toast('board deleted'); location.hash = '#/tickets?board=1'; } catch (e) { fail(e); }
     };
+    if (view === 'board') wireKanban(tix, q);
   });
+  const ticketColumns = [['open', 'Open'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['review', 'Review'], ['done', 'Done'], ['wontfix', 'Won’t fix']];
   function kanban(tix) {
-    const cols = [['open', 'Open'], ['in_progress', 'In progress'], ['blocked', 'Blocked'], ['review', 'Review'], ['done', 'Done'], ['wontfix', 'Won’t fix']];
-    return `<div class="kanban">${cols.map(([s, l]) => { const items = tix.filter((t) => t.status === s).slice(0, ['done', 'wontfix'].includes(s) ? 15 : 100); return `<div class="colm"><h3>${l}<span>${items.length}</span></h3>${items.map((t) => `<div class="kcard"><a href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="m">${badge(t.priority)}${badge(t.type)}${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''}${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</div></div>`).join('')}</div>`; }).join('')}</div>`;
+    return `<div class="ticket-board"><p class="kanban-help small muted" id="ticket-board-help">Drag a ticket onto a column, or use its Move to control.</p><p class="kanban-status mono small" id="ticket-board-status" role="status" aria-live="polite" aria-atomic="true"></p>${kanbanColumns(tix)}</div>`;
+  }
+  function kanbanColumns(tix) {
+    return `<div class="kanban">${ticketColumns.map(([s, l]) => {
+      const matches = tix.filter(t => t.status === s), items = matches.slice(0, ['done', 'wontfix'].includes(s) ? 15 : 100);
+      return `<section class="colm" data-ticket-column="${s}" aria-labelledby="ticket-column-${s}"><h3 id="ticket-column-${s}">${l}<span>${matches.length}</span></h3>${items.map(t => `<article class="kcard" data-ticket-id="${t.id}" draggable="true" aria-describedby="ticket-board-help"><a href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="m">${badge(t.priority)}${badge(t.type)}${t.parent_id ? `<a class="mono small" href="#/tickets/${t.parent_id}" title="parent ticket">↑ #${t.parent_id}</a>` : ''}${t.assignee ? chip(t.assignee) : '<b>unassigned</b>'}</div><label class="kanban-move" for="ticket-move-${t.id}">Move to<select id="ticket-move-${t.id}" data-ticket-move="${t.id}" aria-label="Move ticket #${t.id} to status">${ticketColumns.map(([value, label]) => `<option value="${value}"${value === t.status ? ' selected' : ''}>${label}</option>`).join('')}</select></label></article>`).join('')}${matches.length > items.length ? `<p class="kanban-overflow small muted">Showing ${items.length} of ${matches.length}</p>` : ''}</section>`;
+    }).join('')}</div>`;
+  }
+  function wireKanban(tix, filters) {
+    const board = $('.ticket-board'), owner = view, tickets = new Map(tix.map(t => [String(t.id), t]));
+    const status = $('#ticket-board-status', board);
+    let draggedId = null, saving = false;
+    const active = () => owner === view && !owner.controller.signal.aborted && board.isConnected;
+    const clearDrag = () => {
+      draggedId = null;
+      board.querySelectorAll('.dragging,.ticket-drop-active').forEach(el => el.classList.remove('dragging', 'ticket-drop-active'));
+    };
+    const setBusy = busy => {
+      saving = busy;
+      $('.kanban', board).setAttribute('aria-busy', String(busy));
+      board.querySelectorAll('[data-ticket-move]').forEach(el => { el.disabled = busy; });
+      board.querySelectorAll('.kcard').forEach(el => { el.draggable = !busy; });
+      // Drag the card, including when the pointer starts over a ticket link.
+      board.querySelectorAll('a').forEach(el => { el.draggable = false; });
+    };
+    const allowed = column => active() && !saving && draggedId && tickets.get(draggedId)?.status !== column.dataset.ticketColumn;
+    async function moveTicket(id, nextStatus, restoreFocus = false) {
+      const ticket = tickets.get(id);
+      if (!active() || saving || !ticket || !TS.includes(nextStatus) || ticket.status === nextStatus) return;
+      clearDrag(); setBusy(true);
+      const card = board.querySelector(`[data-ticket-id="${id}"]`);
+      card?.classList.add('saving');
+      status.classList.remove('error'); status.textContent = `Moving ticket #${id}…`;
+      try {
+        const saved = await api('PATCH', `/api/tickets/${id}`, { status: nextStatus });
+        Object.assign(ticket, saved);
+        // Put the moved ticket first so it remains visible in capped columns.
+        const visible = [ticket, ...tix.filter(t => t !== ticket)].filter(t => !filters.status || t.status === filters.status);
+        $('.kanban', board).outerHTML = kanbanColumns(visible);
+        $('#ticket-count').textContent = `${visible.length} tickets`;
+        const label = ticketColumns.find(([s]) => s === saved.status)[1];
+        status.textContent = `Ticket #${id} moved to ${label}.${saved.open_children_warning?.length ? ' This ticket still has open child tickets.' : ''}`;
+        toast(`ticket #${id} moved to ${label}`);
+      } catch (err) {
+        if (!active() || err.name === 'AbortError') return;
+        status.classList.add('error'); status.textContent = `Could not move ticket #${id}: ${err.message}`;
+        fail(err);
+      } finally {
+        if (active()) {
+          setBusy(false); card?.classList.remove('saving');
+          if (restoreFocus) (board.querySelector(`[data-ticket-move="${id}"]`) || $('#vb')).focus({ preventScroll: true });
+        }
+      }
+    }
+    board.onchange = event => {
+      const control = event.target.closest('[data-ticket-move]');
+      if (!control) return;
+      const id = control.dataset.ticketMove, nextStatus = control.value;
+      control.value = tickets.get(id).status;
+      moveTicket(id, nextStatus, document.activeElement === control);
+    };
+    board.ondragstart = event => {
+      const card = event.target.closest('.kcard');
+      if (!card) return;
+      if (!active() || saving || event.target.closest('select')) { event.preventDefault(); return; }
+      draggedId = card.dataset.ticketId;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-swarm-ticket', draggedId);
+      event.dataTransfer.setData('text/plain', `Ticket #${draggedId}`);
+      event.dataTransfer.setDragImage(card, 20, 20);
+      card.classList.add('dragging');
+    };
+    board.ondragover = event => {
+      const column = event.target.closest('[data-ticket-column]');
+      if (!column) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = allowed(column) ? 'move' : 'none';
+      board.querySelectorAll('.ticket-drop-active').forEach(el => { if (el !== column) el.classList.remove('ticket-drop-active'); });
+      column.classList.toggle('ticket-drop-active', Boolean(allowed(column)));
+    };
+    board.ondragleave = event => {
+      const column = event.target.closest('[data-ticket-column]');
+      if (column && !column.contains(event.relatedTarget)) column.classList.remove('ticket-drop-active');
+    };
+    board.ondrop = event => {
+      const column = event.target.closest('[data-ticket-column]');
+      if (!column) return;
+      event.preventDefault();
+      const id = draggedId, canMove = allowed(column);
+      clearDrag();
+      if (canMove) moveTicket(id, column.dataset.ticketColumn);
+    };
+    board.ondragend = clearDrag;
+    owner.cleanup.push(clearDrag);
+    setBusy(false);
   }
 
   route(/^\/tickets\/new$/, async () => {

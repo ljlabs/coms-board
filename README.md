@@ -116,6 +116,13 @@ context and docs. List and kanban views show only the selected board's tickets;
 the selection is remembered. Ticket forms let you choose the board or move
 existing standalone tickets. Parent and child tickets must share a board.
 
+In **Board** view, drag a ticket onto any status column to save its new status.
+Each card also has a **Move to** selector for keyboard and touch use. The target
+column highlights during a drag; cards stay in their original column until the
+save succeeds. Selected board and filters are retained, so a ticket moved out
+of a status filter disappears from that filtered view. Moves update the ticket
+timeline and activity feed using the identity in the dashboard header.
+
 Existing tickets are kept in **Default**, which can be renamed but cannot be
 deleted. Deleting another board requires confirmation in the UI and removes
 its tickets, comments, and ticket links. Linked wiki pages are kept. Wiki,
