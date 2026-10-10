@@ -308,8 +308,11 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .timeline .tl.status .txt, .timeline .tl.assign .txt { font-family: var(--mono); font-size: .8rem; background: var(--paper); border: 2px solid var(--ink); display: inline-block; padding: .1rem .5rem; }
 .kanban { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem; }
 .kanban .colm { border: var(--line); background: var(--paper-2); box-shadow: var(--shadow-sm); min-height: 200px; }
+.kanban .colm.drop-target { outline: 3px dashed var(--violet); outline-offset: 3px; }
 .kanban .colm h3 { margin: 0; padding: .5rem .7rem; border-bottom: var(--line); font-size: .8rem; display: flex; justify-content: space-between; }
 .kanban .kcard { border: 2px solid var(--ink); margin: .6rem; padding: .5rem .6rem; background: var(--paper); font-size: .85rem; }
+.kanban .kcard[draggable="true"] { cursor: grab; }
+.kanban .kcard.is-dragging { opacity: .45; cursor: grabbing; }
 .kanban .kcard a { text-decoration: none; font-weight: 700; } .kanban .kcard a:hover { text-decoration: underline; }
 .kanban .kcard .m { font-family: var(--mono); font-size: .68rem; color: var(--muted); margin-top: .25rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
 
