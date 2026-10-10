@@ -259,7 +259,7 @@ class Runner:
         if self.thread: self.thread.join(timeout=5)
         if self._lease:
             self._lease.close(); self._lease=None
-    def _conn(self, ticket_id, backend, cwd, run_id=None, actor_override=None, collaboration_message_id=None, dispatch_only=False):
+    def _conn(self, ticket_id, backend, cwd, run_id=None, actor_override=None, collaboration_message_id=None, dispatch_only=False, resume_session=None):
         actor = actor_override or api.get_ticket(db.connect(), ticket_id).get('assignee') or 'agent-runner'
         recorder = self.recorders.get(run_id)
         def log(line): self._message(ticket_id, run_id, 'system', 'acp-log', line)
@@ -292,7 +292,21 @@ class Runner:
         board_only=ticket['type']=='research' or bool(job and job.get('collaboration_required')) or dispatch_only or collaboration_message_id is not None
         c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor,'COMS_BOARD_ONLY':'1' if board_only else '0'}), mcp_servers=board_servers(actor,ticket_id,run_id,collaboration_message_id=collaboration_message_id,dispatch_only=dispatch_only))
         try:
-            c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,self.settings()); return c
+            c.start()
+            restored = False
+            if resume_session and c.supports('loadSession'):
+                # Session loading can replay history already stored on the board.
+                c.on_notification = lambda _msg: None
+                try:
+                    c.session_load(resume_session, cwd=cwd)
+                    restored = True
+                except Exception as exc:
+                    logging.info('Could not restore ticket ACP session; using board history: %s', exc)
+                finally:
+                    c.on_notification = notification
+            if not restored: c.session_new(cwd=cwd)
+            c.ticket_restored = restored
+            self._apply_model(c,backend,self.settings()); return c
         except Exception:
             c.close(); raise
     @staticmethod
@@ -632,20 +646,39 @@ class Runner:
             c=self.conns.get(tid)
             if c and not c.alive:
                 self.conns.pop(tid,None); c=None
-            if c and tid in self.active: raise ValueError('The ticket agent is still working; wait for its current response.')
+            if tid in self.active: raise ValueError('The ticket agent is still working; wait for its current response.')
             if 'review:'+str(tid) in self.active: raise ValueError('This ticket is being reviewed; wait for the review to finish.')
             maximum=max(1,min(16,int(self.settings().get('parallel_agents','2'))))
-            if c and len(self.active)>=maximum: raise ValueError('All configured backend agent slots are in use.')
-            if c: self.active[tid]=True
-        if not c: raise ValueError('No active agent session for this ticket. Mark it ready to start the runner.')
-        self._message(tid,None,'user','text',text)
-        threading.Thread(target=self._worker,args=(tid,self._prompt,c,tid,text),daemon=True).start()
+            if len(self.active)>=maximum: raise ValueError('All configured backend agent slots are in use.')
+            if not c and not db.connect().execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage='execute'", (tid,)).fetchone():
+                raise ValueError('No completed agent session for this ticket. Mark it ready to start the runner.')
+            self.active[tid]=True
+        try:
+            self._message(tid,None,'user','text',text)
+            threading.Thread(target=self._worker,args=(tid,self._prompt,c,tid,text),daemon=True).start()
+        except Exception:
+            with self.lock: self.active.pop(tid,None)
+            raise
         return {'accepted':True}
     def _prompt(self,c,tid,text):
         ticket = api.get_ticket(db.connect(), tid)
-        recorder = progress.Recorder('ticket-chat:' + uuid.uuid4().hex, ticket['assignee'] or 'agent-runner', tid, None, self.settings().get('active_backend', 'opencode'))
-        c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
+        run = db.connect().execute("SELECT * FROM agent_runs WHERE ticket_id=? AND stage='execute' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        backend = run['backend'] if run else self.settings().get('active_backend', 'opencode')
+        recorder = progress.Recorder('ticket-chat:' + uuid.uuid4().hex, ticket['assignee'] or 'agent-runner', tid, None, backend)
         try:
+            if not c:
+                settings = self.settings()
+                cwd = workspace_path({'workspace': ticket.get('workspace') or settings.get('workspace', str(DEFAULT_WORKSPACE))})
+                c = self._conn(tid, backend, cwd, actor_override=run['agent_slug'] or ticket['assignee'], resume_session=run['session_id'])
+                with self.lock: self.conns[tid] = c
+                db.connect().execute('UPDATE agent_runs SET session_id=? WHERE id=?', (c.session_id, run['id']))
+                db.connect().commit()
+                if not c.ticket_restored:
+                    history = [dict(row) for row in db.connect().execute("SELECT role,body FROM agent_messages WHERE ticket_id=? AND (role='user' OR kind='acp-response') ORDER BY id DESC LIMIT 20", (tid,))]
+                    text = ('Continue this ticket conversation. The execution has already finished; answer the user without rerunning it.\n'
+                            + json.dumps({'ticket': ticket, 'recent_conversation': list(reversed(history))}, ensure_ascii=False)
+                            + '\nUser follow-up: ' + text)
+            c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
             c.prompt(text,timeout=3600)
             recorder.finish('completed', 'Ticket conversation finished')
         except Exception as e:

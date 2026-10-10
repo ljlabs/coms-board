@@ -130,25 +130,54 @@ test('Skill files can be created, renamed and dragged between folders and the ro
   });
 });
 
+test('ticket uses the shared chat for execution, review, tools and durable follow-up replies', async () => {
+  await pageFor('/tickets/1', async page => {
+    assert.equal(await page.locator('#runner-chat .chat-compose').count(), 1);
+    assert.equal(await page.locator('.chat-text strong').filter({hasText:'Weather report'}).count(), 1);
+    assert.match(await page.locator('.chat-role').filter({hasText:'Execution'}).first().textContent(), /Run #/);
+    assert.match(await page.locator('.chat-role').filter({hasText:'Review'}).textContent(), /Review/);
+    await page.locator('.chat-tool-summary').click();
+    assert.match(await page.locator('.chat-tool-panel').textContent(), /temperature/);
+    await page.locator('#chat-input').fill('How did it go?');
+    await page.locator('#chat-form button').click();
+    await page.waitForFunction(() => document.querySelector('#chat-status').textContent==='ready' && [...document.querySelectorAll('.chat-message.assistant .chat-role')].some(node=>node.textContent.includes('Conversation')));
+    const count = await page.locator('.chat-message').count();
+    await page.reload();
+    await page.waitForSelector('.chat-role');
+    assert.equal(await page.locator('.chat-message').count(), count);
+    assert.equal(await page.locator('.chat-message.user .chat-text').filter({hasText:'How did it go?'}).count(), 1);
+    const detail = await page.evaluate(()=>fetch('/api/tickets/1/runner').then(r=>r.json()));
+    assert.equal(detail.runs.length, 1, 'Follow-ups do not repeat the scheduled execution');
+  });
+});
+
 test('ticket polls never duplicate stored prompts; refresh preserves drafts and scroll', async () => {
   await pageFor('/tickets/1', async page => {
-    assert.equal(await page.locator('.runner-msg').count(), 60);
-    await page.locator('#runner-input').fill('Unsent agent prompt');
+    const prompts = await page.locator('.chat-message.user').count();
+    assert.ok(prompts >= 60);
+    await page.locator('#chat-input').fill('Unsent agent prompt');
     await page.locator('#ced .mde-doc').fill('Unsent comment');
     await page.evaluate(() => {
       window.scrollTo(0, 550);
-      document.querySelector('#runner-messages').scrollTop = 120;
+      document.querySelector('#chat-messages').scrollTop = 120;
       document.querySelector('#savef').dataset.old = 'yes';
       document.querySelector('#savef').click();
     });
     await page.waitForFunction(() => document.querySelector('#savef') && !document.querySelector('#savef').dataset.old && !document.querySelector('#app').hasAttribute('aria-busy'));
-    assert.equal(await page.locator('#runner-input').inputValue(), 'Unsent agent prompt');
+    assert.equal(await page.locator('#chat-input').inputValue(), 'Unsent agent prompt');
     assert.match(await page.locator('#ced .mde-doc').innerText(), /Unsent comment/);
     assert.equal(await page.evaluate(() => window.scrollY), 550);
-    assert.equal(await page.locator('#runner-messages').evaluate(el => el.scrollTop), 120);
+    assert.equal(await page.locator('#chat-messages').evaluate(el => el.scrollTop), 120);
     await page.waitForTimeout(2400);
-    assert.equal(await page.locator('.runner-msg').count(), 60);
-    assert.equal(await page.locator('#runner-messages').evaluate(el => el.scrollTop), 120);
+    assert.equal(await page.locator('.chat-message.user').count(), prompts);
+    assert.equal(await page.locator('#chat-messages').evaluate(el => el.scrollTop), 120);
+  });
+});
+
+test('ticket chat deep link brings the shared conversation into view', async () => {
+  await pageFor('/tickets/1?chat=1', async page => {
+    const top = await page.locator('#runner-chat').evaluate(node=>node.getBoundingClientRect().top);
+    assert.ok(top >= -1 && top < 200, `Chat should be in view, top=${top}`);
   });
 });
 
@@ -190,7 +219,7 @@ test('same-route chat refresh disposes its old poller', async () => {
     await page.waitForTimeout(3100);
     assert.ok(polls <= 3, `Expected one poller, saw ${polls} requests`);
     await page.evaluate(() => { location.hash = '#/tickets/1'; });
-    await page.waitForSelector('#runner-input');
+    await page.waitForSelector('#chat-input');
     const before = polls;
     await page.waitForTimeout(1700);
     assert.equal(polls, before, 'Old chat poller stopped after navigation');
@@ -382,10 +411,10 @@ test('typing and scrolling during a slow refresh are retained at commit time', a
     });
     await page.evaluate(()=>document.querySelector('#savef').click());
     await started;
-    await page.locator('#runner-input').fill('Typed while data loads');
+    await page.locator('#chat-input').fill('Typed while data loads');
     await page.evaluate(()=>window.scrollTo(0,700));
     await page.waitForFunction(()=>!document.querySelector('#app').hasAttribute('aria-busy'));
-    assert.equal(await page.locator('#runner-input').inputValue(),'Typed while data loads');
+    assert.equal(await page.locator('#chat-input').inputValue(),'Typed while data loads');
     assert.equal(await page.evaluate(()=>window.scrollY),700);
   });
 });

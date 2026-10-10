@@ -300,6 +300,13 @@ your chosen backend before marking a ticket ready. Agents run with the local
 user's filesystem permissions, so use a trusted workspace and monitor the
 ticket transcript and runner logs.
 
+Each ticket's **Agent runner chat** uses the orchestrator chat component to show
+Markdown replies, expandable tool calls, review decisions, and follow-up replies.
+Progress entries identify **Execution**, **Review**, or **Conversation**, even when
+the same agent handles all three. Choose **View chat** in scheduled execution
+history to open the transcript. Ticket follow-ups restore the saved ACP session
+after a restart, or continue from board history if the backend cannot restore it.
+
 Use **+ Project** to open the Create project modal, name the project, and add a
 source folder with the graphical picker. The name and workspace are saved
 together. Without a source folder, the project inherits the root workspace.

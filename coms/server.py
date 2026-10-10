@@ -626,10 +626,9 @@ def r_templates(conn, m, _mm, q, b, actor):
 def r_runner_ticket(conn, m, mm, q, b, actor):
     tid = int(mm.group(1)); api.get_ticket(conn, tid)
     if m == "GET":
-        return {"messages":[dict(r) for r in conn.execute("SELECT * FROM agent_messages WHERE ticket_id=? AND role='user' AND kind='text' ORDER BY id",(tid,))],
-                "runs":[dict(r) for r in conn.execute("SELECT * FROM agent_runs WHERE ticket_id=? ORDER BY id DESC",(tid,))],
-                "progress":progress.snapshot(conn, ticket=tid),
-                "retry":api.ticket_retry_state(conn, tid)}
+        from .runner import RUNNER
+        from .ticket_chat import conversation
+        return conversation(conn, tid, RUNNER, include_logs=_bool(q.get('include_logs', False)))
     if m == "POST":
         from .runner import RUNNER
         try: return RUNNER.chat(tid, b.get("body", ""))

@@ -17,6 +17,8 @@ adds durable behavior that needs its own design note.
   how to maintain the shared guidance.
 - [Scheduled agent tasks](scheduled-agent-tasks.md): recurrence and execution
   contracts.
+- [Ticket runner chat](ticket-runner-chat.md): shared conversation rendering,
+  stage labels, and follow-ups after a restart.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent
   access.
 - [Feature template](FEATURE_TEMPLATE.md): starting point for a new feature note.

@@ -143,7 +143,7 @@
     const diagnostics=document.createElement('details');diagnostics.className='chat-logs';
     diagnostics.innerHTML='<summary>Debug logs</summary><div class="chat-log-list"></div>';
     diagnostics.hidden=true;box.append(diagnostics);
-    const empty=document.createElement('div');empty.className='chat-empty';empty.textContent='Start a conversation with the Swarm Agent orchestrator.';
+    const empty=document.createElement('div');empty.className='chat-empty';empty.textContent=h.emptyText || 'Start a conversation with the Swarm Agent orchestrator.';
     box.prepend(empty);
 
     function create(m) {
@@ -175,7 +175,7 @@
       } else {
         node.classList.add(m.role==='assistant'?'assistant':'user');
         node.innerHTML='<div class="chat-role"></div><div class="chat-text"></div><div class="chat-content-blocks"></div>';
-        setText(node.querySelector('.chat-role'),m.role==='assistant'?'Orchestrator':'You');
+        setText(node.querySelector('.chat-role'),m.label || (m.role==='assistant'?'Orchestrator':'You'));
         if (m.kind==='text' && ['user','assistant'].includes(m.role)) {
           node.classList.add('chat-text-message');
           const bubble=document.createElement('div');bubble.className='chat-bubble';
@@ -273,17 +273,23 @@
     return {sync,diagnostics};
   }
 
+  function conversationMarkup(ticketMode,projects,detail,esc) {
+    return `<div class="chat-main"><div class="chat-head">${ticketMode?'':`<button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button>`}<div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div>${ticketMode?'':`<label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`}<span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span>${ticketMode?'':'<button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button>'}</div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="${ticketMode?'Message the ticket agent':'Message the orchestrator'}" placeholder="${ticketMode?'Message the ticket agent…':'Message the orchestrator…'}"></textarea><button class="btn primary">Send</button></form></div>`;
+  }
+
   async function mount(h) {
     const {api,GET,paint,poll,ago,fail,refresh,esc}=h;
-    const $=selector=>document.querySelector(selector);
-    let projects=await GET('/api/runner/projects');
-    let sessions=await GET('/api/runner/sessions');
-    let rootWorkspace=(await GET('/api/runner/settings')).workspace || '';
+    const ticketMode=h.ticketId!=null;
+    const root=h.container || document;
+    const $=selector=>root.querySelector(selector);
+    let projects=ticketMode?[]:await GET('/api/runner/projects');
+    let sessions=ticketMode?[]:await GET('/api/runner/sessions');
+    let rootWorkspace=ticketMode?'':(await GET('/api/runner/settings')).workspace || '';
     let activeId=h.sessionId || sessions[0]?.id;
-    if (!activeId) {activeId=(await api('POST','/api/runner/sessions',{title:'New chat'})).id;sessions=await GET('/api/runner/sessions');}
-    let detail=await GET(`/api/runner/sessions/${encodeURIComponent(activeId)}`);
+    if (!ticketMode && !activeId) {activeId=(await api('POST','/api/runner/sessions',{title:'New chat'})).id;sessions=await GET('/api/runner/sessions');}
+    const path=ticketMode?`/api/tickets/${h.ticketId}/runner`:`/api/runner/sessions/${encodeURIComponent(activeId)}`;
+    let detail=h.detail || await GET(path);
     let sending=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
-    const path=`/api/runner/sessions/${encodeURIComponent(activeId)}`;
     const expandedGroups=new Set([detail.project_id?`project:${detail.project_id}`:'root']);
     let pickerTarget=null,pickerData=null,folderRequestSerial=0,folderAction=null,folderSaving=false,projectWorkspace='',creatingProject=false;
     const sessionLink=s=>`<div class="chat-session-row"><a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a><button class="chat-delete" type="button" data-delete-chat="${esc(s.id)}" aria-label="Delete chat ${esc(s.title)}" title="Delete chat">×</button></div>`;
@@ -297,9 +303,10 @@
     function projectList() {
       return groupMarkup(null)+projects.map(groupMarkup).join('');
     }
-    paint(`<section class="chat-page" id="orch-page">
+    if (ticketMode) root.innerHTML=`<section class="chat-page ticket-chat">${conversationMarkup(true,[],detail,esc)}</section>`;
+    else paint(`<section class="chat-page" id="orch-page">
       <aside class="chat-sidebar" id="orch-sidebar"><div class="chat-side-head"><b>Chats</b><button class="btn sm" id="new-project">+ Project</button></div><button class="btn primary chat-new" id="new-chat">＋ New chat</button><div class="chat-projects">${projectList()}</div></aside>
-      <div class="chat-main"><div class="chat-head"><button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button><div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div><label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label><span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span><button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button></div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="Message the orchestrator" placeholder="Message the orchestrator…"></textarea><button class="btn primary">Send</button></form></div>
+      ${conversationMarkup(ticketMode,projects,detail,esc)}
       <dialog id="project-create" class="chat-project-dialog" aria-labelledby="project-create-title"><form id="project-create-form">
         <div class="chat-folder-head"><b id="project-create-title">Create project</b><button type="button" class="chat-delete" data-close-project aria-label="Close create project">×</button></div>
         <div class="chat-project-form-body"><label for="project-name">Project name</label><input id="project-name" name="name" placeholder="Project name" required maxlength="200" autocomplete="off">
@@ -358,12 +365,12 @@
       setText($('#project-source-path'),projectWorkspace);
       setText($('#project-workspace-hint'),projectWorkspace?'Chats in this project will work in this folder.':`Without a source folder, chats use the root workspace: ${rootWorkspace}`);
     }
-    groups.addEventListener('toggle',event=>{
+    groups?.addEventListener('toggle',event=>{
       const group=event.target.closest('details.chat-project');if(!group)return;
       if (group.open) expandedGroups.add(group.dataset.groupKey);else expandedGroups.delete(group.dataset.groupKey);
     },true);
     const onScroll=()=>{$('#chat-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<24;};
-    const transcript=timeline(box,{...h,onScroll});
+    const transcript=timeline(box,{...h,onScroll,emptyText:ticketMode?'Execution responses and follow-up replies appear here.':undefined});
     box.addEventListener('scroll',onScroll);
     $('#chat-latest').onclick=()=>{box.scrollTop=box.scrollHeight;onScroll();};
 
@@ -376,11 +383,12 @@
       const states={completed:'ready',running:'working',failed:'failed',interrupted:'interrupted',cancelled:'cancelled',refused:'declined',limited:'limit reached'};
       const status=$('#chat-status');setText(status,detail.busy?'working':otherBusy?'runner busy':states[detail.state] || 'ready');
       status.className=`chat-status badge ${detail.busy || otherBusy?'in_progress':detail.state==='failed'||detail.state==='interrupted'?'blocked':'open'}`;
-      $('#chat-form button').disabled=Boolean(detail.runner_busy || detail.busy || sending);
+      $('#chat-form button').disabled=Boolean(detail.runner_busy || detail.busy || sending || detail.chat_available===false);
       setText($('#chat-title'),detail.title);
-      setText($('#chat-subtitle'),detail.busy?'Orchestrator is responding':otherBusy?'Another chat is using the orchestrator':`ACP · ${detail.backend || 'default'} · ${detail.model || 'ACP default'}`);
+      setText($('#chat-subtitle'),detail.chat_unavailable_reason || (detail.busy?`${detail.assistant_name || 'Orchestrator'} is responding`:otherBusy?'Another chat is using the orchestrator':ticketMode?`Execution · Review · Conversation · ${detail.backend || 'default'}`:`ACP · ${detail.backend || 'default'} · ${detail.model || 'ACP default'}`));
       setText($('#chat-workspace span'),`Workspace: ${detail.workspace || 'unavailable'}${detail.workspace_error?` · ${detail.workspace_error}`:''}`);
-      $('#move-project').value=detail.project_id || '';
+      if ($('#move-project')) $('#move-project').value=detail.project_id || '';
+      h.onDetail?.(detail);
       const current=sessions.find(s=>s.id===activeId);
       if (current && current.title!==detail.title) {current.title=detail.title;current.updated_at=detail.updated_at;renderGroups();}
     }
@@ -426,6 +434,9 @@
       };
       h.signal?.addEventListener('abort',()=>streamSource.close(),{once:true});
     }
+    applyDetail();box.scrollTop=box.scrollHeight;onScroll();
+    transcript.diagnostics.addEventListener('toggle',()=>{if (transcript.diagnostics.open) {loadedLogs=true;fetchDetail(true).catch(connectionError);}});
+    if (!ticketMode) {
     async function loadFolders(pathValue='') {
       const serial=++folderRequestSerial;
       const note=$('#folder-note'),entries=$('#folder-entries');setText(note,'Loading folders…');
@@ -508,8 +519,7 @@
         await fetchDetail();
       } catch (error) {setText($('#folder-note'),error.message || 'Could not save this workspace folder.');$('#folder-select').disabled=!pickerData?.path || pickerData?.selectable===false;}
     }
-    applyDetail();box.scrollTop=box.scrollHeight;onScroll();
-    transcript.diagnostics.addEventListener('toggle',()=>{if (transcript.diagnostics.open) {loadedLogs=true;fetchDetail(true).catch(connectionError);}});
+
     $('#new-chat').onclick=async()=>{try {const session=await api('POST','/api/runner/sessions',{title:'New chat',project_id:detail.project_id || null});location.hash=`#/orchestrator?session=${encodeURIComponent(session.id)}`;}catch(error){fail(error);}};
     $('#pick-current-workspace').onclick=()=>openFolderPicker(detail.project_id?String(detail.project_id):'root');
     $('#folder-up').onclick=()=>{if(pickerData?.parent)loadFolders(pickerData.parent);};
@@ -558,12 +568,13 @@
     };
     $('#move-project').onchange=async()=>{try {await api('PATCH',path,{project_id:$('#move-project').value || null});sessions=await GET('/api/runner/sessions');await fetchDetail();expandedGroups.add(detail.project_id?`project:${detail.project_id}`:'root');renderGroups();}catch(error){fail(error);}};
     $('#chat-menu').onclick=()=>$('#orch-page').classList.toggle('sidebar-open');
+    } // Project and folder controls belong to the orchestrator page.
     $('#chat-form').onsubmit=async event=>{
       event.preventDefault();const input=$('#chat-input'),body=input.value.trim();
-      if (!body || sending || detail.busy || detail.runner_busy) return;
+      if (!body || sending || detail.busy || detail.runner_busy || detail.chat_available===false) return;
       sending=true;applyDetail();
       try {
-        const result=await api('POST',path+'/messages',{body});
+        const result=await api('POST',path+(ticketMode?'':'/messages'),{body});
         // Streaming and the send response share canonical IDs, avoiding duplicates.
         if (result.message && !detail.messages.some(m=>m.id===result.message.id)) detail.messages.push(result.message);
         if (input.value.trim()===body) input.value='';
@@ -573,7 +584,7 @@
       finally {sending=false;if (box.isConnected) applyDetail();}
     };
     $('#chat-input').onkeydown=event=>{if (event.key==='Enter' && !event.shiftKey && !event.isComposing) {event.preventDefault();$('#chat-form').requestSubmit();}};
-    startStream();
+    if (!ticketMode) startStream();
     poll(async()=>{
       try {
         if (!streamHealthy) await fetchDetail();

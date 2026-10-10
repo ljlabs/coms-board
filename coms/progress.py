@@ -109,6 +109,11 @@ def snapshot(conn, ticket=None, agent=None):
             + where + " ORDER BY CASE WHEN p.state='running' THEN 0 WHEN p.state='waiting' THEN 1 ELSE 2 END,p.updated_at DESC LIMIT 80", args)]
     now = datetime.now(timezone.utc)
     for item in rows:
+        prefix = item['key'].split(':', 1)[0]
+        item['stage'] = {'review': 'review', 'ticket-chat': 'conversation', 'chat': 'conversation'}.get(prefix, 'execute')
+        if prefix == 'run' and item['run_id']:
+            run = conn.execute('SELECT stage FROM agent_runs WHERE id=?', (item['run_id'],)).fetchone()
+            if run: item['stage'] = run['stage']
         try: item['idle_seconds'] = max(0, int((now - datetime.fromisoformat(item['updated_at'].replace('Z', '+00:00'))).total_seconds()))
         except ValueError: item['idle_seconds'] = 0
     return {'generated_at': api.now(), 'items': rows,

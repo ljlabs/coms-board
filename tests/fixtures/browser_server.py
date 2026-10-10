@@ -25,6 +25,13 @@ conn.execute("INSERT INTO orchestrator_sessions(id,title,created_at,updated_at) 
 for i in range(60):
     conn.execute("INSERT INTO agent_messages(ticket_id,role,kind,body,created_at) VALUES(?,'user','text',?,?)", (t['id'], 'Ticket prompt ' + str(i), api.now()))
     conn.execute("INSERT INTO orchestrator_messages(session_id,role,kind,body,created_at) VALUES('browser-chat',?,'text',?,?)", ('assistant' if i % 2 else 'user', 'Message ' + str(i) + '\n\n' + 'Long paragraph. ' * 30, api.now()))
+rid = conn.execute("INSERT INTO agent_runs(ticket_id,backend,session_id,status,stage,agent_slug) VALUES(?,'codex','old-session','completed','execute','orchestrator')", (t['id'],)).lastrowid
+for role,kind,body in [
+    ('assistant','acp-response','**Weather report**\n\n- Temperature: 12.8 °C'),
+    ('tool','acp-tool_call',json.dumps({'toolCallId':'weather','title':'Fetch weather','status':'completed','rawInput':{'location':'London'},'rawOutput':{'temperature':12.8}})),
+    ('assistant','review-decision',json.dumps({'decision':'close','reason':'Report delivered.'})),
+]:
+    conn.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)', (t['id'],rid,role,kind,body,api.now()))
 conn.commit()
 conn.execute("INSERT INTO orchestrator_sessions(id,title,created_at,updated_at) VALUES('browser-tools','Tool conversation',?,?)", (api.now(),api.now()))
 conn.commit()
