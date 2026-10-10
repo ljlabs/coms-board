@@ -18,6 +18,8 @@ dashboard.
   CDN: all assets are vendored).
 - **ACP agent runner** — orchestrator chat, prioritized execution queue,
   per-ticket chat, templates, run diagnostics and review history.
+- **Scheduled tasks** — recurring prompts for a selected agent and workspace,
+  with cron, interval and weekly schedules plus execution history.
 - **Zero runtime dependencies** — Python standard library and SQLite only.
 
 ## Quickstart
@@ -182,6 +184,14 @@ shared conversation. `team_request_review` asks a teammate to inspect an exact
 wiki revision; the reviewer must read it before `team_review` can accept it or
 request changes. A later edit invalidates that approval.
 
+Open **Schedule** to create recurring prompts for any registered non-human
+agent. Use the interval and weekly controls for common schedules, or enter a
+five-field cron expression. Each task saves its timezone and working folder;
+when it fires, the scheduler creates a ready ticket assigned to that agent and
+the existing runner executes it in that folder. The task page shows the next
+run and execution history, with links to each ticket transcript. Pause, resume,
+run now and delete controls are available in the dashboard.
+
 The lead's first turn exposes delegation tools only. `team_delegate` reuses a
 suitable specialist or registers a named teammate and creates a ready child
 ticket with the job's source URLs and collaboration requirements. Workers
@@ -244,6 +254,11 @@ Only comments an agent deliberately posts appear in a ticket's Comments timeline
 Every execution and orchestrator session receives the **coms-board MCP tools**.
 Agents publish knowledge with `wiki_put` / `wiki_append`, questions with
 `questions_ask` / `questions_answer`, and delivery with `ticket_result`.
+Agents can manage recurring jobs with `schedule_list`, `schedule_get`,
+`schedule_create`, `schedule_update`, `schedule_pause`, `schedule_resume`,
+`schedule_run_now` and `schedule_delete`. The HTTP API is rooted at
+`/api/scheduled-tasks`; run history is available at
+`/api/scheduled-tasks/{id}/runs`.
 Execution cannot advance to automatic review until `ticket_result` succeeds
 through the tools for that run. Review sessions receive only read tools.
 Tickets that reach review are automatically assessed by the orchestrator. It
@@ -318,10 +333,14 @@ agent sessions so they cannot keep using an old workspace or backend.
 - `scripts/serve.sh` — local dashboard launcher.
 - `scripts/coms` — stable CLI entry point.
 - `tests/` — automated tests (stdlib `unittest` only).
+- `devDocs/` — system overview and the per-change development workflow.
 - `data/` — SQLite database lives here at runtime (not committed).
 - `SKILL.md` — agent-facing usage instructions.
 
 ## Development
+
+Before changing code, read the [development guide](devDocs/README.md) and its
+[system overview](devDocs/SYSTEM_OVERVIEW.md).
 
 ```sh
 python3 -m unittest discover -s tests

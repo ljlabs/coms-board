@@ -37,7 +37,7 @@ TOOLS = [
     tool("ticket_create", "Create prioritized work. Set ready only for actionable agent work.",
          {"title": S, "body": S, "priority": {"type": "string", "enum": list(api.PRIORITIES)},
           "assignee": S, "tags": S, "parent_id": I, "template_id": I, "ready": B,
-          "type": {"type": "string", "enum": list(api.TICKET_TYPES)}, "recommended_workers": I}, ["title"], True),
+          "type": {"type": "string", "enum": list(api.TICKET_TYPES)}, "recommended_workers": I, "workspace": S}, ["title"], True),
     tool("ticket_comment", "Publish a concise durable update to a ticket.", {"id": I, "body": S}, ["id", "body"], True),
     tool("ticket_link", "Attach a wiki page, question, ticket or URL to a ticket.",
          {"id": I, "kind": {"type": "string", "enum": ["wiki", "question", "ticket", "url"]},
@@ -56,6 +56,21 @@ TOOLS = [
     tool("skill_get", "Read a shared skill and its current version.", {"slug": S}, ["slug"]),
     tool("skill_put", "Publish a verified reusable procedure for all agents. For updates, pass the version returned by skill_get.",
          {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
+    tool("schedule_list", "List recurring scheduled prompts, their next run, chosen agent and workspace."),
+    tool("schedule_get", "Read a scheduled task and its current schedule configuration.", {"id": I}, ["id"]),
+    tool("schedule_create", "Create a recurring prompt for a registered agent. Choose cron, interval or weekly; set the timezone and workspace folder when known.",
+         {"name": S, "prompt": S, "schedule_type": {"type": "string", "enum": ["cron", "interval", "weekly"]},
+          "cron_expression": S, "interval_every": I, "interval_unit": {"type": "string", "enum": ["minutes", "hours", "days"]},
+          "weekly_days": S, "weekly_time": S, "timezone": S, "agent_slug": S, "workspace": S},
+         ["name", "prompt", "schedule_type", "agent_slug"], True),
+    tool("schedule_update", "Edit a scheduled task. Send only fields to change; when changing its schedule, include its type and the matching cron, interval or weekly fields.",
+         {"id": I, "name": S, "prompt": S, "schedule_type": {"type": "string", "enum": ["cron", "interval", "weekly"]},
+          "cron_expression": S, "interval_every": I, "interval_unit": {"type": "string", "enum": ["minutes", "hours", "days"]},
+          "weekly_days": S, "weekly_time": S, "timezone": S, "agent_slug": S, "workspace": S}, ["id"], True),
+    tool("schedule_pause", "Pause a recurring scheduled task.", {"id": I}, ["id"], True),
+    tool("schedule_resume", "Resume a paused scheduled task and calculate its next run.", {"id": I}, ["id"], True),
+    tool("schedule_run_now", "Queue an immediate run of a scheduled task, even when its recurrence is paused.", {"id": I}, ["id"], True),
+    tool("schedule_delete", "Delete a recurring schedule while retaining its execution history.", {"id": I}, ["id"], True),
     tool("team_roster", "List teammates on a job, with distinct names, identities, capabilities and assigned tickets.", {"job_id": I}, ['job_id']),
     tool("team_delegate", "Delegate one specialty: reuse a suitable registered agent or register a distinct personally named teammate, then create an actionable child assignment. Parent, readiness and shared research requirements are automatic.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
     tool("team_read", "Read the job conversation, replies, peer reviews and actually retrieved source index.", {"job_id": I, "after_id": I}, ['job_id']),
@@ -68,7 +83,7 @@ TOOLS = [
     tool("source_get", "Read the content and retrieval status of a recorded research source.", {"source_id": I}, ['source_id']),
 ]
 
-COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
+COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
 DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
 
 
@@ -85,7 +100,10 @@ def validate(spec, arguments):
             raise ValueError(f"unknown argument: {key}")
         kind = prop["type"]
         valid = (isinstance(value, str) if kind == "string" else
-                 type(value) is int if kind == "integer" else type(value) is bool)
+                 type(value) is int if kind == "integer" else
+                 type(value) is bool if kind == "boolean" else
+                 isinstance(value, list) if kind == "array" else
+                 isinstance(value, dict) if kind == "object" else False)
         if not valid or ("enum" in prop and value not in prop["enum"]):
             raise ValueError(f"invalid argument: {key}")
 
@@ -125,7 +143,7 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
         result = api.create_ticket(conn, args["title"], args.get("body", ""), actor,
                                    type_=args.get('type', 'task'), priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
                                    tags=args.get("tags"), parent_id=args.get("parent_id"),
-                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'))
+                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'), workspace=args.get('workspace', ''))
         if args.get('ready'):
             api.resolve_ticket_agent(conn, result)
             result = api.get_ticket(conn, result['id'])
@@ -145,6 +163,18 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "skill_list": result = api.list_skills(conn)
     elif name == "skill_get": result = api.get_skill(conn, args['slug'])
     elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
+    elif name in ('schedule_list', 'schedule_get', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_resume', 'schedule_run_now', 'schedule_delete'):
+        from . import schedules
+        if name == 'schedule_list': result = schedules.list_tasks(conn)
+        elif name == 'schedule_get': result = {"task": schedules.get_task(conn, args['id']), "runs": schedules.list_runs(conn, args['id'])}
+        elif name == 'schedule_create':
+            result = schedules.create_task(conn, _schedule_payload(conn, args), actor)
+        elif name == 'schedule_update':
+            result = schedules.update_task(conn, args['id'], _schedule_payload(conn, args, task_id=args['id']), actor)
+        elif name == 'schedule_pause': result = schedules.set_status(conn, args['id'], 'paused', actor)
+        elif name == 'schedule_resume': result = schedules.set_status(conn, args['id'], 'active', actor)
+        elif name == 'schedule_run_now': result = schedules.run_now(conn, args['id'], actor)
+        else: result = schedules.delete_task(conn, args['id'], actor)
     elif name == 'team_roster': result = team.roster(conn, args['job_id'])
     elif name == 'team_delegate':
         if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
@@ -173,6 +203,44 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
                       json.dumps({"tool": name, "id": result.get("id") if isinstance(result, dict) else None, "slug": result.get("slug") if isinstance(result, dict) else None}), api.now()))
         conn.commit()
     return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
+
+
+def _weekday_numbers(value):
+    aliases = {'mon': 0, 'monday': 0, 'tue': 1, 'tues': 1, 'tuesday': 1,
+               'wed': 2, 'wednesday': 2, 'thu': 3, 'thur': 3, 'thurs': 3, 'thursday': 3,
+               'fri': 4, 'friday': 4, 'sat': 5, 'saturday': 5, 'sun': 6, 'sunday': 6}
+    if not isinstance(value, str): raise ValueError('weekly_days must be comma-separated weekday names or numbers')
+    days=[]
+    for part in value.split(','):
+        item=part.strip().lower()
+        if item in aliases: days.append(aliases[item])
+        elif item.isdigit() and 0 <= int(item) <= 6: days.append(int(item))
+        else: raise ValueError(f'invalid weekday: {part}')
+    if not days: raise ValueError('weekly_days must list at least one weekday')
+    return sorted(set(days))
+
+
+def _schedule_payload(conn, args, task_id=None):
+    from . import schedules
+    current = schedules.get_task(conn, task_id) if task_id is not None else {}
+    data = {key: args[key] for key in ('name', 'prompt', 'timezone', 'agent_slug', 'workspace') if key in args}
+    schedule_type = args.get('schedule_type', current.get('schedule_type'))
+    fields = {'cron_expression', 'interval_every', 'interval_unit', 'weekly_days', 'weekly_time'}
+    if schedule_type and ('schedule_type' in args or fields.intersection(args)):
+        config = dict(current.get('schedule_config') or {})
+        if schedule_type == 'cron':
+            if 'cron_expression' in args: config['expression'] = args['cron_expression']
+        elif schedule_type == 'interval':
+            if 'interval_every' in args: config['every'] = args['interval_every']
+            if 'interval_unit' in args: config['unit'] = args['interval_unit']
+        elif schedule_type == 'weekly':
+            if 'weekly_days' in args: config['days'] = _weekday_numbers(args['weekly_days'])
+            if 'weekly_time' in args: config['time'] = args['weekly_time']
+        data['schedule_type'] = schedule_type
+        data['schedule_config'] = config
+    if task_id is None:
+        data.setdefault('timezone', 'UTC')
+    return data
 
 
 def dispatch(message, readonly=False, collaboration=False, dispatch_only=False):

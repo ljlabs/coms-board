@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   updated_at  TEXT NOT NULL,
   closed_at   TEXT,
   agent_retry_count INTEGER NOT NULL DEFAULT 0,
-  agent_retry_requested INTEGER NOT NULL DEFAULT 0
+  agent_retry_requested INTEGER NOT NULL DEFAULT 0,
+  workspace   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_tickets_status ON tickets(status);
 CREATE INDEX IF NOT EXISTS ix_tickets_assignee ON tickets(assignee);
@@ -113,6 +114,37 @@ CREATE TABLE IF NOT EXISTS agent_templates (
   enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runner_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  schedule_type TEXT NOT NULL,
+  schedule_config_json TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  agent_slug TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  next_run_at TEXT NOT NULL,
+  last_run_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_due ON scheduled_tasks(status,next_run_at);
+CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  ticket_id INTEGER NOT NULL,
+  scheduled_for TEXT NOT NULL,
+  queued_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued',
+  error TEXT NOT NULL DEFAULT '',
+  is_manual INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_scheduled_runs_task ON scheduled_task_runs(task_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_scheduled_runs_ticket ON scheduled_task_runs(ticket_id);
 CREATE TABLE IF NOT EXISTS team_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
   sender TEXT NOT NULL, recipient TEXT NOT NULL DEFAULT '*', kind TEXT NOT NULL,
@@ -350,6 +382,7 @@ MIGRATIONS = [
     ("tickets", "agent_template_id", "INTEGER"),
     ("tickets", "agent_retry_count", "INTEGER NOT NULL DEFAULT 0"),
     ("tickets", "agent_retry_requested", "INTEGER NOT NULL DEFAULT 0"),
+    ("tickets", "workspace", "TEXT NOT NULL DEFAULT ''"),
     ("team_deliveries", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),
@@ -396,6 +429,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS ix_orch_messages_turn ON orchestrator_messages(session_id,turn_id,id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_orch_tool_identity ON orchestrator_messages(session_id,turn_id,tool_call_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_tickets_board ON tickets(board_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_due ON scheduled_tasks(status,next_run_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_scheduled_runs_task ON scheduled_task_runs(task_id,id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_scheduled_runs_ticket ON scheduled_task_runs(ticket_id)")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
     for old, new, cols in TABLE_RENAMES:
         if old in tables and new in tables:

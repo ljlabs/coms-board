@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from . import api, db, progress, team
+from . import api, db, progress, team, schedules
 from .acp import AcpConnection, AcpError
 from .workspace import DEFAULT_WORKSPACE, workspace_directory_browser, workspace_folder_change, workspace_folder_target, workspace_path
 from .orchestrator_transcript import Transcript, begin_turn, conversation_messages, history_before, message_dict, publish_change, recover_turns
@@ -161,6 +161,8 @@ BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Coms B
 
 Use the attached coms-board MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
 
+When asked to manage recurring agent work, inspect existing tasks with schedule_list/schedule_get and use schedule_create/schedule_update, schedule_pause/schedule_resume, schedule_run_now or schedule_delete as requested. Select a registered non-human agent and provide the requested workspace and timezone. Read the task back after changes and report the schedule ID and next run.
+
 Choose the board destination that matches the requested work:
 - For reusable knowledge, research findings, procedures, or documentation, create or update a Coms Board wiki page with wiki_put or wiki_append. Search/list the wiki first to avoid duplicate pages.
 - For an unresolved question, ask it on the board with questions_ask; for an existing question, contribute with questions_answer.
@@ -227,6 +229,7 @@ class Runner:
                 active_workspace=workspace_path(active_settings)
                 conn.execute("UPDATE orchestrator_sessions SET backend=?,workspace=?,acp_session_id='' WHERE backend!=? OR workspace!=?",(active_backend,active_workspace,active_backend,active_workspace))
                 conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error='Server stopped before this run finished; update the ticket to retry.' WHERE status IN ('queued','running')",(now(),))
+                conn.execute("UPDATE scheduled_task_runs SET status='failed',error='Server stopped before this run finished.',finished_at=? WHERE status='running'", (now(),))
                 conn.execute("UPDATE ticket_reviews SET status='failed',reason='Server stopped before review finished.',finished_at=? WHERE status IN ('queued','running')",(now(),))
                 conn.execute("UPDATE agent_runtime SET state='failed',phase='failed',summary='Server stopped before this session finished.',updated_at=?,finished_at=? WHERE state='running'", (now(), now()))
                 conn.execute("UPDATE team_deliveries SET status='pending',run_id=NULL,error='Resuming after server restart',updated_at=? WHERE status='responding'", (now(),))
@@ -358,6 +361,7 @@ class Runner:
             try:
                 self._resume_waiting()
                 settings=self.settings(); maximum=max(1,min(16,int(settings.get('parallel_agents','2'))))
+                schedules.dispatch_due(db.connect())
                 with self.lock:
                     if len(self.active)>=maximum: continue
                     conn=db.connect()
@@ -525,19 +529,19 @@ class Runner:
         template=conn.execute('SELECT * FROM agent_templates WHERE id=? AND enabled=1',(t.get('agent_template_id'),)).fetchone() if t.get('agent_template_id') else None
         if template and template['backend']: backend=template['backend']
         cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,?,'running',?,?,?)",(tid,template['id'] if template else None,backend,now(),agent['slug'],stage)); rid=cur.lastrowid
-        conn.execute("UPDATE tickets SET status='in_progress',updated_at=?,agent_retry_count=?,agent_retry_requested=0 WHERE id=?",(now(),retry_count,tid)); conn.commit()
+        conn.execute("UPDATE tickets SET status='in_progress',updated_at=?,agent_retry_count=?,agent_retry_requested=0 WHERE id=?",(now(),retry_count,tid)); schedules.mark_ticket(conn, tid, 'running'); conn.commit()
         self._message(tid,rid,'system','status',f'Runner started with {backend}; priority {t["priority"]}.')
         recorder = progress.Recorder('run:' + str(rid), agent['slug'], tid, rid, backend)
         self.recorders[rid] = recorder
         try:
             children_ready = api.children_resolved if t.get('collaboration_required') else api.children_delivered
             if t['type'] == 'job' and children and not children_ready(conn, tid):
-                conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); conn.commit()
+                conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Waiting for existing teammates to deliver; synthesis will resume automatically')
                 return
             if t.get('agent_template_id') and not template:
                 raise RuntimeError('Assigned agent template is missing or disabled; choose an enabled template before retrying.')
-            cwd=workspace_path(settings)
+            cwd=workspace_path({'workspace': t.get('workspace') or settings.get('workspace', str(DEFAULT_WORKSPACE))})
             with self.lock:
                 # Keep reusable ticket chats bounded; running sessions are never evicted.
                 maximum=max(1,min(16,int(settings.get('parallel_agents','2'))))
@@ -590,7 +594,7 @@ class Runner:
             recorder.flush(True)
             children = api.list_tickets(db.connect(), parent_id=tid, include_closed=True)
             if children and (stage != 'synthesize' or not children_ready(db.connect(), tid)):
-                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); conn.commit()
+                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Waiting for teammate results; synthesis will resume automatically')
                 api.comment_ticket(conn, tid, agent['slug'], 'Waiting for child ticket results. The lead will resume automatically for synthesis once they are delivered.')
                 waiting = self.conns.pop(tid, None)
@@ -599,23 +603,23 @@ class Runner:
             delivery=db.connect().execute("SELECT body FROM agent_messages WHERE run_id=? AND kind='board-delivery'",(rid,)).fetchall()
             if not any(json.loads(row['body']).get('tool')=='ticket_result' for row in delivery):
                 if team.pending(db.connect(), tid, agent['slug']):
-                    conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); conn.commit()
+                    conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                     recorder.finish('waiting', 'Waiting for teammate replies or peer review; will resume automatically')
                     waiting = self.conns.pop(tid, None)
                     if waiting: waiting.close()
                     return
                 raise RuntimeError('Agent finished without publishing ticket_result through the coms-board tools. Record the deliverable on the board and update the ticket to retry.')
-            conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=?",(now(),rid)); conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'",(now(),tid)); conn.commit()
+            conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=?",(now(),rid)); conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'",(now(),tid)); schedules.mark_ticket(conn, tid, 'completed'); conn.commit()
             self._message(tid,rid,'system','status','Agent turn finished; ticket moved to review.')
             recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
         except Exception as e:
             if team.pending(db.connect(), tid, agent['slug']):
-                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting',error='' WHERE id=?", (rid,)); conn.commit()
+                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting',error='' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Paused for teammate replies or peer review; will resume automatically')
                 waiting=self.conns.pop(tid,None)
                 if waiting: waiting.close()
                 return
-            conn=db.connect(); conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error=? WHERE id=?",(now(),str(e),rid)); conn.commit(); self._message(tid,rid,'system','error',str(e))
+            conn=db.connect(); conn.execute("UPDATE agent_runs SET status='failed',finished_at=?,error=? WHERE id=?",(now(),str(e),rid)); schedules.mark_ticket(conn, tid, 'failed', str(e)); conn.commit(); self._message(tid,rid,'system','error',str(e))
             recorder.finish('failed', str(e))
             failed=self.conns.pop(tid,None)
             if failed: failed.close()
@@ -978,7 +982,7 @@ class Runner:
             guide=(f"You are the Coms Board main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
                    "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
                    "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
-                   "Use the attached coms-board MCP tools for all board operations. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; do not write board records to local files. "
+                   "Use the attached coms-board MCP tools for all board operations. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
             guide += (" You are " + agent['name'] + ", the registered orchestrator agent " + agent['slug'] + ". Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists with distinct personal names. For team work, create a ready ticket of type job assigned to the orchestrator, with recommended_workers when specified. Jobs now have team conversations, automatic recipient responses and current-revision peer review. Direct the user to the job's team room to watch actual collaboration. The lead delegates child tickets and resumes for synthesis after worker reviews finish. A completion claim needs a freshly written, linked and peer-reviewed wiki artifact.\n\n" + api.shared_skill_context(db.connect()))

@@ -387,7 +387,7 @@ def r_tickets(conn, m, _mm, q, b, actor):
                                  parent_id=int(pid) if pid not in (None, "") else None,
                                  board_id=b.get("board_id"),
                                  ready_for_execution=b.get("ready_for_execution", False),
-                                 agent_template_id=b.get("agent_template_id"), recommended_workers=b.get('recommended_workers'), collaboration_required=b.get('collaboration_required'))
+                                 agent_template_id=b.get("agent_template_id"), recommended_workers=b.get('recommended_workers'), collaboration_required=b.get('collaboration_required'), workspace=b.get('workspace', ''))
         if ticket['ready_for_execution'] and not ticket['assignee']:
             api.resolve_ticket_agent(conn, ticket)
             ticket = api.get_ticket(conn, ticket['id'])
@@ -404,7 +404,43 @@ def r_ticket(conn, m, mm, q, b, actor):
     if m in ("PATCH", "PUT", "POST"):
         return api.update_ticket(conn, tid, actor, **{k: b.get(k) for k in (
             "title", "body", "type", "status", "priority", "department", "assignee",
-            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required") if k in b})
+            "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required", "workspace") if k in b})
+
+
+def r_scheduled_tasks(conn, m, mm, q, b, actor):
+    from . import schedules
+    if m == "GET": return schedules.list_tasks(conn, include_deleted=q.get("all") == "1")
+    if m == "POST":
+        try: return schedules.create_task(conn, b, actor)
+        except ValueError as exc: raise api.BadRequest(str(exc))
+
+
+def r_scheduled_task(conn, m, mm, q, b, actor):
+    from . import schedules
+    task_id = int(mm.group(1))
+    if m == "GET": return schedules.get_task(conn, task_id)
+    if m in ("PATCH", "PUT", "POST"):
+        try: return schedules.update_task(conn, task_id, b, actor)
+        except ValueError as exc: raise api.BadRequest(str(exc))
+    if m == "DELETE": return schedules.delete_task(conn, task_id, actor)
+
+
+def r_scheduled_runs(conn, m, mm, q, b, actor):
+    from . import schedules
+    return schedules.list_runs(conn, int(mm.group(1)), q.get("limit", 100)) if m == "GET" else None
+
+
+def r_scheduled_task_action(conn, m, mm, q, b, actor):
+    from . import schedules
+    task_id, action = int(mm.group(1)), mm.group(2)
+    if m != "POST": return None
+    try:
+        if action in ("pause", "resume"):
+            return schedules.set_status(conn, task_id, "paused" if action == "pause" else "active", actor)
+        if action == "run-now": return schedules.run_now(conn, task_id, actor)
+    except ValueError as exc:
+        raise api.BadRequest(str(exc))
+    return None
 
 
 def r_ticket_retry(conn, m, mm, q, b, actor):
@@ -754,6 +790,10 @@ ROUTES = [
     (r"/api/runner/orchestrator", r_orchestrator),
     (r"/api/runner/settings", r_runner_settings),
     (r"/api/runner/templates", r_templates),
+    (r"/api/scheduled-tasks/(\d+)/runs", r_scheduled_runs),
+    (r"/api/scheduled-tasks/(\d+)/(pause|resume|run-now)", r_scheduled_task_action),
+    (r"/api/scheduled-tasks/(\d+)", r_scheduled_task),
+    (r"/api/scheduled-tasks", r_scheduled_tasks),
     (r"/api/tickets/(\d+)/runner", r_runner_ticket),
     (r"/api/tickets/(\d+)/retry", r_ticket_retry),
     (r"/api/overview", r_overview),

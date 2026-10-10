@@ -872,7 +872,7 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
                   parent_id: int | None = None, board_id: int | None = None,
                   ready_for_execution: bool = False,
                   agent_template_id: int | None = None, recommended_workers: int | None = None,
-                  collaboration_required: bool | None = None) -> dict:
+                  collaboration_required: bool | None = None, workspace: str = "") -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -891,14 +891,18 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
     agent_template_id = _template_id(conn, agent_template_id)
     recommended_workers = _worker_count(recommended_workers)
     collaboration_required = _execution_flag(type_ == 'job' if collaboration_required is None else collaboration_required)
+    if workspace:
+        from .workspace import workspace_path
+        try: workspace = workspace_path({"workspace": workspace}, create_default=False)
+        except ValueError as exc: raise BadRequest(str(exc))
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "
-        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at, recommended_workers, collaboration_required) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "tags, due_at, parent_id, board_id, ready_for_execution, agent_template_id, created_at, updated_at, recommended_workers, collaboration_required, workspace) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title.strip(), body or "", type_, "open", priority, department or "", assignee or "",
          requester or "", _tags(tags), due_at, parent_id, board_id, ready_for_execution,
-         agent_template_id, ts, ts, recommended_workers, collaboration_required),
+         agent_template_id, ts, ts, recommended_workers, collaboration_required, workspace or ""),
     )
     tid = cur.lastrowid
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
@@ -915,7 +919,7 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if not t:
         raise NotFound(f"ticket #{tid} not found")
     allowed = {"title", "body", "type", "status", "priority", "department", "assignee",
-               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required"}
+               "tags", "result", "due_at", "parent_id", "board_id", "ready_for_execution", "agent_template_id", "recommended_workers", "collaboration_required", "workspace"}
     data = {k: v for k, v in fields.items() if k in allowed and (v is not None or k in ("agent_template_id", "recommended_workers"))}
     if "status" in data and data["status"] not in TICKET_STATUSES:
         raise BadRequest(f"status must be one of {TICKET_STATUSES}")
@@ -928,6 +932,12 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     if 'collaboration_required' in data: data['collaboration_required'] = _execution_flag(data['collaboration_required'])
     if "agent_template_id" in data:
         data["agent_template_id"] = _template_id(conn, data["agent_template_id"])
+    if "workspace" in data:
+        if not isinstance(data["workspace"], str): raise BadRequest("workspace must be a folder path")
+        if data["workspace"].strip():
+            from .workspace import workspace_path
+            try: data["workspace"] = workspace_path({"workspace": data["workspace"]}, create_default=False)
+            except ValueError as exc: raise BadRequest(str(exc))
     if 'recommended_workers' in data: data['recommended_workers'] = _worker_count(data['recommended_workers'])
     if "parent_id" in data:
         pid = data["parent_id"]
