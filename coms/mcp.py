@@ -99,6 +99,7 @@ TOOLS = [
 
 COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
 DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_file_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
+MONITOR_TOOLS = {'ticket_get', 'agents_list', 'team_roster', 'team_read', 'team_send', 'team_note', 'team_reply', 'wiki_get', 'source_get'}
 
 
 def validate(spec, arguments):
@@ -122,19 +123,25 @@ def validate(spec, arguments):
             raise ValueError(f"invalid argument: {key}")
 
 
-def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=False):
+def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=False, monitor_only=False):
     spec = next((t for t in TOOLS if t["name"] == name), None)
-    if not spec or (readonly and not spec["annotations"]["readOnlyHint"]) or (collaboration and name not in COLLABORATION_TOOLS) or (dispatch_only and name not in DISPATCH_TOOLS):
+    if not spec or (readonly and not spec["annotations"]["readOnlyHint"]) or (collaboration and name not in COLLABORATION_TOOLS) or (dispatch_only and name not in DISPATCH_TOOLS) or (monitor_only and name not in MONITOR_TOOLS):
         raise ValueError(f"tool unavailable: {name}")
     validate(spec, args)
     actor = os.environ.get("COMS_AGENT", "agent-runner")
     assigned = os.environ.get("COMS_TICKET_ID")
+    if monitor_only and (not assigned or ('job_id' in args and args['job_id']!=int(assigned))):
+        raise ValueError('Monitor only the job assigned to this heartbeat')
     response_to = os.environ.get('COMS_TEAM_MESSAGE_ID')
     if response_to and name == 'team_reply' and args['message_id'] != int(response_to):
         raise ValueError('Reply to the message assigned to this response turn')
     if assigned and name in ("ticket_result", "ticket_comment", "ticket_link") and args["id"] != int(assigned):
         raise ValueError("execution agent may only change its assigned ticket")
     conn = db.connect(readonly=readonly)
+    if monitor_only and name=='team_reply':
+        message=conn.execute('SELECT job_id FROM team_messages WHERE id=?',(args['message_id'],)).fetchone()
+        if not message or message['job_id']!=int(assigned):
+            raise ValueError('Reply only within the job assigned to this heartbeat')
     if name == "board_search": result = api.search_all(conn, args["query"])
     elif name == "wiki_list": result = api.list_wiki(conn)
     elif name == "wiki_get":
@@ -276,7 +283,7 @@ def _schedule_payload(conn, args, task_id=None):
     return data
 
 
-def dispatch(message, readonly=False, collaboration=False, dispatch_only=False):
+def dispatch(message, readonly=False, collaboration=False, dispatch_only=False, monitor_only=False):
     mid = message.get("id")
     if mid is None: return None
     method = message.get("method")
@@ -288,9 +295,9 @@ def dispatch(message, readonly=False, collaboration=False, dispatch_only=False):
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "swarm-agent", "version": "1.0.0"}}
     elif method == "ping": result = {}
     elif method == "tools/list":
-        result = {"tools": [t for t in TOOLS if (not readonly or t["annotations"]["readOnlyHint"]) and (not collaboration or t['name'] in COLLABORATION_TOOLS) and (not dispatch_only or t['name'] in DISPATCH_TOOLS)]}
+        result = {"tools": [t for t in TOOLS if (not readonly or t["annotations"]["readOnlyHint"]) and (not collaboration or t['name'] in COLLABORATION_TOOLS) and (not dispatch_only or t['name'] in DISPATCH_TOOLS) and (not monitor_only or t['name'] in MONITOR_TOOLS)]}
     elif method == "tools/call":
-        try: result = call_tool(params.get("name"), params.get("arguments", {}), readonly=readonly, collaboration=collaboration, dispatch_only=dispatch_only)
+        try: result = call_tool(params.get("name"), params.get("arguments", {}), readonly=readonly, collaboration=collaboration, dispatch_only=dispatch_only, monitor_only=monitor_only)
         except (ValueError, api.BadRequest, api.NotFound) as exc:
             result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
     else:
@@ -303,6 +310,7 @@ def main():
     parser.add_argument("--readonly", action="store_true")
     parser.add_argument("--collaboration", action="store_true")
     parser.add_argument("--dispatch", action="store_true")
+    parser.add_argument("--monitor", action="store_true")
     args = parser.parse_args()
     try:
         for line in sys.stdin:
@@ -310,7 +318,7 @@ def main():
             try:
                 message = json.loads(line)
                 if not isinstance(message, dict): raise ValueError("request must be an object")
-                response = dispatch(message, args.readonly, args.collaboration, args.dispatch)
+                response = dispatch(message, args.readonly, args.collaboration, args.dispatch, args.monitor)
             except Exception as exc:
                 response = {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,
                             "error": {"code": -32603, "message": str(exc)}}

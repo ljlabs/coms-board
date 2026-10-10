@@ -122,6 +122,7 @@ class AcpConnection:
         self._pending: Dict[int, _Pending] = {}
         self._write_lock = threading.Lock()
         self._pending_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._closed = threading.Event()
         self._last_rx = time.monotonic()      # activity clock: last inbound frame
         self._reader: Optional[threading.Thread] = None
@@ -136,21 +137,23 @@ class AcpConnection:
         if not os.path.isdir(self.cwd):
             raise AcpError(f"workspace does not exist: {self.cwd}")
         self.log(f"spawn: {' '.join([self.binary] + self.command_args)} (cwd={self.cwd})")
-        self.proc = subprocess.Popen(
-            [self.binary] + self.command_args,
-            cwd=self.cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, **self.extra_env},
-            bufsize=0,
-        )
-        self._reader = threading.Thread(target=self._read_loop, daemon=True,
-                                        name=f"acp-read-{os.getpid()}")
-        self._reader.start()
-        self._stderrer = threading.Thread(target=self._stderr_loop, daemon=True,
-                                          name="acp-stderr")
-        self._stderrer.start()
+        with self._lifecycle_lock:
+            if self._closed.is_set(): raise AcpError("connection closed")
+            self.proc = subprocess.Popen(
+                [self.binary] + self.command_args,
+                cwd=self.cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, **self.extra_env},
+                bufsize=0,
+            )
+            self._reader = threading.Thread(target=self._read_loop, daemon=True,
+                                            name=f"acp-read-{os.getpid()}")
+            self._reader.start()
+            self._stderrer = threading.Thread(target=self._stderr_loop, daemon=True,
+                                              name="acp-stderr")
+            self._stderrer.start()
 
         init = self.request(
             "initialize",
@@ -173,24 +176,26 @@ class AcpConnection:
         return init
 
     def close(self) -> None:
-        if self._closed.is_set():
-            return
-        self._closed.set()
-        proc = self.proc
-        if proc and proc.poll() is None:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                proc.terminate()
-                proc.wait(timeout=4)
-            except Exception:
+        # EOF can arrive before poll() observes process exit (notably when an
+        # ACP child closes stdout but keeps running).  The reader sets
+        # _closed in that case, but close still has to terminate and reap it.
+        with self._lifecycle_lock:
+            self._closed.set()
+            proc = self.proc
+            if proc and proc.poll() is None:
                 try:
-                    proc.kill()
-                    proc.wait(timeout=4)
+                    proc.stdin.close()
                 except Exception:
                     pass
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=4)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=4)
+                    except Exception:
+                        pass
         for worker in (self._reader, self._stderrer):
             if worker and worker is not threading.current_thread(): worker.join(timeout=1)
         if proc:
@@ -210,7 +215,7 @@ class AcpConnection:
     # ------------------------------------------------------------ transport
     def _write(self, msg: Dict[str, Any]) -> None:
         proc = self.proc
-        if not proc or proc.poll() is not None:
+        if self._closed.is_set() or not proc or proc.poll() is not None:
             raise AcpError("ACP process is not running")
         data = (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
         with self._write_lock:
@@ -292,18 +297,19 @@ class AcpConnection:
             self.log(f"read loop error: {exc}")
         finally:
             rc = proc.poll()
+            reason = f"process exited (rc={rc})" if rc is not None else "stdout closed before process exit (rc=None)"
             first = not self._closed.is_set()
             self._closed.set()
             with self._pending_lock:
                 pend = list(self._pending.values())
                 self._pending.clear()
             for p in pend:
-                p.error = f"ACP process exited (rc={rc})"
+                p.error = "ACP " + reason
                 p.event.set()
             if first:
-                self.log(f"ACP process exited (rc={rc})")
+                self.log("ACP " + reason)
                 try:
-                    self.on_close(f"process exited (rc={rc})")
+                    self.on_close(reason)
                 except Exception as exc:
                     self.log(f"on_close error: {exc}")
             self.on_thread_exit()

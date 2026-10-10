@@ -682,6 +682,13 @@ def r_orchestrator_sessions(conn, m, _mm, q, b, actor):
         except ValueError as e: raise api.BadRequest(str(e))
 
 
+def r_orchestrator_stop(conn, m, mm, _q, _b, _actor):
+    if m != "POST": return None
+    from .runner import RUNNER
+    try: return RUNNER.stop_orchestrator(mm.group(1))
+    except ValueError as e: raise api.BadRequest(str(e))
+
+
 def r_orchestrator_session(conn, m, mm, q, b, actor):
     from .runner import RUNNER
     sid = mm.group(1)
@@ -802,6 +809,7 @@ ROUTES = [
     (r"/api/runner/debug", r_runner_debug),
     (r"/api/runner/status", r_runner_status),
     (r"/api/runner/sessions", r_orchestrator_sessions),
+    (r"/api/runner/sessions/([^/]+)/stop", r_orchestrator_stop),
     (r"/api/runner/sessions/([^/]+)/messages", r_orchestrator_messages),
     (r"/api/runner/sessions/([^/]+)", r_orchestrator_session),
     (r"/api/runner/orchestrator", r_orchestrator),

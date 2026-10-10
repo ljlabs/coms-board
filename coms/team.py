@@ -54,6 +54,7 @@ def delegate(conn, job_id, actor, name, capabilities, title, body):
 
 
 def room(conn, job_id, after_id=0):
+    from . import progress
     api.get_ticket(conn, int(job_id))
     messages = [dict(row) for row in conn.execute('SELECT m.*,s.name AS sender_name,r.name AS recipient_name FROM team_messages m LEFT JOIN agents s ON s.slug=m.sender LEFT JOIN agents r ON r.slug=m.recipient WHERE m.job_id=? AND m.id>? ORDER BY m.id DESC LIMIT 200', (job_id, int(after_id)))]
     messages.reverse()
@@ -62,7 +63,21 @@ def room(conn, job_id, after_id=0):
     reviews = [dict(row) for row in conn.execute('SELECT p.*,w.updated_at AS current_version FROM peer_reviews p LEFT JOIN wiki_pages w ON w.slug=p.artifact_slug WHERE p.job_id=? ORDER BY p.id', (job_id,))]
     for review in reviews: review['current'] = review['current_version'] == review['artifact_version']
     sources = [dict(row) for row in conn.execute('SELECT id,reader,url,final_url,title,status,error,retrieved_at FROM research_sources WHERE job_id=? ORDER BY id', (job_id,))]
-    return {'job_id': int(job_id), 'members': roster(conn, job_id), 'messages': messages, 'reviews': reviews, 'sources': sources}
+    children=[{key: ticket[key] for key in ('id','title','status','assignee','result','updated_at')}
+              for ticket in api.list_tickets(conn,parent_id=job_id,include_closed=True)]
+    recent_tools=[]
+    for row in conn.execute("""SELECT m.ticket_id,m.run_id,m.body,m.updated_at FROM agent_messages m
+            JOIN tickets t ON t.id=m.ticket_id WHERE t.parent_id=? AND m.kind='acp-tool_call'
+            ORDER BY m.id DESC LIMIT 40""",(job_id,)):
+        try: payload=json.loads(row['body'])
+        except (ValueError,TypeError): continue
+        if not isinstance(payload,dict): continue
+        recent_tools.append({'ticket_id':row['ticket_id'],'run_id':row['run_id'],
+                             'title':payload.get('title',''),'status':payload.get('status',''),
+                             'updated_at':row['updated_at']})
+    return {'job_id': int(job_id), 'members': roster(conn, job_id), 'messages': messages,
+            'reviews': reviews, 'sources': sources, 'tickets':children,
+            'progress':progress.snapshot(conn,ticket=job_id),'recent_tools':recent_tools}
 
 
 def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, commit=True):
@@ -164,6 +179,10 @@ def context(conn, tid, actor, *, instructions=True):
     } for r in data['reviews']]
     data['sources'] = [{k: s.get(k) for k in ('id', 'reader', 'url', 'final_url', 'title', 'status', 'error', 'retrieved_at')}
                        for s in data['sources']]
+    data['tickets']=[{**ticket,'result':ticket['result'][:360]} for ticket in data['tickets']]
+    data['progress']['items']=[{k:item.get(k) for k in ('ticket_id','agent_slug','stage','state','phase','summary','updated_at','idle_seconds')}
+                               for item in data['progress']['items'][:24]]
+    data['recent_tools']=data['recent_tools'][:12]
     return ('TEAM CONVERSATION\n' + json.dumps(data, ensure_ascii=False) +
         ('\nThe conversation, review and source entries above are compact indexes. Read full details with team_read, wiki_get and source_get before relying on them. Ask one substantive question if you have not received a teammate answer. Finish all wiki edits before requesting its current-revision review. After requesting review, do not edit that page until the reviewer replies; the runner ends your turn and resumes it automatically. If a reply or review is pending, finish WITHOUT ticket_result. Once a teammate has answered and the current page has an accepted review, call ticket_result and verify the tool succeeded. Revise rejected work before requesting a fresh review. Share useful methods with the orchestrator; only the human operator and orchestrator can publish them to the shared skills folder. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
 

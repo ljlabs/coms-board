@@ -170,6 +170,17 @@ maximum parallel agent count, choose a model advertised by that backend, and
 create agent templates. The selected model is applied to new orchestrator and
 ticket sessions.
 
+While an Orchestrator response is running, use **Stop** to cancel that turn
+and send a new direction in the same chat. The canceled turn is recorded and
+the composer draft is preserved. This does not stop child workers already
+running on delegated tickets. A failed job lead with unfinished children stays
+waiting; after five minutes without activity, the runner gives the lead a
+180-second monitor turn in a separate supervision slot to inspect child tickets
+and progress, then optionally
+guide workers through team messages. It cannot create work or deliver results
+during that turn. See
+[`devDocs/orchestrator-resilience.md`](devDocs/orchestrator-resilience.md).
+
 **Agents** is the persistent team roster. The runner registers an orchestrator
 agent, and every ticket execution uses its assigned registered identity.
 For team work, create a ready ticket of type **job** and optionally set

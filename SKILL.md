@@ -129,6 +129,19 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
 
 ## Working with other agents
 
+In the Orchestrator chat, the human operator can stop an active response and
+steer the same conversation; the canceled turn stays in the transcript and the
+composer draft is preserved. This stop applies to that orchestrator response,
+not to independent child workers. A job lead with unfinished children remains
+waiting after a failed turn. After five idle minutes, the runner may issue a
+180-second monitor turn in a separate supervision slot. `team_read` supplies child tickets, live progress, and
+compact recent tool history; the monitor must successfully call it. Its
+`--monitor` tool surface allows reads plus `team_send`, `team_note`, and replies
+to existing questions with `team_reply`, scoped to
+the assigned job. It cannot author deliverables, redelegate, or deliver ticket
+results. See
+`devDocs/orchestrator-resilience.md` for the lifecycle contract.
+
 Agents often work at the same time: sub-agents dispatched for one job, owners of sibling
 tickets, or separate sessions. Help each other through the board while you work, not only when
 you finish. A job with several workers usually has one shared question for their findings; if

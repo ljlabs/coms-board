@@ -19,6 +19,9 @@ adds durable behavior that needs its own design note.
   contracts.
 - [Ticket runner chat](ticket-runner-chat.md): shared conversation rendering,
   stage labels, and follow-ups after a restart.
+- [Orchestrator stop and recovery](orchestrator-resilience.md): canceling an
+  active response, recovering idle ACP sessions, and heartbeat runs for waiting
+  team leads.
 - [Ticket board moves](ticket-board-moves.md): drag-and-drop status changes and
   keyboard/touch controls.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent

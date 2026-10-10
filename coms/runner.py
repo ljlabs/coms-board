@@ -17,6 +17,10 @@ MAX_AGENT_RETRIES = 2
 AGENT_RETRY_BASE_SECONDS = 15
 MAX_TEAM_ATTEMPTS = 3
 TEAM_RETRY_BASE_SECONDS = 15
+TEAM_HEARTBEAT_SECONDS = 300
+TEAM_MONITOR_SECONDS = 180
+ORCHESTRATOR_RESTART_SECONDS = 30
+ORCHESTRATOR_STOP_GRACE_SECONDS = 3
 
 
 def _retry_due(retry_count, finished_at, *, max_retries, base_seconds, now=None):
@@ -145,13 +149,13 @@ def _release_acp_db():
         db._local.__dict__.clear()
 
 
-def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaboration_message_id=None, dispatch_only=False):
+def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaboration_message_id=None, dispatch_only=False, monitor_only=False):
     env = {'COMS_DB': str(db.db_path().resolve()), 'COMS_AGENT': actor}
     if ticket_id is not None: env['COMS_TICKET_ID'] = str(ticket_id)
     if run_id is not None: env['COMS_RUN_ID'] = str(run_id)
     if collaboration_message_id is not None: env['COMS_TEAM_MESSAGE_ID'] = str(collaboration_message_id)
     return [{'name': 'swarm-agent', 'command': sys.executable,
-             'args': [str(ROOT / 'coms' / 'mcp.py')] + (['--readonly'] if readonly else []) + (['--collaboration'] if collaboration_message_id is not None else []) + (['--dispatch'] if dispatch_only else []),
+             'args': [str(ROOT / 'coms' / 'mcp.py')] + (['--readonly'] if readonly else []) + (['--collaboration'] if collaboration_message_id is not None else []) + (['--dispatch'] if dispatch_only else []) + (['--monitor'] if monitor_only else []),
              'env': [{'name': k, 'value': v} for k, v in env.items()]}]
 
 # Shared instructions are deliberately prepended to every execution agent's
@@ -194,8 +198,13 @@ class Runner:
         self.orchestrator_context = {}; self.orchestrator_conn_lock = threading.RLock()
         self.orchestrator_busy = False
         self.orchestrator_session = None
+        self.orchestrator_stop_event = None
+        self.orchestrator_stop_turn_id = None
+        self.orchestrator_health_checked = 0.0
+        self.orchestrator_restarting = False
         self.review_conns = {}
         self.recorders = {}
+        self.heartbeat_tickets = set()
         self._lease = None
         self.thread = None
         if start: self.start()
@@ -259,7 +268,7 @@ class Runner:
         if self.thread: self.thread.join(timeout=5)
         if self._lease:
             self._lease.close(); self._lease=None
-    def _conn(self, ticket_id, backend, cwd, run_id=None, actor_override=None, collaboration_message_id=None, dispatch_only=False, resume_session=None):
+    def _conn(self, ticket_id, backend, cwd, run_id=None, actor_override=None, collaboration_message_id=None, dispatch_only=False, resume_session=None, monitor_only=False):
         actor = actor_override or api.get_ticket(db.connect(), ticket_id).get('assignee') or 'agent-runner'
         recorder = self.recorders.get(run_id)
         def log(line): self._message(ticket_id, run_id, 'system', 'acp-log', line)
@@ -267,7 +276,7 @@ class Runner:
             params=msg.get('params') or {}; update=params.get('update') or {}
             if recorder:
                 recorder.notification(update)
-                if collaboration_message_id is None and not dispatch_only and update.get('sessionUpdate') == 'tool_call_update':
+                if collaboration_message_id is None and not dispatch_only and not monitor_only and update.get('sessionUpdate') == 'tool_call_update':
                     record = recorder.tools.get(update.get('toolCallId'))
                     payload = record[1] if record else update
                     if payload.get('status') == 'completed' and payload.get('title', '').endswith(('_team_send', '_team_request_review')) and team.pending(db.connect(), ticket_id, actor):
@@ -289,8 +298,12 @@ class Runner:
         research = api.get_ticket(db.connect(), ticket_id)['type'] == 'research'
         ticket=api.get_ticket(db.connect(), ticket_id)
         job=team.job_for_ticket(db.connect(), ticket_id)
-        board_only=ticket['type']=='research' or bool(job and job.get('collaboration_required')) or dispatch_only or collaboration_message_id is not None
-        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor,'COMS_BOARD_ONLY':'1' if board_only else '0'}), mcp_servers=board_servers(actor,ticket_id,run_id,collaboration_message_id=collaboration_message_id,dispatch_only=dispatch_only))
+        board_only=ticket['type']=='research' or bool(job and job.get('collaboration_required')) or dispatch_only or monitor_only or collaboration_message_id is not None
+        c=AcpConnection(cmd[0], cwd, command_args=cmd[1:], on_notification=notification, on_request=request, on_close=lambda _e:None, logger=log, on_thread_exit=_release_acp_db, env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor,'COMS_BOARD_ONLY':'1' if board_only else '0'}), mcp_servers=board_servers(actor,ticket_id,run_id,collaboration_message_id=collaboration_message_id,dispatch_only=dispatch_only,monitor_only=monitor_only))
+        if monitor_only:
+            c.monitor_timer=threading.Timer(TEAM_MONITOR_SECONDS,c.close)
+            c.monitor_timer.daemon=True
+            c.monitor_timer.start()
         try:
             c.start()
             restored = False
@@ -308,6 +321,7 @@ class Runner:
             c.ticket_restored = restored
             self._apply_model(c,backend,self.settings()); return c
         except Exception:
+            if monitor_only: c.monitor_timer.cancel()
             c.close(); raise
     @staticmethod
     def _apply_model(conn,backend,settings):
@@ -325,8 +339,9 @@ class Runner:
         cwd=workspace_path(settings)
         if backend==settings.get('active_backend','opencode'):
             c=self._orchestrator_connection(backend,cwd,settings)
-            option=next((o for o in c.config_options if o.get('id')=='model'),{})
-            return {'backend':backend,'models':c.models(),'current':c.current_model(),'config_id':option.get('id','model')}
+            if c is not None:
+                option=next((o for o in c.config_options if o.get('id')=='model'),{})
+                return {'backend':backend,'models':c.models(),'current':c.current_model(),'config_id':option.get('id','model')}
         key=(backend,tuple(cmd),cwd,settings.get('opencode_api_base_url',''),settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
         with self.model_lock:
             c=self.model_conns.get(key)
@@ -366,7 +381,9 @@ class Runner:
         except Exception:
             logging.exception('Swarm Agent worker %s failed', key)
         finally:
-            with self.lock: self.active.pop(key,None)
+            with self.lock:
+                self.active.pop(key,None)
+                self.heartbeat_tickets.discard(key)
             conn=getattr(db._local,'conn',None)
             if conn: conn.close()
             db._local.__dict__.clear()
@@ -374,23 +391,26 @@ class Runner:
         while not self.stopping.wait(1):
             try:
                 self._resume_waiting()
+                self._team_heartbeat()
+                self._restart_orchestrator_if_needed()
                 settings=self.settings(); maximum=max(1,min(16,int(settings.get('parallel_agents','2'))))
                 schedules.dispatch_due(db.connect())
                 with self.lock:
-                    if len(self.active)>=maximum: continue
                     conn=db.connect()
+                    self._schedule_team_heartbeats(conn)
+                    if self._active_slots()>=maximum: continue
                     self._schedule_team_replies(conn, maximum)
-                    if len(self.active)>=maximum: continue
+                    if self._active_slots()>=maximum: continue
                     rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND r.status IN ('queued','running','waiting')) AND NOT EXISTS (SELECT 1 FROM agent_runs busy WHERE t.assignee!='' AND busy.agent_slug=t.assignee AND busy.status='running') ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT 100").fetchall()
                     for row in rows:
-                        if len(self.active)>=maximum: break
+                        if self._active_slots()>=maximum: break
                         if not self._automatic_run_retry_ready(conn, dict(row)): continue
                         if row['parent_id'] and conn.execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='running' AND stage='execute'", (row['parent_id'],)).fetchone(): continue
                         if row['id'] in self.active or 'review:'+str(row['id']) in self.active: continue
                         if 'team:'+row['assignee'] in self.active: continue
                         self.active[row['id']]=True
                         threading.Thread(target=self._worker,args=(row['id'],self._work,dict(row)),daemon=True).start()
-                    slots=maximum-len(self.active)
+                    slots=maximum-self._active_slots()
                     if slots>0:
                         review_rows=conn.execute("""SELECT t.*,a.role AS agent_role,
                             coalesce((SELECT id FROM agent_runs ar WHERE ar.ticket_id=t.id AND ar.status='completed' AND ar.stage!='collaborate' ORDER BY ar.id DESC LIMIT 1),0) AS review_run_id,
@@ -445,6 +465,98 @@ class Runner:
         conn.commit()
         return resumed
 
+    def _team_heartbeat(self):
+        """Wake stale job leads for a short check-in while child work is active."""
+        cutoff=(datetime.now(timezone.utc)-timedelta(seconds=TEAM_HEARTBEAT_SECONDS)).isoformat()
+        conn=db.connect()
+        rows=conn.execute("""SELECT t.id,t.assignee,r.id AS run_id,
+                   coalesce(nullif(rt.updated_at,''),nullif(r.finished_at,''),r.started_at) AS updated_at
+            FROM tickets t JOIN agents a ON a.slug=t.assignee
+            JOIN agent_runs r ON r.ticket_id=t.id AND r.status IN ('waiting','failed')
+              AND r.stage IN ('execute','synthesize','heartbeat')
+              AND r.id=(SELECT max(latest.id) FROM agent_runs latest
+                        WHERE latest.ticket_id=t.id AND latest.stage!='collaborate')
+            LEFT JOIN agent_runtime rt ON rt.key='run:'||r.id
+            WHERE t.type='job' AND t.ready_for_execution=1 AND t.status='in_progress'
+              AND lower(a.role) IN ('orchestrator','lead')
+              AND lower(t.assignee) NOT LIKE 'human%' AND lower(t.tags) NOT LIKE '%human%'
+              AND EXISTS(SELECT 1 FROM tickets child WHERE child.parent_id=t.id
+                         AND child.status NOT IN ('done','wontfix'))
+              AND NOT EXISTS(SELECT 1 FROM agent_runs active WHERE active.ticket_id=t.id
+                             AND active.status IN ('queued','running'))
+            ORDER BY coalesce(rt.updated_at,r.finished_at,r.started_at) LIMIT 40""").fetchall()
+        queued=[]
+        with self.lock:
+            for row in rows:
+                last_check=row['updated_at'] or ''
+                if last_check and last_check > cutoff: continue
+                tid=int(row['id'])
+                if tid in self.active or 'review:'+str(tid) in self.active: continue
+                changed=conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=? AND status IN ('waiting','failed')",
+                                     (now(),row['run_id'])).rowcount
+                if not changed: continue
+                conn.execute("UPDATE agent_runtime SET state='completed',phase='heartbeat',summary='Team heartbeat due; lead will check active teammates.',updated_at=?,finished_at=? WHERE key=?",
+                             (now(),now(),'run:'+str(row['run_id'])))
+                api.log_activity(conn,row['assignee'],'team.heartbeat',f'ticket:{tid}',
+                                 f'Waking the lead for a team heartbeat on job #{tid}')
+                queued.append(tid)
+        if queued: conn.commit()
+
+    def _restart_orchestrator_if_needed(self):
+        """Periodically replace a dead idle ACP process without waiting for a send."""
+        current=time.monotonic()
+        if current-self.orchestrator_health_checked < ORCHESTRATOR_RESTART_SECONDS: return
+        self.orchestrator_health_checked=current
+        with self.lock:
+            if self.orchestrator_busy or self.stopping.is_set() or self.orchestrator_restarting: return
+            connection=self.orchestrator_conn
+            if connection is not None and connection.alive: return
+            self.orchestrator_restarting=True
+        def restart():
+            try:
+                with self.orchestrator_conn_lock:
+                    if self.orchestrator_busy or self.stopping.is_set(): return
+                    current=self.orchestrator_conn
+                    if current is not None and current.alive: return
+                    if current is not None: current.close()
+                    self.orchestrator_conn=None; self.orchestrator_conn_key=None
+                self._warm_orchestrator()
+            finally:
+                with self.lock: self.orchestrator_restarting=False
+        # ACP initialization may take a minute; keep the worker scheduler free.
+        threading.Thread(target=restart,daemon=True,name='coms-orchestrator-health').start()
+
+    def _active_slots(self):
+        return sum(key not in self.heartbeat_tickets for key in self.active)
+
+    def _schedule_team_heartbeats(self,conn):
+        """One bounded supervision slot remains available even if workers are full."""
+        if self.stopping.is_set() or any(tid in self.active for tid in self.heartbeat_tickets): return
+        rows=conn.execute("""SELECT t.* FROM tickets t JOIN agents a ON a.slug=t.assignee
+            JOIN agent_runs r ON r.ticket_id=t.id
+            JOIN agent_runtime rt ON rt.key='run:'||r.id
+            WHERE t.type='job' AND t.ready_for_execution=1 AND t.status='in_progress'
+              AND lower(a.role) IN ('orchestrator','lead') AND lower(t.tags) NOT LIKE '%human%'
+              AND lower(t.assignee) NOT LIKE 'human%'
+              AND r.status='completed' AND rt.phase='heartbeat'
+              AND r.id=(SELECT max(latest.id) FROM agent_runs latest
+                        WHERE latest.ticket_id=t.id AND latest.stage!='collaborate')
+              AND NOT EXISTS(SELECT 1 FROM agent_runs busy
+                             WHERE busy.agent_slug=t.assignee AND busy.status IN ('queued','running'))
+            ORDER BY rt.updated_at LIMIT 40""").fetchall()
+        for row in rows:
+            tid=row['id']
+            if tid in self.active or 'review:'+str(tid) in self.active or 'team:'+row['assignee'] in self.active: continue
+            ready=api.children_resolved if row['collaboration_required'] else api.children_delivered
+            if ready(conn,tid): continue
+            self.active[tid]=True; self.heartbeat_tickets.add(tid)
+            try:
+                threading.Thread(target=self._worker,args=(tid,self._work,dict(row)),daemon=True).start()
+            except Exception:
+                self.active.pop(tid,None); self.heartbeat_tickets.discard(tid)
+                raise
+            break
+
     @staticmethod
     def _automatic_run_retry_ready(conn, ticket):
         if ticket.get('agent_retry_requested'):
@@ -457,7 +569,7 @@ class Runner:
     def _schedule_team_replies(self, conn, maximum):
         rows = conn.execute("SELECT d.message_id,d.recipient,a.role FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id JOIN agents a ON a.slug=d.recipient JOIN tickets j ON j.id=m.job_id WHERE d.status='pending' AND d.attempt_count<? AND (d.attempt_count=0 OR julianday(d.updated_at)+(? * (1 << max(0,d.attempt_count-1))) / 86400.0 <= julianday(?)) AND j.ready_for_execution=1 AND j.status!='wontfix' AND lower(a.role)!='human' AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.agent_slug=d.recipient AND r.status='running') ORDER BY d.message_id LIMIT 40", (MAX_TEAM_ATTEMPTS, TEAM_RETRY_BASE_SECONDS, now())).fetchall()
         for row in rows:
-            if len(self.active) >= maximum: break
+            if self._active_slots() >= maximum: break
             key = 'team:' + row['recipient']
             if key in self.active: continue
             if row['role'] == 'orchestrator' and (self.orchestrator_busy or any(str(k).startswith('review:') for k in self.active)): continue
@@ -524,7 +636,7 @@ class Runner:
             with self.lock: self.active.pop(tid,None)
             return
         t=dict(current)
-        previous_run=conn.execute("SELECT status,stage FROM agent_runs WHERE ticket_id=? AND stage!='collaborate' ORDER BY id DESC LIMIT 1",(tid,)).fetchone()
+        previous_run=conn.execute("SELECT r.status,r.stage,rt.phase FROM agent_runs r LEFT JOIN agent_runtime rt ON rt.key='run:'||r.id WHERE r.ticket_id=? AND r.stage!='collaborate' ORDER BY r.id DESC LIMIT 1",(tid,)).fetchone()
         retry_count=int(t.get('agent_retry_count') or 0)
         if t.get('agent_retry_requested'):
             retry_count=0
@@ -539,7 +651,14 @@ class Runner:
             return
         t['assignee'] = agent['slug']
         children = api.list_tickets(conn, parent_id=tid, include_closed=True)
-        stage = 'synthesize' if t['type'] == 'job' and children else 'execute'
+        children_ready = api.children_resolved if t.get('collaboration_required') else api.children_delivered
+        heartbeat = bool(t['type'] == 'job' and children and not children_ready(conn, tid)
+                         and previous_run and previous_run['status']=='completed' and previous_run['phase']=='heartbeat')
+        if tid in self.heartbeat_tickets and not heartbeat:
+            # Children finished after scheduling: synthesis uses a normal slot.
+            conn.rollback()
+            return
+        stage = 'heartbeat' if heartbeat else 'synthesize' if t['type'] == 'job' and children else 'execute'
         template=conn.execute('SELECT * FROM agent_templates WHERE id=? AND enabled=1',(t.get('agent_template_id'),)).fetchone() if t.get('agent_template_id') else None
         if template and template['backend']: backend=template['backend']
         cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,?,'running',?,?,?)",(tid,template['id'] if template else None,backend,now(),agent['slug'],stage)); rid=cur.lastrowid
@@ -547,11 +666,11 @@ class Runner:
         self._message(tid,rid,'system','status',f'Runner started with {backend}; priority {t["priority"]}.')
         recorder = progress.Recorder('run:' + str(rid), agent['slug'], tid, rid, backend)
         self.recorders[rid] = recorder
+        c=None
         try:
-            children_ready = api.children_resolved if t.get('collaboration_required') else api.children_delivered
-            if t['type'] == 'job' and children and not children_ready(conn, tid):
-                conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
-                recorder.finish('waiting', 'Waiting for existing teammates to deliver; synthesis will resume automatically')
+            if t['type']=='job' and children and not children_ready(conn,tid) and not heartbeat:
+                conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?",(rid,)); schedules.mark_ticket(conn,tid,'waiting'); conn.commit()
+                recorder.finish('waiting','Waiting for existing teammates; heartbeat will check their progress')
                 return
             if t.get('agent_template_id') and not template:
                 raise RuntimeError('Assigned agent template is missing or disabled; choose an enabled template before retrying.')
@@ -566,7 +685,7 @@ class Runner:
             previous = self.conns.pop(tid, None)
             if previous: previous.close()
             dispatch_only = t['type'] == 'job' and stage == 'execute' and bool(t.get('collaboration_required'))
-            c=self._conn(tid,backend,cwd,rid,dispatch_only=dispatch_only); self.conns[tid]=c
+            c=self._conn(tid,backend,cwd,rid,dispatch_only=dispatch_only,monitor_only=heartbeat); self.conns[tid]=c
             conn=db.connect(); conn.execute('UPDATE agent_runs SET session_id=? WHERE id=?',(c.session_id or '',rid)); conn.commit()
             prompt=BASE_AGENT_SYSTEM_PROMPT+'\n\n'
             prompt += f"REGISTERED AGENT\nName: {agent['name']}\nIdentity: {agent['slug']}\nRole: {agent['role']}\nCapabilities: {agent['description']}\nInstructions: {agent.get('instructions', '')}\n\n"
@@ -595,6 +714,17 @@ class Runner:
                           "Do not research, write wiki pages or deliver a result in this dispatch turn. After delegating all specialties, post a brief team_note and END YOUR TURN. "
                           "Workers start after you finish. You resume automatically for synthesis after their work and reviews complete. "
                           f"Suggested worker count: {t.get('recommended_workers') or 3}.\n\nJob: {t['title']}\n{t['body']}")
+            elif heartbeat:
+                prompt=(f"You are {agent['name']} ({agent['slug']}), the lead for job #{tid}. This is a bounded team heartbeat. "
+                        f"First call team_read(job_id={tid}). Inspect its child tickets, progress snapshots, recent_tools, conversations and pending deliveries. "
+                        "Check that teammates are advancing their assignments and that questions or reviews receive responses. "
+                        "Answer an existing unanswered question addressed to you with team_reply; inspect linked evidence using wiki_get/source_get when needed. "
+                        "If they are progressing, finish this check quietly. If a teammate is stalled, blocked, or repeatedly calling team_read without doing its assignment, "
+                        "give that existing teammate concise, specific guidance using team_send, or record a useful team_note. "
+                        "Read existing guidance and pending requests first; do not repeat an unanswered request. "
+                        "Use the attached Swarm Agent tools only. This monitor cannot create or delegate tickets, edit artifacts, deliver ticket_result, or start synthesis. "
+                        "End your turn after checking and guiding. The runner monitors again in five minutes and schedules synthesis once children are ready. "
+                        f"Use ticket_get to inspect a child's full assignment if needed.\n\nJob: {t['title']}\n{t['body']}")
             elif t['type'] != 'job' and team.job_for_ticket(conn, tid):
                 prompt += (f'\n\nCURRENT TURN CONTRACT: You are {agent["name"]}, the specialist assigned ticket #{tid}, NOT the job lead. '
                            'Perform your own scope only. Use existing answered questions instead of asking them again. '
@@ -604,9 +734,25 @@ class Runner:
                            'Do not recreate teammates, delegate their work, or write the combined synthesis.')
             self._message(tid,rid,'system','acp-prompt',prompt)
             recorder.set('working', 'Reading assignment and shared skills')
-            c.prompt(prompt,timeout=3600)
+            if heartbeat: c.prompt(prompt,timeout=TEAM_MONITOR_SECONDS,total_timeout=TEAM_MONITOR_SECONDS)
+            else: c.prompt(prompt,timeout=3600)
             recorder.flush(True)
             children = api.list_tickets(db.connect(), parent_id=tid, include_closed=True)
+            if stage == 'heartbeat':
+                checked=any(payload.get('status')=='completed'
+                            and (payload.get('title','')=='team_read' or payload.get('title','').endswith('_team_read'))
+                            and (payload.get('rawInput') or {}).get('job_id',tid)==tid
+                            for _row,payload in recorder.tools.values())
+                if not checked: raise RuntimeError('Team heartbeat finished without a successful team_read')
+                if children and not children_ready(db.connect(), tid):
+                    conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn,tid,'waiting'); conn.commit()
+                    recorder.finish('waiting', 'Team heartbeat complete; child work is still in progress')
+                    waiting=self.conns.pop(tid,None)
+                    if waiting: waiting.close()
+                    return
+                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=?",(now(),rid)); conn.commit()
+                recorder.finish('completed', 'Team heartbeat complete; all child work is ready for synthesis')
+                return
             if children and (stage != 'synthesize' or not children_ready(db.connect(), tid)):
                 conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Waiting for teammate results; synthesis will resume automatically')
@@ -627,6 +773,13 @@ class Runner:
             self._message(tid,rid,'system','status','Agent turn finished; ticket moved to review.')
             recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
         except Exception as e:
+            if t['type']=='job' and api.list_tickets(db.connect(), parent_id=tid, include_closed=True) and not children_ready(db.connect(), tid):
+                conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting',error=? WHERE id=?",(str(e),rid)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
+                self._message(tid,rid,'system','warning','Lead turn stopped while child work remained active; a team heartbeat will restart supervision: '+str(e))
+                recorder.finish('waiting', 'Lead turn stopped; heartbeat will resume team supervision')
+                waiting=self.conns.pop(tid,None)
+                if waiting: waiting.close()
+                return
             if team.pending(db.connect(), tid, agent['slug']):
                 conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting',error='' WHERE id=?", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Paused for teammate replies or peer review; will resume automatically')
@@ -638,6 +791,11 @@ class Runner:
             failed=self.conns.pop(tid,None)
             if failed: failed.close()
         finally:
+            if heartbeat and c:
+                timer=getattr(c,'monitor_timer',None)
+                if timer: timer.cancel()
+                if self.conns.get(tid) is c: self.conns.pop(tid,None)
+                c.close()
             with self.lock: self.active.pop(tid,None)
             self.recorders.pop(rid, None)
     def chat(self,tid,text):
@@ -649,7 +807,7 @@ class Runner:
             if tid in self.active: raise ValueError('The ticket agent is still working; wait for its current response.')
             if 'review:'+str(tid) in self.active: raise ValueError('This ticket is being reviewed; wait for the review to finish.')
             maximum=max(1,min(16,int(self.settings().get('parallel_agents','2'))))
-            if len(self.active)>=maximum: raise ValueError('All configured backend agent slots are in use.')
+            if self._active_slots()>=maximum: raise ValueError('All configured backend agent slots are in use.')
             if not c and not db.connect().execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage='execute'", (tid,)).fetchone():
                 raise ValueError('No completed agent session for this ticket. Mark it ready to start the runner.')
             self.active[tid]=True
@@ -894,6 +1052,7 @@ class Runner:
         with self.lock:
             out['busy']=self.orchestrator_busy and self.orchestrator_session==sid
             out['runner_busy']=self.orchestrator_busy
+            out['stopping']=bool(out['busy'] and self.orchestrator_stop_event and self.orchestrator_stop_event.is_set())
         active=next((t for t in reversed(out['turns']) if t['status']=='running'),None)
         out['active_turn_id']=active['id'] if active else None
         out['state']='running' if out['busy'] else out['turns'][-1]['status'] if out['turns'] else 'ready'
@@ -914,11 +1073,17 @@ class Runner:
         if project_id not in (None,'') and not conn.execute('SELECT 1 FROM orchestrator_projects WHERE id=?',(project_id,)).fetchone(): raise ValueError('project not found')
         conn.execute('UPDATE orchestrator_sessions SET project_id=?,updated_at=? WHERE id=?',(int(project_id) if project_id not in (None,'') else None,now(),sid)); conn.commit()
         return dict(conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone())
-    def _orchestrator_connection(self,backend,cwd,settings):
+    def _orchestrator_connection(self,backend,cwd,settings,*,on_connect=None,idle_only=False):
         cmd=backend_command(backend,settings)
         if not cmd: raise RuntimeError('No ACP command configured for '+backend)
         key=(backend,tuple(cmd),cwd,settings.get('model_'+backend,''),settings.get('opencode_api_base_url','') if backend=='opencode' else '',settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
         with self.orchestrator_conn_lock:
+            if idle_only and (self.orchestrator_busy or self.stopping.is_set()): return None
+            if self.orchestrator_busy and on_connect is None:
+                # Model refresh must not replace a chat's project workspace
+                # connection with the root workspace and terminate its turn.
+                current=self.orchestrator_conn
+                return current if current is not None and current.alive else None
             c=self.orchestrator_conn
             if c is not None and (self.orchestrator_conn_key!=key or not c.alive):
                 c.close(); self.orchestrator_conn=None; self.orchestrator_conn_key=None; c=None
@@ -950,17 +1115,27 @@ class Runner:
                     respond({'outcome':{'outcome':'selected','optionId':opt}} if opt else {'outcome':{'outcome':'cancelled'}})
                 actor = api.orchestrator_agent(db.connect())['slug']
                 c=AcpConnection(cmd[0],cwd,command_args=cmd[1:],on_notification=notification,on_request=request,on_close=lambda _e:None,logger=log,on_thread_exit=_release_acp_db,env=backend_environment(backend,settings,{'COMS_DB':str(db.db_path().resolve()),'COMS_AGENT':actor}),mcp_servers=board_servers(actor))
+                self.orchestrator_conn=c; self.orchestrator_conn_key=key
                 try:
+                    if on_connect: on_connect(c)
                     c.start(); c.session_new(cwd=cwd); self._apply_model(c,backend,settings)
                 except Exception:
-                    c.close(); raise
-                self.orchestrator_conn=c; self.orchestrator_conn_key=key
+                    c.close()
+                    if self.orchestrator_conn is c:
+                        self.orchestrator_conn=None; self.orchestrator_conn_key=None
+                    raise
+            elif on_connect: on_connect(c)
             return c
     def _warm_orchestrator(self):
         try:
             settings=self.settings(); backend=settings.get('active_backend','opencode')
-            self._orchestrator_connection(backend,workspace_path(settings),settings)
+            self._orchestrator_connection(backend,workspace_path(settings),settings,idle_only=True)
         except Exception: logging.info('Orchestrator ACP warm-up will retry on demand',exc_info=True)
+        finally:
+            if threading.current_thread() is not threading.main_thread():
+                conn=getattr(db._local,'conn',None)
+                if conn: conn.close()
+                db._local.__dict__.clear()
     def _reset_orchestrator(self):
         with self.orchestrator_conn_lock:
             if self.orchestrator_conn: self.orchestrator_conn.close()
@@ -978,14 +1153,42 @@ class Runner:
             cwd=self._orchestrator_workspace(dict(session),settings,conn)
             turn,user=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
             self.orchestrator_busy=True; self.orchestrator_session=sid
+            stop_event=threading.Event()
+            self.orchestrator_stop_event=stop_event; self.orchestrator_stop_turn_id=turn['id']
             try:
-                threading.Thread(target=self._orchestrator_turn,args=(text,sid,dict(session),turn['id']),daemon=True).start()
+                threading.Thread(target=self._orchestrator_turn,args=(text,sid,dict(session),turn['id'],stop_event),daemon=True).start()
             except Exception as exc:
                 Transcript(sid,turn['id']).finish(error=str(exc))
                 self.orchestrator_busy=False; self.orchestrator_session=None
+                self.orchestrator_stop_event=None; self.orchestrator_stop_turn_id=None
                 raise
         return {'accepted':True,'turn_id':turn['id'],'message':user}
-    def _orchestrator_turn(self,text,sid,session,turn_id=None):
+    def stop_orchestrator(self,sid):
+        """Cancel only the current chat turn; worker agents keep their sessions."""
+        with self.lock:
+            if not self.orchestrator_busy or self.orchestrator_session!=sid:
+                raise ValueError('This chat has no active orchestrator response to stop.')
+            stop_event=self.orchestrator_stop_event
+            turn_id=self.orchestrator_stop_turn_id
+            if stop_event.is_set(): return {'stopping':True,'turn_id':turn_id}
+            stop_event.set()
+            connection=self.orchestrator_context.get('connection') or self.orchestrator_conn
+            if connection:
+                try: connection.cancel()
+                except Exception: logging.info('ACP cancel failed; forcing the stopped turn closed',exc_info=True)
+        publish_change()
+        def force_close():
+            self.stopping.wait(ORCHESTRATOR_STOP_GRACE_SECONDS)
+            with self.lock:
+                if not self.orchestrator_busy or self.orchestrator_stop_event is not stop_event: return
+                current=self.orchestrator_context.get('connection') or connection
+                # Keep new sends excluded until this old turn's connection is closed.
+                if current: current.close()
+        threading.Thread(target=force_close,daemon=True,name='coms-orchestrator-cancel').start()
+        return {'stopping':True,'turn_id':turn_id}
+
+    def _orchestrator_turn(self,text,sid,session,turn_id=None,stop_event=None):
+        stop_event=stop_event or threading.Event()
         c=None; restored=False; transcript=None; recorder=None
         try:
             if turn_id is not None: transcript=Transcript(sid,turn_id)
@@ -1001,8 +1204,14 @@ class Runner:
             agent = api.orchestrator_agent(db.connect())
             recorder = progress.Recorder('chat:' + turn_id, agent['slug'], backend=backend)
             # Loading a session replays old messages; local rows are canonical.
-            self.orchestrator_context={}
-            c=self._orchestrator_connection(backend,cwd,settings)
+            def bind(connection):
+                self.orchestrator_context={'sid':sid,'turn_id':turn_id,'connection':connection,
+                                           'transcript':transcript,'stream_enabled':False,'recorder':recorder}
+                if stop_event.is_set():
+                    connection.close()
+                    raise AcpError('Orchestrator response cancelled')
+            c=self._orchestrator_connection(backend,cwd,settings,on_connect=bind)
+            bind(c)
             if session.get('backend')==backend and session.get('acp_session_id') and session.get('workspace')==cwd and c.supports('loadSession'):
                 try: c.session_load(session['acp_session_id'],cwd=cwd); restored=True
                 except Exception as exc:
@@ -1019,25 +1228,36 @@ class Runner:
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
             guide += (" You are " + agent['name'] + ", the registered orchestrator agent " + agent['slug'] + ". Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists with distinct personal names. For team work, create a ready ticket of type job assigned to the orchestrator, with recommended_workers when specified. Jobs now have team conversations, automatic recipient responses and current-revision peer review. Direct the user to the job's team room to watch actual collaboration. The lead delegates child tickets and resumes for synthesis after worker reviews finish. A completion claim needs a freshly written, linked and peer-reviewed wiki artifact.\n\n" + api.shared_skill_context(db.connect()))
-            self.orchestrator_context={'sid':sid,'connection':c,'acp_session_id':c.session_id,
+            self.orchestrator_context={'sid':sid,'turn_id':turn_id,'connection':c,'acp_session_id':c.session_id,
                                        'transcript':transcript,'stream_enabled':True,'recorder':recorder}
             context=history_before(sid,transcript.user_id) if not restored else ''
             first_turn=not restored
             prefix=guide+'\n\nWorkspace: '+cwd+'\n\n'
             if context and first_turn: prefix+='Previous conversation (restored from Swarm Agent history):\n'+context+'\n\n'
+            if stop_event.is_set(): raise AcpError('Orchestrator response cancelled')
             result=c.prompt(prefix+'User: '+text,timeout=3600)
-            transcript.finish((result or {}).get('stopReason',''))
-            recorder.finish('completed', 'Orchestrator conversation finished')
+            reason='cancelled' if stop_event.is_set() else (result or {}).get('stopReason','')
+            transcript.finish(reason)
+            recorder.finish('cancelled' if reason=='cancelled' else 'completed',
+                            'Orchestrator response cancelled; send new steering' if reason=='cancelled' else 'Orchestrator conversation finished')
         except Exception as e:
-            if recorder: recorder.finish('failed', str(e))
-            if transcript: transcript.finish(error=str(e))
+            if stop_event.is_set():
+                if recorder: recorder.finish('cancelled','Orchestrator response cancelled; send new steering')
+                if transcript: transcript.finish('cancelled')
+            elif transcript:
+                if recorder: recorder.finish('failed', str(e))
+                transcript.finish(error=str(e))
             else: logging.exception('Could not begin orchestrator turn')
         finally:
             self.orchestrator_context={}
             if c and not c.alive:
                 with self.orchestrator_conn_lock:
-                    c.close(); self.orchestrator_conn=None; self.orchestrator_conn_key=None
-            with self.lock: self.orchestrator_busy=False; self.orchestrator_session=None
+                    c.close()
+                    if self.orchestrator_conn is c:
+                        self.orchestrator_conn=None; self.orchestrator_conn_key=None
+            with self.lock:
+                self.orchestrator_busy=False; self.orchestrator_session=None
+                self.orchestrator_stop_event=None; self.orchestrator_stop_turn_id=None
             publish_change()
             conn=getattr(db._local,'conn',None)
             # Direct callers/tests retain their connection; background workers

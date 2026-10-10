@@ -161,6 +161,18 @@ class TestServer(unittest.TestCase):
         conn.commit()
         self.assertEqual(conn.execute('SELECT count(*) FROM orchestrator_sessions').fetchone()[0],0)
 
+    def test_orchestrator_stop_route_calls_runner_and_maps_invalid_state(self):
+        from coms.runner import RUNNER
+        with patch.object(RUNNER, 'stop_orchestrator', create=True, return_value={'stopping': True}) as stop:
+            result = self.req('POST', '/api/runner/sessions/stop-route-test/stop', {})
+        self.assertEqual(result, {'stopping': True})
+        stop.assert_called_once_with('stop-route-test')
+
+        with patch.object(RUNNER, 'stop_orchestrator', create=True, side_effect=ValueError('chat is not running')):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.req('POST', '/api/runner/sessions/stop-route-test/stop', {})
+        self.assertEqual(error.exception.code, 400)
+
     def test_invalid_json_shapes_and_parameters_are_client_errors(self):
         for body in [[], "text", 3, None]:
             # A JSON null body is distinct from no body.

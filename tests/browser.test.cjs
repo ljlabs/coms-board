@@ -51,11 +51,12 @@ test('Agents discovers registered teammates and polls visible progress', async (
     assert.equal(saved.slug,'browser-expert');
     await page.waitForSelector('[data-agent-slug="browser-expert"]');
     let summary='Reading current sources', preview='First research update';
-    await page.route('**/api/runner/status', route => route.fulfill({json:{active_count:1,waiting_count:0,generated_at:new Date().toISOString(),items:[{key:'test-run',agent_slug:'browser-expert',backend:'codex',state:'running',phase:'responding',summary,preview,ticket_id:1,ticket_title:'Browser regression ticket',response_chars:21,tool_calls:2,idle_seconds:1}]}}));
+    await page.route('**/api/runner/status', route => route.fulfill({json:{active_count:1,waiting_count:0,generated_at:new Date().toISOString(),items:[{key:'test-run',agent_slug:'browser-expert',backend:'codex',stage:'heartbeat',state:'running',phase:'responding',summary,preview,ticket_id:1,ticket_title:'Browser regression ticket',response_chars:21,tool_calls:2,idle_seconds:1}]}}));
     await page.waitForFunction(() => document.querySelector('#agents-progress').textContent.includes('First research update'));
     summary='Comparing evidence';preview='Second research update';
     await page.waitForFunction(() => document.querySelector('#agents-progress').textContent.includes('Second research update'));
     assert.ok((await page.locator('#agents-progress').textContent()).includes('Comparing evidence'));
+    assert.equal(await page.locator('#agents-progress .badge').filter({hasText:'Heartbeat'}).count(), 1);
   });
 });
 
@@ -133,13 +134,14 @@ test('Skill files can be created, renamed and dragged between folders and the ro
 test('ticket uses the shared chat for execution, review, tools and durable follow-up replies', async () => {
   await pageFor('/tickets/1', async page => {
     assert.equal(await page.locator('#runner-chat .chat-compose').count(), 1);
+    assert.equal(await page.locator('#chat-stop').count(), 0, 'Ticket chat does not expose orchestrator stop');
     assert.equal(await page.locator('.chat-text strong').filter({hasText:'Weather report'}).count(), 1);
     assert.match(await page.locator('.chat-role').filter({hasText:'Execution'}).first().textContent(), /Run #/);
     assert.match(await page.locator('.chat-role').filter({hasText:'Review'}).textContent(), /Review/);
     await page.locator('.chat-tool-summary').click();
     assert.match(await page.locator('.chat-tool-panel').textContent(), /temperature/);
     await page.locator('#chat-input').fill('How did it go?');
-    await page.locator('#chat-form button').click();
+    await page.locator('#chat-send').click();
     await page.waitForFunction(() => document.querySelector('#chat-status').textContent==='ready' && [...document.querySelectorAll('.chat-message.assistant .chat-role')].some(node=>node.textContent.includes('Conversation')));
     const count = await page.locator('.chat-message').count();
     await page.reload();
@@ -179,6 +181,54 @@ test('ticket chat deep link brings the shared conversation into view', async () 
     const top = await page.locator('#runner-chat').evaluate(node=>node.getBoundingClientRect().top);
     assert.ok(top >= -1 && top < 200, `Chat should be in view, top=${top}`);
   });
+});
+
+test('orchestrator stop preserves drafts and waits for canonical idle state', async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  let releaseStop;
+  try {
+    let busy = true, markStopStarted;
+    const stopStarted = new Promise(resolve => { markStopStarted = resolve; });
+    await page.route('**/api/runner/sessions/browser-chat/events', route => route.abort());
+    await page.route('**/api/runner/sessions/browser-chat', async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const response = await route.fetch();
+      const detail = await response.json();
+      detail.busy = busy;
+      detail.runner_busy = busy;
+      detail.active_turn_id = busy ? 'mock-busy-turn' : null;
+      await route.fulfill({ response, json: detail });
+    });
+    await page.route('**/api/runner/sessions/browser-chat/stop', async route => {
+      markStopStarted();
+      await new Promise(resolve => { releaseStop = resolve; });
+      busy = false;
+      await route.fulfill({ json: { stopping: true } });
+    });
+    await page.goto(base + '/#/orchestrator?session=browser-chat');
+    await page.waitForFunction(() => !document.querySelector('#app').hasAttribute('aria-busy'));
+    // Busy canonical state disables Send; wait for its poll before exercising Stop.
+    await page.waitForFunction(() => {
+      const stop = document.querySelector('#chat-stop');
+      return stop && !stop.hidden && document.querySelector('#chat-send').disabled;
+    });
+    await page.locator('#chat-input').fill('Keep this draft while stopping');
+    await page.locator('#chat-stop').click();
+    await stopStarted;
+    assert.equal(await page.locator('#chat-stop').textContent(), 'Stopping…');
+    assert.equal(await page.locator('#chat-stop').isDisabled(), true);
+    assert.equal(await page.locator('#chat-send').isDisabled(), true);
+    assert.equal(await page.locator('#chat-input').inputValue(), 'Keep this draft while stopping');
+    releaseStop();
+    await page.waitForFunction(() => document.querySelector('#chat-stop').hidden && !document.querySelector('#chat-send').disabled);
+    assert.equal(await page.locator('#chat-input').inputValue(), 'Keep this draft while stopping');
+  } finally {
+    releaseStop?.();
+    await page.close();
+  }
+  assert.deepEqual(errors, [], 'No uncaught browser errors');
 });
 
 test('streaming chat preserves reading position and existing message nodes', async () => {
@@ -306,7 +356,7 @@ test('real ACP send creates separate assistant and tool bubbles and survives rel
     await page.waitForFunction(() => document.querySelector('#chat-title')?.textContent === 'New chat');
     await page.locator('#chat-input').fill('Run ls in your workspace');
     const accepted = page.waitForResponse(r => r.url().endsWith('/messages') && r.request().method()==='POST');
-    await page.locator('#chat-form button').click();
+    await page.locator('#chat-send').click();
     const response = await (await accepted).json();
     assert.ok(response.turn_id);
     assert.ok(response.message.id);

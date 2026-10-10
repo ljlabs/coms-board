@@ -274,7 +274,7 @@
   }
 
   function conversationMarkup(ticketMode,projects,detail,esc) {
-    return `<div class="chat-main"><div class="chat-head">${ticketMode?'':`<button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button>`}<div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div>${ticketMode?'':`<label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`}<span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span>${ticketMode?'':'<button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button>'}</div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="${ticketMode?'Message the ticket agent':'Message the orchestrator'}" placeholder="${ticketMode?'Message the ticket agent…':'Message the orchestrator…'}"></textarea><button class="btn primary">Send</button></form></div>`;
+    return `<div class="chat-main"><div class="chat-head">${ticketMode?'':`<button class="btn sm chat-menu" id="chat-menu" aria-label="Toggle chat sidebar">☰</button>`}<div class="chat-title"><b id="chat-title"></b><small id="chat-subtitle"></small></div>${ticketMode?'':`<label class="chat-move">Project<select id="move-project"><option value="">Unsorted</option>${projects.map(p=>`<option value="${p.id}"${String(detail.project_id || '')===String(p.id)?' selected':''}>${esc(p.name)}</option>`).join('')}</select></label>`}<span class="chat-status badge" id="chat-status" role="status"></span></div><div id="chat-workspace" class="chat-workspace"><span></span>${ticketMode?'':'<button type="button" class="btn sm" id="pick-current-workspace">Choose folder</button>'}</div><div id="chat-connection" class="chat-connection" role="status" hidden></div><div class="chat-transcript-wrap"><div id="chat-messages" class="chat-transcript" aria-label="Conversation"></div><button type="button" class="btn sm chat-latest" id="chat-latest" hidden>Jump to latest ↓</button></div><form id="chat-form" class="chat-compose"><textarea id="chat-input" rows="2" aria-label="${ticketMode?'Message the ticket agent':'Message the orchestrator'}" placeholder="${ticketMode?'Message the ticket agent…':'Message the orchestrator…'}"></textarea>${ticketMode?'': '<button type="button" class="btn" id="chat-stop" aria-label="Stop the orchestrator response" hidden>Stop</button>'}<button class="btn primary" id="chat-send" type="submit">Send</button></form></div>`;
   }
 
   async function mount(h) {
@@ -289,7 +289,7 @@
     if (!ticketMode && !activeId) {activeId=(await api('POST','/api/runner/sessions',{title:'New chat'})).id;sessions=await GET('/api/runner/sessions');}
     const path=ticketMode?`/api/tickets/${h.ticketId}/runner`:`/api/runner/sessions/${encodeURIComponent(activeId)}`;
     let detail=h.detail || await GET(path);
-    let sending=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
+    let sending=false, stopRequested=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
     const expandedGroups=new Set([detail.project_id?`project:${detail.project_id}`:'root']);
     let pickerTarget=null,pickerData=null,folderRequestSerial=0,folderAction=null,folderSaving=false,projectWorkspace='',creatingProject=false;
     const sessionLink=s=>`<div class="chat-session-row"><a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a><button class="chat-delete" type="button" data-delete-chat="${esc(s.id)}" aria-label="Delete chat ${esc(s.title)}" title="Delete chat">×</button></div>`;
@@ -383,7 +383,17 @@
       const states={completed:'ready',running:'working',failed:'failed',interrupted:'interrupted',cancelled:'cancelled',refused:'declined',limited:'limit reached'};
       const status=$('#chat-status');setText(status,detail.busy?'working':otherBusy?'runner busy':states[detail.state] || 'ready');
       status.className=`chat-status badge ${detail.busy || otherBusy?'in_progress':detail.state==='failed'||detail.state==='interrupted'?'blocked':'open'}`;
-      $('#chat-form button').disabled=Boolean(detail.runner_busy || detail.busy || sending || detail.chat_available===false);
+      const sessionBusy=Boolean(detail.busy || detail.active_turn_id);
+      const send=$('#chat-send');
+      send.disabled=Boolean(detail.runner_busy || sessionBusy || sending || detail.chat_available===false);
+      const stop=$('#chat-stop');
+      if (stop) {
+        if (!sessionBusy) stopRequested=false;
+        else if (detail.stopping) stopRequested=true;
+        stop.hidden=!sessionBusy;
+        stop.disabled=stopRequested;
+        setText(stop,stopRequested?'Stopping…':'Stop');
+      }
       setText($('#chat-title'),detail.title);
       setText($('#chat-subtitle'),detail.chat_unavailable_reason || (detail.busy?`${detail.assistant_name || 'Orchestrator'} is responding`:otherBusy?'Another chat is using the orchestrator':ticketMode?`Execution · Review · Conversation · ${detail.backend || 'default'}`:`ACP · ${detail.backend || 'default'} · ${detail.model || 'ACP default'}`));
       setText($('#chat-workspace span'),`Workspace: ${detail.workspace || 'unavailable'}${detail.workspace_error?` · ${detail.workspace_error}`:''}`);
@@ -583,6 +593,16 @@
       } catch (error) {fail(error);if (error.name!=='AbortError') connectionError(error);}
       finally {sending=false;if (box.isConnected) applyDetail();}
     };
+    $('#chat-stop')?.addEventListener('click',async()=>{
+      if (ticketMode || stopRequested || !detail.busy && !detail.active_turn_id) return;
+      stopRequested=true;applyDetail();
+      try {
+        await api('POST',path+'/stop',{});
+        await fetchDetail();
+      } catch (error) {
+        stopRequested=false;fail(error);if (error.name!=='AbortError') connectionError(error);
+      } finally {if (box.isConnected) applyDetail();}
+    });
     $('#chat-input').onkeydown=event=>{if (event.key==='Enter' && !event.shiftKey && !event.isComposing) {event.preventDefault();$('#chat-form').requestSubmit();}};
     if (!ticketMode) startStream();
     poll(async()=>{
