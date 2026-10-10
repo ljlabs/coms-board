@@ -1,4 +1,4 @@
-"""coms — command line for agents to use the coms-board.
+"""coms — command line for agents to use Swarm Agent.
 
     python3 coms.py --as <agent-slug> <group> <command> [args]
 

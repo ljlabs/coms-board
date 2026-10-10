@@ -87,7 +87,7 @@ for line in sys.stdin:
             responses = [json.loads(line) for line in mcp.stdout.splitlines()]
             assert len(responses) == 4, mcp.stdout
             assert all('error' not in r and not r['result'].get('isError') for r in responses), mcp.stdout
-            body = 'Published research and result through Coms Board.'
+            body = 'Published research and result through Swarm Agent.'
         # Thought chunks must never be mixed into the public assistant response.
         for kind, chunk in [('agent_thought_chunk', 'private thought'), ('agent_message_chunk', body)]:
             send({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': session_id,

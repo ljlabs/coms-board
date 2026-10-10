@@ -1,4 +1,4 @@
-"""Business logic for the coms-board. Used by both the CLI (agents) and the
+"""Business logic for Swarm Agent. Used by both the CLI (agents) and the
 HTTP server (dashboard). Every function takes a sqlite3 connection and
 returns plain dicts so results serialise straight to JSON.
 """
@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from . import db
+from . import db, skill_store
 
 TICKET_STATUSES = ("open", "in_progress", "blocked", "review", "done", "wontfix")
 # story = human project-level epic; job = an investigation/dispatch run inside a
@@ -281,44 +281,154 @@ def resolve_ticket_agent(conn, ticket: dict, *, commit=True) -> dict:
     return agent
 
 
-def list_skills(conn) -> list[dict]:
-    return _rows(conn.execute('SELECT slug,title,version,updated_by,updated_at,length(body) AS size FROM shared_skills ORDER BY title'))
+def _skill_audit(conn, slug: str) -> dict | None:
+    return _one(conn.execute("SELECT actor,kind,created_at FROM activity WHERE ref=? AND kind IN ('skill.create','skill.put','skill.enable','skill.delete') ORDER BY id DESC LIMIT 1", ('skill:' + slug,)))
 
 
-def get_skill(conn, slug: str) -> dict:
-    skill = _one(conn.execute('SELECT * FROM shared_skills WHERE slug=?', (slug,)))
-    if not skill: raise NotFound(f'skill {slug!r} not found')
+def _skill_usage(conn, slug: str) -> list[dict]:
+    return _rows(conn.execute('SELECT agent_slug,last_accessed_at,access_count FROM skill_accesses WHERE slug=? ORDER BY last_accessed_at DESC,agent_slug', (slug,)))
+
+
+def _skill_record(conn, skill: dict) -> dict:
+    audit = _skill_audit(conn, skill['slug'])
+    usage = _skill_usage(conn, skill['slug'])
+    skill['updated_by'] = audit['actor'] if audit else 'repository'
+    skill['updated_at'] = audit['created_at'] if audit else skill['updated_at']
+    skill['loaded_by'] = [row['agent_slug'] for row in usage]
+    skill['last_used_at'] = usage[0]['last_accessed_at'] if usage else ''
+    skill['access_count'] = sum(row['access_count'] for row in usage)
+    skill['context_tokens'] = max(1, (len(skill['slug']) + len(skill['description']) + 3) // 4 + 5)
     return skill
 
 
-def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None) -> dict:
-    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', slug): raise BadRequest('invalid skill slug')
-    if not title.strip() or not body.strip(): raise BadRequest('skill title and instructions are required')
-    if len(body) > 128000: raise BadRequest('skill instructions are too large')
-    existing = _one(conn.execute('SELECT * FROM shared_skills WHERE slug=?', (slug,)))
-    stamp = now()
-    if existing:
-        if type(version) is not int or version != existing['version']:
-            raise BadRequest('Skill changed; read the current version before updating it.')
-        revision = version + 1
-        changed = conn.execute('UPDATE shared_skills SET title=?,body=?,version=?,updated_by=?,updated_at=? WHERE slug=? AND version=?',
-                               (title.strip(), body, revision, actor, stamp, slug, version))
-        if changed.rowcount != 1:
-            conn.rollback()
-            raise BadRequest('Skill changed; refresh before updating it.')
-    else:
-        if version not in (None, 0): raise BadRequest('new skills start at version 1')
-        revision = 1
-        try:
-            conn.execute('INSERT INTO shared_skills VALUES(?,?,?,?,?,?,?,?)', (slug, title.strip(), body, revision, actor, actor, stamp, stamp))
-        except sqlite3.IntegrityError as exc:
-            conn.rollback()
-            raise BadRequest('Skill changed; read the current version before updating it.') from exc
-    conn.execute('INSERT INTO shared_skill_versions VALUES(?,?,?,?,?,?)', (slug, revision, title.strip(), body, actor, stamp))
-    log_activity(conn, actor, 'skill.put', 'skill:' + slug, f'{title.strip()} · version {revision}')
+def list_skills(conn, *, enabled_only: bool = False) -> list[dict]:
+    skills = skill_store.list_skills()
+    if enabled_only:
+        skills = [skill for skill in skills if skill['enabled']]
+    return [_skill_record(conn, skill) for skill in skills]
+
+
+def get_skill(conn, slug: str) -> dict:
+    try:
+        return _skill_record(conn, skill_store.get_skill(slug))
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+
+
+def get_skill_file(conn, slug: str, relative: str) -> dict:
+    get_skill(conn, slug)
+    try:
+        return skill_store.get_file(slug, relative)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+
+
+def require_skill_manager(conn, actor: str) -> None:
+    if actor == ADMIN_ACTOR:
+        return
+    agent = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()
+    if not agent or agent['role'] != 'orchestrator':
+        raise BadRequest('Only the human operator or orchestrator can edit skills')
+
+
+def _record_skill_write(conn, slug: str, actor: str, title: str, *, created: bool) -> None:
+    kind = 'skill.create' if created else 'skill.put'
+    summary = ('Created' if created else 'Updated') + f' skill folder {slug}: {title}'
+    log_activity(conn, actor, kind, 'skill:' + slug, summary)
+    touch_agent(conn, actor)
+    conn.commit()
+
+
+def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None, description: str = '') -> dict:
+    require_skill_manager(conn, actor)
+    if not isinstance(slug, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', slug):
+        raise BadRequest('invalid skill slug')
+    if not isinstance(title, str) or not title.strip() or not isinstance(body, str) or not body.strip():
+        raise BadRequest('skill title and instructions are required')
+    if len(body.encode('utf-8')) > skill_store.MAX_FILE_BYTES:
+        raise BadRequest('skill instructions are limited to 1 MiB')
+    try:
+        skill, created = skill_store.save_skill(slug, title, description, body, version)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, skill['title'], created=created)
+    return get_skill(conn, slug)
+
+
+def write_skill_file(conn, slug: str, relative: str, content: str, actor: str, expected_version=None) -> dict:
+    require_skill_manager(conn, actor)
+    get_skill(conn, slug)
+    try:
+        saved = skill_store.write_file(slug, relative, content, expected_version)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, get_skill(conn, slug)['title'], created=False)
+    return saved
+
+
+def import_skill(conn, slug: str, files: list[dict], actor: str) -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.import_skill(slug, files)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, skill['title'], created=True)
+    return get_skill(conn, slug)
+
+
+def set_skill_enabled(conn, slug: str, enabled: bool, actor: str) -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.set_enabled(slug, enabled)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    log_activity(conn, actor, 'skill.enable', 'skill:' + slug,
+                 ('Enabled' if enabled else 'Disabled') + f' skill folder {slug}')
     touch_agent(conn, actor)
     conn.commit()
     return get_skill(conn, slug)
+
+
+def delete_skill(conn, slug: str, actor: str) -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.get_skill(slug)
+        skill_store.delete_skill(slug)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    log_activity(conn, actor, 'skill.delete', 'skill:' + slug, f"Deleted skill folder {slug}")
+    conn.execute('DELETE FROM skill_accesses WHERE slug=?', (slug,))
+    touch_agent(conn, actor)
+    conn.commit()
+    return {'slug': slug, 'title': skill['title'], 'deleted': True}
+
+
+def record_skill_access(conn, slug: str, actor: str) -> None:
+    if not actor:
+        return
+    stamp = now()
+    row = conn.execute('SELECT access_count FROM skill_accesses WHERE slug=? AND agent_slug=?', (slug, actor)).fetchone()
+    if row:
+        conn.execute('UPDATE skill_accesses SET last_accessed_at=?,access_count=? WHERE slug=? AND agent_slug=?',
+                     (stamp, row['access_count'] + 1, slug, actor))
+    else:
+        conn.execute('INSERT OR IGNORE INTO skill_accesses(slug,agent_slug,last_accessed_at,access_count) VALUES(?,?,?,1)',
+                     (slug, actor, stamp))
+    conn.commit()
 
 
 def children_delivered(conn, tid: int) -> bool:
@@ -330,25 +440,34 @@ def children_resolved(conn, tid: int) -> bool:
 
 
 def shared_skill_context(conn) -> str:
-    skills = list_skills(conn)
-    lines = ['SHARED SKILLS (available to every teammate; use skill_get for full instructions):']
-    for skill in skills: lines.append(f"- {skill['slug']} v{skill['version']}: {skill['title']}")
-    for slug in ('team-orchestration', 'source-backed-research'):
-        if any(skill['slug'] == slug for skill in skills):
-            lines.append('\n' + get_skill(conn, slug)['body'])
-    lines.append('Read relevant skills before working. Publish a reusable method you actually verified with skill_put; include the current version when updating a skill. Skills are procedures, not unverified research findings.')
+    skills = [skill for skill in list_skills(conn) if skill['enabled']]
+    lines = ['ROOT SKILLS (from the repository skills/ folder; available to every agent role). Read relevant instructions with skill_get before acting:']
+    lines.extend(f"- {skill['slug']}: {skill['description'] or skill['title']}" for skill in skills)
+    lines.append('Every enabled folder skill is available through skill_list and skill_get, including in worker, collaboration, review, and dispatch sessions. Only the human operator and orchestrator can create or edit skills with skill_put; workers should send verified methods to the orchestrator for publication.')
     return '\n'.join(lines)
 
 
 def seed_shared_skills(conn):
-    actor = orchestrator_agent(conn)['slug']
-    defaults = {
-        'team-orchestration': ('Team orchestration', '''Lead only: use agents_list to reuse suitable teammates. In the staffing turn, team_delegate registers or reuses a personally named specialist and creates a ready child assignment; expertise belongs in capabilities. Finish staffing before workers start. Post staffing decisions with team_note. Workers use team_roster and team_send for substantive questions; recipients are awakened automatically. Sending a question or requesting peer review automatically pauses the sender and releases its slot. Resumed workers read team_read, use answers, publish separate wiki pages, ticket_link them and request current-revision peer reviews with team_request_review. Reviewers inspect wiki_get and source_get, then team_review with concrete acceptance or changes_requested. Revise rejected work before another review. Only the lead owns the synthesis; it waits for child tickets and reviews, writes and links a fresh combined page, obtains its peer review, and delivers ticket_result. Publish new shared procedures grounded in methods this team successfully used. No filler greetings or invented completion claims.'''),
-        'source-backed-research': ('Source-backed research', '''Board shared skills use skill_get, not the backend's native skill loader. Use source_fetch with real primary-source URLs; it records actual content, HTTP failures and dates for peers. A 404 means the URL does not exist, not that source access was restricted. Do not repeatedly guess URLs. Read retrieved evidence and cite direct URLs and dates; use source_get to inspect teammates' evidence. Distinguish evidence, inference and unverifiable claims. If a source fails, record the limitation honestly and try the real starting URLs in the job. Workers publish separate evidence pages; the lead verifies them before synthesis. Peer reviews must challenge unsupported factual claims. Shared skills are verified procedures, not unverified research findings. Never claim a backtest was performed unless it was actually executed.'''),
-    }
-    for slug, (title, body) in defaults.items():
-        if not conn.execute('SELECT 1 FROM shared_skills WHERE slug=?', (slug,)).fetchone():
-            save_skill(conn, slug, title, body, actor)
+    marker = conn.execute("SELECT value FROM runner_settings WHERE key='skills_filesystem_migrated'").fetchone()
+    if marker:
+        return
+    # Preserve pre-existing database skills by importing them once. From that
+    # point on, the root skills/ directory is the source of truth.
+    migration_complete = True
+    for row in _rows(conn.execute('SELECT slug,title,body FROM shared_skills ORDER BY slug')):
+        if skill_store.SLUG_RE.fullmatch(row['slug'] or ''):
+            try:
+                skill_store.get_skill(row['slug'])
+            except FileNotFoundError:
+                try:
+                    skill_store.save_skill(row['slug'], row['title'], row['title'], row['body'], None)
+                except (ValueError, OSError):
+                    migration_complete = False
+            except ValueError:
+                migration_complete = False
+    if migration_complete:
+        conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES('skills_filesystem_migrated','1')")
+        conn.commit()
 
 
 def reputation(conn, slug: str) -> int:

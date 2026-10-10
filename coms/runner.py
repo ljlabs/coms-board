@@ -1,4 +1,4 @@
-"""ACP-backed ticket runner for Coms Board."""
+"""ACP-backed ticket runner for Swarm Agent."""
 from __future__ import annotations
 import json, logging, os, shlex, shutil, sqlite3, subprocess, sys, threading, time, uuid, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
@@ -131,7 +131,7 @@ def backend_environment(name, settings, values=None):
         config['model'] = OPENCODE_LOCAL_PROVIDER_ID + '/' + default_model
     if env.get('COMS_BOARD_ONLY') == '1':
         # Keep research and team responses on the board's controlled tools.
-        config['permission'] = {'*': 'deny', 'coms-board_*': 'allow'}
+        config['permission'] = {'*': 'deny', 'swarm-agent_*': 'allow'}
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, separators=(',', ':'))
     env['COMS_OPENCODE_API_KEY'] = api_key
     return env
@@ -150,21 +150,21 @@ def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaborat
     if ticket_id is not None: env['COMS_TICKET_ID'] = str(ticket_id)
     if run_id is not None: env['COMS_RUN_ID'] = str(run_id)
     if collaboration_message_id is not None: env['COMS_TEAM_MESSAGE_ID'] = str(collaboration_message_id)
-    return [{'name': 'coms-board', 'command': sys.executable,
+    return [{'name': 'swarm-agent', 'command': sys.executable,
              'args': [str(ROOT / 'coms' / 'mcp.py')] + (['--readonly'] if readonly else []) + (['--collaboration'] if collaboration_message_id is not None else []) + (['--dispatch'] if dispatch_only else []),
              'env': [{'name': k, 'value': v} for k, v in env.items()]}]
 
 # Shared instructions are deliberately prepended to every execution agent's
 # template and ticket-specific prompt. The board is the durable record; the
 # configured workspace is not monitored for useful deliverables.
-BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Coms Board. The Coms Board database is the system of record. Files you create or change in the workspace are not monitored, indexed, or automatically attached to the ticket, so a file by itself does not count as a delivered result.
+BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Swarm Agent. The Swarm Agent database is the system of record. Files you create or change in the workspace are not monitored, indexed, or automatically attached to the ticket, so a file by itself does not count as a delivered result.
 
-Use the attached coms-board MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
+Use the attached Swarm Agent MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Read relevant enabled skill folders with skill_list and skill_get before acting; every worker and collaboration agent can read every enabled skill in the repository-root skills/ folder. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
 
 When asked to manage recurring agent work, inspect existing tasks with schedule_list/schedule_get and use schedule_create/schedule_update, schedule_pause/schedule_resume, schedule_run_now or schedule_delete as requested. Select a registered non-human agent and provide the requested workspace and timezone. Read the task back after changes and report the schedule ID and next run.
 
 Choose the board destination that matches the requested work:
-- For reusable knowledge, research findings, procedures, or documentation, create or update a Coms Board wiki page with wiki_put or wiki_append. Search/list the wiki first to avoid duplicate pages.
+- For reusable knowledge, research findings, procedures, or documentation, create or update a Swarm Agent wiki page with wiki_put or wiki_append. Search/list the wiki first to avoid duplicate pages.
 - For an unresolved question, ask it on the board with questions_ask; for an existing question, contribute with questions_answer.
 - For requested work that changes software or other workspace artifacts, make those changes in the configured workspace, then record the outcome and relevant paths in the ticket result/comment. Do not substitute an untracked file for a requested wiki entry or board answer.
 - Use ticket_comment only for concise, durable updates the requester should see. ACP responses and tool output are private diagnostics; do not post routine progress.
@@ -213,7 +213,7 @@ class Runner:
                     fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except OSError:
                 lease.close()
-                raise RuntimeError('Another Coms Board runner already owns this database. Stop that server before starting another.')
+                raise RuntimeError('Another Swarm Agent runner already owns this database. Stop that server before starting another.')
             self._lease=lease
             try:
                 if workspace is not None:
@@ -350,7 +350,7 @@ class Runner:
     def _worker(self, key, function, *args):
         try: function(*args)
         except Exception:
-            logging.exception('Coms Board worker %s failed', key)
+            logging.exception('Swarm Agent worker %s failed', key)
         finally:
             with self.lock: self.active.pop(key,None)
             conn=getattr(db._local,'conn',None)
@@ -413,7 +413,7 @@ class Runner:
                             self.active[key]=True
                             threading.Thread(target=self._worker,args=(key,self._review_ticket,dict(row),review_id,review_key),daemon=True).start()
             except Exception:
-                logging.exception('Coms Board runner scheduling failed')
+                logging.exception('Swarm Agent runner scheduling failed')
                 self.stopping.wait(1)
 
     def _resume_waiting(self):
@@ -562,18 +562,18 @@ class Runner:
                 prompt += ("ORCHESTRATION JOB\nYou are the lead orchestrator for this job. Prefer reusing teammates from agents_list; agent_ensure creates a named specialist only when needed. Create child tickets with explicit assignees and parent_id matching this job. Workers deliver findings on their own tickets; only the lead owns the combined wiki page. After delegation, finish your dispatch turn without ticket_result; the runner waits for worker results and resumes you automatically for synthesis. Reserve ticket_result for the final synthesis after your teammates deliver.\n"
                            f"Suggested workers: {t.get('recommended_workers') or 'choose the number yourself'}. Maximum concurrent ticket slots: {settings.get('parallel_agents', '2')}. Choose distinct personal names for new specialists and put expertise in their descriptions. Register the whole team BEFORE making their tickets ready. Record your staffing decision with team_note. Copy the job's real starting source URLs into each worker's assignment. Workers must use source_fetch, exchange questions and obtain peer review.\n\n")
             if stage == 'synthesize':
-                prompt += 'SYNTHESIS: Existing teammates and child tickets are already assigned. Read their results below and verify source evidence. Do not recreate existing tasks. If evidence is missing, create targeted follow-up child tasks; otherwise publish the final synthesis and ticket_result.\n'
+                prompt += 'SYNTHESIS: Existing teammates and child tickets are already assigned. Read their results below and verify source evidence. Do not recreate existing tasks. If evidence is missing, create targeted follow-up child tasks; otherwise publish the final synthesis, create a new shared skill with skill_put from a verified method the team used, and call ticket_result.\n'
                 prompt += '\n'.join(f"Child #{child['id']} ({child['assignee']}), {child['status']}: {child['title']}\nResult: {child['result']}" for child in children) + '\n\n'
             if template and template['prompt'].strip():
-                prompt += 'AGENT TEMPLATE INSTRUCTIONS (follow these within the shared Coms Board requirements above):\n'+template['prompt'].strip()+'\n\n'
+                prompt += 'AGENT TEMPLATE INSTRUCTIONS (follow these within the shared Swarm Agent requirements above):\n'+template['prompt'].strip()+'\n\n'
             collaborative_ticket = bool(job and job.get('collaboration_required') and t['type'] != 'job')
             result_gate = ('If waiting for a teammate answer or peer review, end this turn without ticket_result. After the answer arrives and your current linked wiki page is accepted, call ticket_result and verify the success response before concluding.'
                            if collaborative_ticket else 'Call ticket_result with the delivered board IDs/links and verification before concluding; verify its success response.')
-            prompt += (f"TICKET ASSIGNMENT\nYou are the execution agent for Coms Board ticket #{tid}.\n"
+            prompt += (f"TICKET ASSIGNMENT\nYou are the execution agent for Swarm Agent ticket #{tid}.\n"
                        f"Ticket: {t['title']}\nPriority: {t['priority']}\nDescription:\n{t['body']}\n\n"
                        f"Use your ACP response stream for progress; those messages are private run diagnostics and are not posted to the ticket. "
                        f"Use ticket_comment for ticket #{tid} when needed, then follow this delivery gate: {result_gate} Ticket ID: {tid}. Your workspace is {cwd}. "
-                       "When finished, ensure the requested deliverable has been recorded in the appropriate Coms Board record, then summarize the result and verification in your ACP response.")
+                       "When finished, ensure the requested deliverable has been recorded in the appropriate Swarm Agent record, then summarize the result and verification in your ACP response.")
             if dispatch_only:
                 prompt = (f"You are {agent['name']}, the orchestrator for job #{tid}. This turn is ONLY team staffing and delegation. "
                           "Call agents_list to prefer existing specialists. Call team_delegate once per specialty with a distinct personal name, capabilities, title and scope. "
@@ -608,7 +608,7 @@ class Runner:
                     waiting = self.conns.pop(tid, None)
                     if waiting: waiting.close()
                     return
-                raise RuntimeError('Agent finished without publishing ticket_result through the coms-board tools. Record the deliverable on the board and update the ticket to retry.')
+                raise RuntimeError('Agent finished without publishing ticket_result through the Swarm Agent tools. Record the deliverable on the board and update the ticket to retry.')
             conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=?",(now(),rid)); conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'",(now(),tid)); schedules.mark_ticket(conn, tid, 'completed'); conn.commit()
             self._message(tid,rid,'system','status','Agent turn finished; ticket moved to review.')
             recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
@@ -692,7 +692,7 @@ class Runner:
             transcript='\n'.join(f"{m['role']} [{m['kind']}]: {m['body'][:3000]}" for m in reversed(messages))
             discussion='\n'.join(f"{x['author']} [{x['kind']}]: {x['body']}" for x in comments)
             team.validate_delivery(conn, tid, current['assignee'])
-            prompt=("You are the Coms Board orchestrator performing the final review of a completed ticket. Review the acceptance criteria, delivered result, ticket discussion, and execution transcript. Inspect the linked wiki with wiki_get and source records with source_get. Do not change files, tickets, or comments. Choose human_review for a specific unresolved requirement or a decision explicitly reserved for a human. Educational research does not require human judgment merely because the topic involves financial risk. Reported evidence limitations are acceptable when no claim falsely asserts verification. Otherwise choose close. Respond with exactly one valid JSON object and no other text. Use decision value close or human_review, for example: {\"decision\":\"close\",\"reason\":\"Acceptance criteria are met.\"}.\n\n"
+            prompt=("You are the Swarm Agent orchestrator performing the final review of a completed ticket. Review the acceptance criteria, delivered result, ticket discussion, and execution transcript. Inspect the linked wiki with wiki_get and source records with source_get. Do not change files, tickets, or comments. Choose human_review for a specific unresolved requirement or a decision explicitly reserved for a human. Educational research does not require human judgment merely because the topic involves financial risk. Reported evidence limitations are acceptable when no claim falsely asserts verification. Otherwise choose close. Respond with exactly one valid JSON object and no other text. Use decision value close or human_review, for example: {\"decision\":\"close\",\"reason\":\"Acceptance criteria are met.\"}.\n\n"
                     f"Ticket #{tid}: {current['title']}\nPriority: {current['priority']}\nDescription / acceptance criteria:\n{current['body']}\n\nDelivered result:\n{current['result']}\n\nTicket discussion:\n{discussion}\n\nExecution transcript:\n{transcript}\n\n{team.context(conn, tid, agent['slug'], instructions=False)}")
             recorder.set('reviewing', 'Checking the deliverable and acceptance criteria (3 minute limit)')
             c.prompt(prompt,timeout=180,total_timeout=180)
@@ -979,10 +979,10 @@ class Runner:
                 x=db.connect(); x.execute('UPDATE orchestrator_sessions SET acp_session_id=?,backend=?,workspace=? WHERE id=?',(acp_id,backend,cwd,sid)); x.commit()
             self._apply_model(c,backend,settings)
             selected_model=settings.get('model_'+backend) or 'ACP default'
-            guide=(f"You are the Coms Board main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
+            guide=(f"You are the Swarm Agent main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
                    "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
                    "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
-                   "Use the attached coms-board MCP tools for all board operations. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
+                   "Use the attached Swarm Agent MCP tools for all board operations. Read relevant enabled skills with skill_list and skill_get; the orchestrator and all ticket workers can read every root skills/ folder entry. Only the human operator and orchestrator can use skill_put to publish or edit a verified procedure; workers should share methods with the orchestrator. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
             guide += (" You are " + agent['name'] + ", the registered orchestrator agent " + agent['slug'] + ". Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists with distinct personal names. For team work, create a ready ticket of type job assigned to the orchestrator, with recommended_workers when specified. Jobs now have team conversations, automatic recipient responses and current-revision peer review. Direct the user to the job's team room to watch actual collaboration. The lead delegates child tickets and resumes for synthesis after worker reviews finish. A completion claim needs a freshly written, linked and peer-reviewed wiki artifact.\n\n" + api.shared_skill_context(db.connect()))
@@ -991,7 +991,7 @@ class Runner:
             context=history_before(sid,transcript.user_id) if not restored else ''
             first_turn=not restored
             prefix=guide+'\n\nWorkspace: '+cwd+'\n\n'
-            if context and first_turn: prefix+='Previous conversation (restored from Coms Board history):\n'+context+'\n\n'
+            if context and first_turn: prefix+='Previous conversation (restored from Swarm Agent history):\n'+context+'\n\n'
             result=c.prompt(prefix+'User: '+text,timeout=3600)
             transcript.finish((result or {}).get('stopReason',''))
             recorder.finish('completed', 'Orchestrator conversation finished')

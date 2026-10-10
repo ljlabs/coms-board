@@ -1,4 +1,4 @@
-"""Coms Board MCP tools over newline-delimited stdio (no dependencies).
+"""Swarm Agent MCP tools over newline-delimited stdio (no dependencies).
 
 Launched by the ACP backend with an absolute DB path and acting identity.
 Never writes to stdout except for JSON-RPC frames. No filesystem tools.
@@ -15,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from coms import api, db, team
 
 
-def tool(name, description, properties=None, required=(), write=False):
+def tool(name, description, properties=None, required=(), write=False, destructive=False):
     return {"name": name, "description": description,
             "inputSchema": {"type": "object", "properties": properties or {},
                             "required": list(required), "additionalProperties": False},
-            "annotations": {"readOnlyHint": not write, "destructiveHint": False}}
+            "annotations": {"readOnlyHint": not write, "destructiveHint": destructive}}
 
 
 S = {"type": "string"}
@@ -52,10 +52,14 @@ TOOLS = [
     tool("agents_list", "List registered agents and their capabilities. Prefer reusing a suitable teammate."),
     tool("agent_ensure", "Reuse a matching registered agent, or create a named teammate if none fits. An explicit slug selects that identity.",
          {"name": S, "slug": S, "role": S, "description": S, "instructions": S}, ["name"], True),
-    tool("skill_list", "List shared procedural skills available to all agents."),
-    tool("skill_get", "Read a shared skill and its current version.", {"slug": S}, ["slug"]),
-    tool("skill_put", "Publish a verified reusable procedure for all agents. For updates, pass the version returned by skill_get.",
+    tool("skill_list", "List skill folders in the repository-root skills/ directory. Every agent role can read enabled skills."),
+    tool("skill_get", "Read an enabled skill folder's SKILL.md and file index. Every agent role can read every enabled skill.", {"slug": S}, ["slug"]),
+    tool("skill_put", "Create or update a verified reusable procedure in the root skills/ folder. Only the human operator and orchestrator can publish; workers should share methods with the orchestrator. For updates, pass the current version returned by skill_get.",
          {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
+    tool("skill_set_enabled", "Enable or disable a root skill. Available to the human operator and orchestrator.",
+         {"slug": S, "enabled": B}, ["slug", "enabled"], True),
+    tool("skill_delete", "Permanently remove a skill folder from the repository root. Available to the human operator and orchestrator.",
+         {"slug": S}, ["slug"], True, destructive=True),
     tool("schedule_list", "List recurring scheduled prompts, their next run, chosen agent and workspace."),
     tool("schedule_get", "Read a scheduled task and its current schedule configuration.", {"id": I}, ["id"]),
     tool("schedule_create", "Create a recurring prompt for a registered agent. Choose cron, interval or weekly; set the timezone and workspace folder when known.",
@@ -160,9 +164,20 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "agent_templates": result = [dict(r) for r in conn.execute("SELECT id,name,backend,enabled FROM agent_templates ORDER BY name")]
     elif name == "agents_list": result = api.list_agents(conn)
     elif name == "agent_ensure": result = api.ensure_agent(conn, args['name'], args.get('role', 'expert'), args.get('description', ''), args.get('slug', ''), args.get('instructions', ''))
-    elif name == "skill_list": result = api.list_skills(conn)
-    elif name == "skill_get": result = api.get_skill(conn, args['slug'])
+    elif name == "skill_list": result = api.list_skills(conn, enabled_only=True)
+    elif name == "skill_get":
+        skill = api.get_skill(conn, args['slug'])
+        if not skill['enabled']:
+            raise api.NotFound(f"enabled skill {args['slug']!r} not found")
+        api.record_skill_access(conn, args['slug'], actor)
+        result = skill
     elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
+    elif name in ('skill_set_enabled', 'skill_delete'):
+        agent = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()
+        if actor != api.ADMIN_ACTOR and (not agent or agent['role'] != 'orchestrator'):
+            raise api.BadRequest('Only the human operator or orchestrator can enable, disable, or delete skills')
+        if name == 'skill_set_enabled': result = api.set_skill_enabled(conn, args['slug'], args['enabled'], actor)
+        else: result = api.delete_skill(conn, args['slug'], actor)
     elif name in ('schedule_list', 'schedule_get', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_resume', 'schedule_run_now', 'schedule_delete'):
         from . import schedules
         if name == 'schedule_list': result = schedules.list_tasks(conn)
@@ -252,7 +267,7 @@ def dispatch(message, readonly=False, collaboration=False, dispatch_only=False):
         versions = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
         requested = params.get("protocolVersion")
         result = {"protocolVersion": requested if requested in versions else "2025-11-25",
-                  "capabilities": {"tools": {}}, "serverInfo": {"name": "coms-board", "version": "1.0.0"}}
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "swarm-agent", "version": "1.0.0"}}
     elif method == "ping": result = {}
     elif method == "tools/list":
         result = {"tools": [t for t in TOOLS if (not readonly or t["annotations"]["readOnlyHint"]) and (not collaboration or t['name'] in COLLABORATION_TOOLS) and (not dispatch_only or t['name'] in DISPATCH_TOOLS)]}

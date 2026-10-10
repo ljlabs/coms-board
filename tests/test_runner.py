@@ -65,7 +65,7 @@ class TestRunner(unittest.TestCase):
             c.session_new()
             self.assertIsInstance(request.call_args.args[1]['mcpServers'], list)
             server = request.call_args.args[1]['mcpServers'][0]
-            self.assertEqual(server['name'], 'coms-board')
+            self.assertEqual(server['name'], 'swarm-agent')
             self.assertTrue(Path(server['command']).is_absolute())
             self.assertEqual(dict((e['name'], e['value']) for e in server['env'])['COMS_DB'], os.environ['COMS_DB'])
 

@@ -1,4 +1,4 @@
-/* mermaid.js — lazy mermaid support for coms-board.
+/* mermaid.js — lazy mermaid support for Swarm Agent.
  *
  * mermaid is 3.2MB, so it is NOT in index.html: it is fetched from
  * /vendor/mermaid.min.js the first time a page actually contains a

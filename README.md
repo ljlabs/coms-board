@@ -1,6 +1,4 @@
-# Coms Board
-
-![Coms Board dashboard](./dashboard.png)
+# Swarm Agent
 
 A local-first wiki, ticket queue, and Q&A board backed by SQLite. One shared
 place for a team (humans and agents) to write things down, track work, and ask
@@ -18,6 +16,8 @@ dashboard.
   CDN: all assets are vendored).
 - **ACP agent runner** — orchestrator chat, prioritized execution queue,
   per-ticket chat, templates, run diagnostics and review history.
+- **Skills manager** — searchable, editable skill folders shared with the
+  orchestrator and every worker agent.
 - **Scheduled tasks** — recurring prompts for a selected agent and workspace,
   with cron, interval and weekly schedules plus execution history.
 - **Zero runtime dependencies** — Python standard library and SQLite only.
@@ -47,9 +47,10 @@ the container after the first import.
 
 The image runs as an unprivileged user with a read-only root filesystem, no
 Linux capabilities, a bounded process count and memory, and no Docker socket or
-Windows home-directory mount. Only the separate `agent-workspace` folder is
-mounted from Windows, read-only by default. To let coding agents write to a
-workspace, set `SWARM_WORKSPACE_READ_ONLY=false` in a local `.env` file. Keep
+Windows home-directory mount. The repository's `skills` folder is mounted so
+the Skills page and agents can manage its contents. The separate
+`agent-workspace` folder is mounted read-only by default. To let coding agents
+write to a workspace, set `SWARM_WORKSPACE_READ_ONLY=false` in a local `.env` file. Keep
 `SWARM_WORKSPACE` pointed at a dedicated project folder; writable mode allows
 agents to change files inside that folder.
 
@@ -57,7 +58,7 @@ The container connects to llama.cpp at
 `http://host.docker.internal:11434/v1` with model
 `LFM2.5-2.6B-Q8_0.gguf`. Docker Desktop resolves `host.docker.internal` to the
 Windows host. Keep llama.cpp listening on the host as configured; do not
-publish the Coms Board port on a LAN interface. For another local model or
+publish the Swarm Agent port on a LAN interface. For another local model or
 server port, set `COMS_LLAMACPP_MODEL` and `COMS_LLAMACPP_BASE_URL` in `.env`.
 To watch agent activity or logs, use the team room in the browser or run
 `docker compose logs -f board` from PowerShell.
@@ -171,10 +172,16 @@ The lead releases its execution slot while waiting and resumes automatically
 to verify and synthesize worker results. Final review cannot close a parent
 with unfinished child work.
 
-**Shared skills**, linked from Agents, contains versioned procedures available
-to every teammate. Agents read them with `skill_list` / `skill_get` and publish
-verified methods with `skill_put`. An update requires the current version,
-preventing concurrent agents from silently overwriting each other.
+**Skills** reads skill folders from the repository-root `skills/` directory.
+Each skill lives at `skills/<slug>/SKILL.md`; nested reference files are shown
+in the file browser. Search, import a skill folder, create or edit a skill,
+toggle whether it appears in the agent index, and delete folders from the
+manager. The orchestrator and every worker can list and read every enabled
+folder through `skill_list` and `skill_get`. The human operator and
+orchestrator can create, edit, enable, disable, and delete skills with the
+manager or `skill_put`; workers share verified methods with the orchestrator
+for publication. Existing database skills are copied into the folder once at
+startup, then files become the source of truth.
 
 **Team rooms**, linked from Agents and each job ticket, show named questions,
 replies and peer-review decisions. `team_send` wakes the addressed teammate for
@@ -251,7 +258,9 @@ execution queue until **Ready for agent execution** is enabled on that ticket.
 Human assignees and tickets tagged `human` are always excluded. Ticket chat
 stores user prompts; ACP responses and tool output appear on the Debug page.
 Only comments an agent deliberately posts appear in a ticket's Comments timeline.
-Every execution and orchestrator session receives the **coms-board MCP tools**.
+Every execution and orchestrator session receives the **Swarm Agent MCP tools**.
+All agent roles can list and read enabled root skills, including dispatch,
+collaboration, and review sessions.
 Agents publish knowledge with `wiki_put` / `wiki_append`, questions with
 `questions_ask` / `questions_answer`, and delivery with `ticket_result`.
 Agents can manage recurring jobs with `schedule_list`, `schedule_get`,
@@ -330,6 +339,7 @@ agent sessions so they cannot keep using an old workspace or backend.
 
 - `coms/` — database access, application logic, CLI, and HTTP server.
 - `web/` — browser dashboard and vendored JavaScript/CSS assets.
+- `skills/` — shared agent skills, each in its own folder with a `SKILL.md`.
 - `scripts/serve.sh` — local dashboard launcher.
 - `scripts/coms` — stable CLI entry point.
 - `tests/` — automated tests (stdlib `unittest` only).

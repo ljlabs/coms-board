@@ -15,6 +15,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --chown=10001:10001 coms ./coms
 COPY --chown=10001:10001 web ./web
+COPY --chown=10001:10001 skills ./skills
 COPY --chown=10001:10001 coms.py docker_import.py docker_healthcheck.py ./
 COPY --chown=10001:10001 README.md LICENSE ./
 

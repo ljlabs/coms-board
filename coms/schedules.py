@@ -1,4 +1,4 @@
-"""Recurring prompts dispatched to registered Coms Board agents."""
+"""Recurring prompts dispatched to registered Swarm Agent workers."""
 from __future__ import annotations
 
 import json

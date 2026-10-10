@@ -25,7 +25,7 @@ server restart; the next recurrence is calculated from the current time.
   databases.
 - Interfaces affected: `/api/scheduled-tasks` and its task actions/history
   routes, MCP `schedule_*` tools, the Schedule dashboard, and the main
-  Coms Board `SKILL.md`.
+  Swarm Agent `SKILL.md`.
 
 ## Verification
 

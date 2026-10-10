@@ -1,5 +1,5 @@
 {
-  "name": "coms-board-browser-checks",
+  "name": "swarm-agent-browser-checks",
   "private": true,
   "scripts": {"test:browser": "node --test tests/browser.test.cjs"},
   "devDependencies": {"playwright": "1.63.0"}

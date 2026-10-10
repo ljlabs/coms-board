@@ -1,4 +1,4 @@
-/* pretty.js — lazy prettier support for coms-board.
+/* pretty.js — lazy prettier support for Swarm Agent.
  *
  * md.js tags SINGLE-LINE fenced code blocks of formatter-known languages
  * (js/ts/html/css/…) with data-pretty="<parser>"; json is formatted

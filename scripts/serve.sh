@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the coms-board dashboard in the foreground on 127.0.0.1.
+# Run the Swarm Agent dashboard in the foreground on 127.0.0.1.
 # The terminal remains attached so startup errors and request logs are visible.
 # Stop it with Ctrl+C.
 #

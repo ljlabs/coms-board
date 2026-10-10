@@ -1,4 +1,4 @@
-"""SQLite storage for the coms-board (agent wiki + ticket queue + Q&A).
+"""SQLite storage for Swarm Agent (agent wiki + ticket queue + Q&A).
 
 Single-file database, stdlib only. Designed to run across the SQLite builds
 bundled with Python on different operating systems. FTS4 is used when present;
@@ -186,6 +186,10 @@ CREATE TABLE IF NOT EXISTS shared_skills (
 CREATE TABLE IF NOT EXISTS shared_skill_versions (
   slug TEXT NOT NULL, version INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
   author TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(slug, version)
+);
+CREATE TABLE IF NOT EXISTS skill_accesses (
+  slug TEXT NOT NULL, agent_slug TEXT NOT NULL, last_accessed_at TEXT NOT NULL,
+  access_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(slug, agent_slug)
 );
 CREATE TABLE IF NOT EXISTS agent_runtime (
   key TEXT PRIMARY KEY, agent_slug TEXT NOT NULL, ticket_id INTEGER, run_id INTEGER,

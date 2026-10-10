@@ -1,4 +1,4 @@
-"""coms-board dashboard server (stdlib only).
+"""Swarm Agent dashboard server (stdlib only).
 
     python3 -m coms.server [--host 127.0.0.1] [--port 8765]
 
@@ -39,7 +39,7 @@ for _ext, _mime in ((".woff2", "font/woff2"), (".woff", "font/woff"), (".ttf", "
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "coms-board/1.0"
+    server_version = "swarm-agent/1.0"
 
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -64,11 +64,11 @@ class Handler(BaseHTTPRequestHandler):
             # (also undeliverable) 500 response in _dispatch.
             return
 
-    def _body(self) -> dict:
+    def _body(self, max_bytes: int = 2 * 1024 * 1024) -> dict:
         try: n = int(self.headers.get("Content-Length") or 0)
         except ValueError: raise api.BadRequest("invalid Content-Length")
-        if n < 0 or n > 2 * 1024 * 1024:
-            raise api.BadRequest("JSON body must be at most 2 MiB")
+        if n < 0 or n > max_bytes:
+            raise api.BadRequest(f"JSON body must be at most {max_bytes // (1024 * 1024)} MiB")
         if not n:
             return {}
         if self.headers.get_content_type() != "application/json":
@@ -194,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._trusted_request(): return
         u = urlsplit(self.path)
         try:
-            body = self._body()
+            body = self._body(12 * 1024 * 1024 if u.path == "/api/skills" else 2 * 1024 * 1024)
         except api.BadRequest as e:
             return self._json(400, {"error": str(e)})
         except (ValueError, TypeError, KeyError) as e:
@@ -284,9 +284,21 @@ def r_agent(conn, m, mm, q, b, actor):
 
 def r_skills(conn, m, mm, q, b, actor):
     slug = mm.group(1) if mm.lastindex else None
-    if m == 'GET': return api.get_skill(conn, slug) if slug else api.list_skills(conn)
-    if m in ('POST', 'PUT', 'PATCH'):
-        return api.save_skill(conn, slug or b.get('slug', ''), b.get('title', ''), b.get('body', ''), actor, b.get('version'))
+    if m == 'GET':
+        if not slug: return api.list_skills(conn)
+        return api.get_skill_file(conn, slug, q['file']) if q.get('file') else api.get_skill(conn, slug)
+    if m in ('POST', 'PUT'):
+        if b.get('action') == 'import':
+            return api.import_skill(conn, b.get('slug', ''), b.get('files', []), actor)
+        return api.save_skill(conn, slug or b.get('slug', ''), b.get('title', ''), b.get('body', ''), actor,
+                              b.get('version'), b.get('description', ''))
+    if m == 'PATCH' and slug:
+        if 'enabled' in b:
+            return api.set_skill_enabled(conn, slug, b['enabled'], actor)
+        if 'file' in b and 'content' in b:
+            return api.write_skill_file(conn, slug, b['file'], b['content'], actor, b.get('version'))
+    if m == 'DELETE' and slug:
+        return api.delete_skill(conn, slug, actor)
 
 
 def r_inbox(conn, m, mm, q, b, actor):
@@ -848,7 +860,7 @@ def main(argv=None) -> int:
     except (RuntimeError, ValueError) as exc:
         srv.server_close(); p.error(str(exc))
     workspace=RUNNER.settings().get('workspace')
-    print(f"coms-board dashboard: http://{a.host}:{a.port}/   db={db.db_path()}   workspace={workspace or 'default'}", flush=True)
+    print(f"Swarm Agent dashboard: http://{a.host}:{a.port}/   db={db.db_path()}   workspace={workspace or 'default'}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -1,4 +1,4 @@
-﻿/* editor.js — coms-board's wrapper around the live markdown engine.
+/* editor.js — Swarm Agent's wrapper around the live markdown engine.
  *
  * ONE pane. There is no preview pane and no edit/split/preview modes: the
  * document renders as you type, and only the line the caret sits on reveals

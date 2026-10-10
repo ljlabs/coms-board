@@ -1,4 +1,4 @@
-/* app.js — COMS BOARD single-page app (hash routing, no framework). */
+/* app.js — Swarm Agent single-page app (hash routing, no framework). */
 (function () {
   'use strict';
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -782,7 +782,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       const byDept={};for(const agent of agents)(byDept[agent.department||'']||=[]).push(agent);
       return Object.keys(byDept).sort().map(d=>`<div class="dept-head"><h2>${esc(deptName(d))}</h2><span class="d">${esc(deptDesc(d))}</span></div><div class="agent-grid">${byDept[d].sort((a,b)=>(a.role==='orchestrator'?-1:0)-(b.role==='orchestrator'?-1:0)||a.name.localeCompare(b.name)).map(a=>`<div class="agent-card" data-agent-slug="${esc(a.slug)}"><span class="rep" title="reputation">${a.reputation}</span><h3><a href="#/agents/${encodeURIComponent(a.slug)}">${esc(a.name)}</a></h3>${badge(a.role)} <span class="mono small muted">${esc(a.slug)}</span><p class="small">${esc(a.description)}</p>${a.runtime?`<div class="agent-state">${badge(a.runtime.state)} ${esc(a.runtime.summary)}${a.runtime.ticket_id?` <a href="#/tickets/${a.runtime.ticket_id}">#${a.runtime.ticket_id}</a>`:''}</div>`:'<div class="small muted">Available for assignment</div>'}<div class="cb">${a.codebases?'pkgs: '+esc(a.codebases):''}</div><div class="meta mono small muted">${a.open_tickets} open · ${a.answers} answers · ${a.wiki_pages_written} pages · seen ${ago(a.last_seen)||'never'}</div></div>`).join('')}</div>`).join('')||'<div class="empty">The orchestrator registers automatically when the runner starts. Teammates are reused or registered as jobs are delegated.</div>';
     }
-    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub" id="agent-count">${AGENTS.length} registered agents · shared identities and reusable capabilities</div></div><div class="actions"><a class="btn" href="#/teams">Team rooms</a><a class="btn" href="#/skills">Shared skills</a><a class="btn ok" href="#/agents/new">+ Agent</a></div></div><div class="card" id="agents-progress"></div><div id="agent-roster">${roster(AGENTS)}</div>`);
+    paint(`<div class="pagehead"><div><h1>Agents</h1><div class="sub" id="agent-count">${AGENTS.length} registered agents · shared identities and reusable capabilities</div></div><div class="actions"><a class="btn" href="#/teams">Team rooms</a><a class="btn" href="#/skills">Skills</a><a class="btn ok" href="#/agents/new">+ Agent</a></div></div><div class="card" id="agents-progress"></div><div id="agent-roster">${roster(AGENTS)}</div>`);
     await mountProgress('agents-progress');
     poll(async()=>{const agents=await GET('/api/agents');AGENTS=agents;const box=$('#agent-roster');if(box&&!hasSelection(box))box.innerHTML=roster(agents);if($('#agent-count'))$('#agent-count').textContent=`${agents.length} registered agents · shared identities and reusable capabilities`;},3000);
   });
@@ -876,16 +876,78 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   route(/^\/agents\/([^/]+)\/edit$/,slug=>agentForm(slug));
 
   route(/^\/skills$/,async()=>{
-    setTab('agents');const skills=await GET('/api/skills');
-    paint(`<div class="pagehead"><div><h1>Shared skills</h1><div class="sub">Reusable procedures available to every agent. Agents can publish new skills as they learn.</div></div><div class="actions"><a class="btn" href="#/agents">Agents</a><a class="btn ok" href="#/skills/new">+ Skill</a></div></div><div class="card"><div class="list">${skills.map(s=>`<div class="item"><div class="main"><a class="title" href="#/skills/${encodeURIComponent(s.slug)}">${esc(s.title)}</a><div class="meta"><span class="mono">${esc(s.slug)} · v${s.version}</span><span>updated ${ago(s.updated_at)} by ${chip(s.updated_by)}</span></div></div></div>`).join('')||'<div class="empty">No shared skills yet.</div>'}</div></div>`);
+    await skillManager();
   });
-  async function skillPage(slug){
-    setTab('agents');const skill=slug?await GET('/api/skills/'+encodeURIComponent(slug)):{};
-    paint(`<div class="pagehead"><div><h1>${slug?esc(skill.title):'New shared skill'}</h1><div class="sub">${slug?`v${skill.version} · updated by ${esc(skill.updated_by)}`:'A procedure all agents can read and use'}</div></div><a class="btn" href="#/skills">Shared skills</a></div>${slug?`<div class="card md">${MD.render(skill.body)}</div>`:''}<${slug?'details':'div'} class="card"${slug?'':' open'}>${slug?'<summary>Edit skill</summary>':''}<form id="skill-form" class="form"><div class="grid-2"><label>Slug<input id="skill-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" value="${esc(skill.slug||'')}"${slug?' readonly':''}></label><label>Title<input id="skill-title" required value="${esc(skill.title||'')}"></label></div><label>Instructions (Markdown)<textarea id="skill-body" required rows="12">${esc(skill.body||'')}</textarea></label><button class="btn ok">Save shared skill</button><p class="small muted">Updates require the current version to protect teammates' changes.</p></form></${slug?'details':'div'}>`);
-    $('#skill-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/skills',{slug:$('#skill-slug').value.trim(),title:$('#skill-title').value.trim(),body:$('#skill-body').value,version:skill.version||0});if(slug)render();else location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+  async function skillManager(selectedSlug, createOpen=false){
+    setTab('skills');
+    const skills=await GET('/api/skills');
+    const slug=selectedSlug||skills[0]?.slug||'';
+    const skill=slug?await GET('/api/skills/'+encodeURIComponent(slug)):null;
+    let currentFile='SKILL.md',fileData=skill?{path:currentFile,content:skill.body,version:skill.version,size:skill.body.length,binary:false}:null,editing=false,importFiles=[];
+    const tokens=skills.filter(s=>s.enabled).reduce((sum,s)=>sum+(s.context_tokens||1),0)+48;
+    const list=skills.map(s=>`<button class="skill-list-entry${s.slug===slug?' selected':''}" type="button" data-skill-slug="${esc(s.slug)}" data-search="${esc((s.title+' '+s.slug+' '+s.description).toLowerCase())}"><span class="skill-list-entry-title">${esc(s.title)}</span><span class="skill-list-entry-slug">${esc(s.slug)}</span><span class="badge skill-on-demand">on-demand</span>${s.enabled?'':'<span class="badge skill-disabled">disabled</span>'}</button>`).join('')||'<div class="empty">No skill folders found. Create a skill or add one from a folder.</div>';
+    const files=skill?.files||[];
+    const fileTree={dirs:{},files:[]};
+    for(const file of files){const parts=file.path.split('/');let node=fileTree;for(const part of parts.slice(0,-1))node=node.dirs[part]||(node.dirs[part]={dirs:{},files:[]});node.files.push({...file,name:parts.at(-1)});}
+    const renderFileTree=(node,prefix='')=>node.files.sort((a,b)=>a.name.localeCompare(b.name)).map(file=>`<button type="button" class="skill-file-entry${file.path===currentFile?' selected':''}" data-skill-file="${esc(file.path)}"><span>${file.path==='SKILL.md'?'▤':'▱'}</span><span>${esc(file.name)}</span><small>${formatBytes(file.size)}</small></button>`).join('')+Object.keys(node.dirs).sort().map(name=>`<details class="skill-tree-folder"${currentFile.startsWith(prefix+name+'/')?' open':''}><summary><span>▸</span>${esc(name)}</summary><div class="skill-tree-children">${renderFileTree(node.dirs[name],prefix+name+'/')}</div></details>`).join('');
+    const fileButtons=renderFileTree(fileTree);
+    const loaded=skill?.loaded_by?.length?skill.loaded_by.map(chip).join(' '):'<span class="muted small">No agents have read this skill yet</span>';
+    const preview=fileData?(fileData.binary?'<div class="skill-binary-note">This file is stored with the skill. Text preview is unavailable.</div>':fileData.path.toLowerCase().endsWith('.md')?`<div class="md skill-markdown">${MD.render(fileData.content)}</div>`:`<pre class="skill-code-preview">${esc(fileData.content)}</pre>`):'<div class="empty">Select a file to read it.</div>';
+    const filePane=editing&&fileData&&!fileData.binary?`<textarea id="skill-editor" class="skill-editor" spellcheck="false">${esc(fileData.content)}</textarea><div class="skill-editor-actions"><span class="small muted">Editing ${esc(fileData.path)}</span><button class="btn sm" id="skill-cancel-edit" type="button">Cancel</button><button class="btn sm ok" id="skill-save-edit" type="button">Save file</button></div>`:preview;
+    paint(`<div class="skills-page">
+      <div class="pagehead skills-pagehead"><div><h1>Skills <span class="skill-count">${skills.length}</span></h1><div class="sub">Skill folders in <code>/skills</code> · enabled skills are available to the orchestrator and every worker agent.</div></div><div class="actions"><button class="btn" id="skill-context-budget">Context budget →</button><button class="btn" id="skill-add">↓ Add Skill</button><button class="btn ok" id="skill-create">Create New Skill</button></div></div>
+      <div class="skills-note">Agents see the skill index at the start of a run and read full instructions on demand. Use the enabled switch to control which folders enter that index.</div>
+      <div class="skills-toolbar"><input id="skills-filter" type="search" placeholder="⌕  Filter skills…" autocomplete="off"><button class="btn sm" id="skills-refresh" title="Refresh folder listing">↻ Refresh</button><span class="skills-folder mono">${skills.length} folders</span></div>
+      <div class="skills-manager"><aside class="skills-index" aria-label="Skill folders">${list}</aside>
+      ${skill?`<section class="skills-detail" aria-label="Selected skill">
+        <header class="skills-detail-head"><div class="skills-detail-title"><h2>${esc(skill.title)}</h2><span class="mono small">${esc(skill.slug)}</span></div><div class="actions"><button class="btn sm" id="skill-edit" type="button"${fileData?.binary?' disabled':''}>Edit</button><button class="btn sm danger" id="skill-delete" type="button">Delete</button></div></header>
+        <div class="skills-detail-summary"><div class="skills-description"><b>Description</b><p>${esc(skill.description||'No description in SKILL.md frontmatter.')}</p><div class="skills-loaded"><b>Loaded by agents</b><div>${loaded}</div></div></div><label class="skill-enable-control"><span class="skill-switch-wrap"><input id="skill-enabled" type="checkbox" class="skill-switch"${skill.enabled?' checked':''}><span class="skill-switch-track"></span></span><span>${skill.enabled?'Enabled':'Disabled'}</span></label></div>
+        <div class="skills-meta mono"><span>${formatBytes(skill.size)} total</span><span>${skill.file_count} file${skill.file_count===1?'':'s'}</span><span>${skill.last_used_at?'last read '+ago(skill.last_used_at):'not read yet'}</span><span>updated ${ago(skill.updated_at)} by ${esc(skill.updated_by)}</span></div>
+        <div class="skills-file-layout"><nav class="skills-file-tree" aria-label="Skill files"><div class="skills-file-tree-head">FILES <span>${files.length}</span></div>${fileButtons}</nav><div class="skills-file-view"><div class="skills-file-view-head"><span class="mono">${esc(fileData?.path||'')}</span><span class="small muted">${fileData?formatBytes(fileData.size):''}</span></div><div class="skills-file-content" id="skill-file-content">${filePane}</div></div></div>
+      </section>`:'<section class="skills-detail skills-empty-detail"><div class="empty">Create or add a skill folder to get started.</div></section>'}</div>
+      <dialog class="board-dialog card skills-dialog" id="skill-create-dialog"><form id="skill-create-form" class="form"><div class="card-title"><h2>Create skill</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-create-dialog">Close</button></div><label>Folder name<input id="skill-create-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" placeholder="example-skill"></label><label>Title<input id="skill-create-title" required placeholder="Example skill"></label><label>Description<input id="skill-create-description" required maxlength="280" placeholder="When should agents use this skill?"></label><label>Instructions<textarea id="skill-create-body" required rows="10" placeholder="Write the steps agents should follow…"></textarea></label><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-create-dialog">Cancel</button><button class="btn ok">Create skill</button></div></form></dialog>
+      <dialog class="board-dialog card skills-dialog" id="skill-import-dialog"><form id="skill-import-form" class="form"><div class="card-title"><h2>Add skill folder</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-import-dialog">Close</button></div><p class="small muted">Choose a skill directory containing a root SKILL.md. Its files will be copied into <code>/skills</code>.</p><label>Folder name<input id="skill-import-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" placeholder="example-skill"></label><input id="skill-import-files" type="file" webkitdirectory multiple hidden><button class="btn" id="skill-choose-folder" type="button">Choose folder</button><div class="skill-import-selection" id="skill-import-selection">No folder selected</div><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-import-dialog">Cancel</button><button class="btn ok" id="skill-import-submit" disabled>Add skill</button></div></form></dialog>
+      <dialog class="board-dialog card skills-dialog" id="skill-budget-dialog"><div class="form"><div class="card-title"><h2>Context budget</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-budget-dialog">Close</button></div><div class="skill-budget-number">~${tokens.toLocaleString()} <small>tokens</small></div><p>The enabled skill names and descriptions use an estimated ${tokens.toLocaleString()} tokens in each new agent run. Full <code>SKILL.md</code> instructions load on demand through <code>skill_get</code>; agents can read every enabled folder in this list.</p><div class="skill-budget-list">${skills.filter(s=>s.enabled).map(s=>`<div><span>${esc(s.slug)}</span><b>~${(s.context_tokens||1).toLocaleString()} tokens</b></div>`).join('')||'<span class="muted">No enabled skills</span>'}</div></div></dialog>
+    </div>`);
+    $('#skills-filter').oninput=e=>{const needle=e.target.value.toLowerCase().trim();for(const row of app.querySelectorAll('[data-skill-slug]'))row.hidden=!row.dataset.search.includes(needle);};
+    $('#skills-refresh').onclick=()=>render();
+    $('#skill-context-budget').onclick=()=>$('#skill-budget-dialog').showModal();
+    $('#skill-create').onclick=()=>$('#skill-create-dialog').showModal();
+    $('#skill-add').onclick=()=>$('#skill-import-dialog').showModal();
+    for(const button of app.querySelectorAll('[data-close-dialog]'))button.onclick=()=>$('#'+button.dataset.closeDialog).close();
+    for(const button of app.querySelectorAll('[data-skill-slug]'))button.onclick=()=>{location.hash='#/skills/'+encodeURIComponent(button.dataset.skillSlug);};
+    for(const button of app.querySelectorAll('[data-skill-file]'))button.onclick=async()=>{
+      currentFile=button.dataset.skillFile;editing=false;
+      try{fileData=await GET(`/api/skills/${encodeURIComponent(slug)}?file=${encodeURIComponent(currentFile)}`);renderSkillFile();}
+      catch(err){fail(err);}
+    };
+    function renderSkillFile(){
+      const host=$('#skill-file-content');if(!host)return;
+      const content=editing?`<textarea id="skill-editor" class="skill-editor" spellcheck="false">${esc(fileData.content)}</textarea><div class="skill-editor-actions"><span class="small muted">Editing ${esc(fileData.path)}</span><button class="btn sm" id="skill-cancel-edit" type="button">Cancel</button><button class="btn sm ok" id="skill-save-edit" type="button">Save file</button></div>`:fileData.binary?'<div class="skill-binary-note">This file is stored with the skill. Text preview is unavailable.</div>':fileData.path.toLowerCase().endsWith('.md')?`<div class="md skill-markdown">${MD.render(fileData.content)}</div>`:`<pre class="skill-code-preview">${esc(fileData.content)}</pre>`;
+      host.innerHTML=content;const label=$('.skills-file-view-head .mono');if(label)label.textContent=fileData.path;const size=$('.skills-file-view-head .small');if(size)size.textContent=formatBytes(fileData.size);
+      app.querySelectorAll('[data-skill-file]').forEach(item=>item.classList.toggle('selected',item.dataset.skillFile===fileData.path));
+      const edit=$('#skill-edit');if(edit)edit.disabled=fileData.binary;
+      const editButton=$('#skill-edit');if(editButton)editButton.onclick=()=>{editing=true;renderSkillFile();};
+      const cancel=$('#skill-cancel-edit');if(cancel)cancel.onclick=()=>{editing=false;renderSkillFile();};
+      const save=$('#skill-save-edit');if(save)save.onclick=async()=>{try{await api('PATCH',`/api/skills/${encodeURIComponent(slug)}`,{file:currentFile,content:$('#skill-editor').value,version:fileData.version});toast('skill file saved');await render();}catch(err){fail(err);}};
+    }
+    if(skill){
+      $('#skill-edit').onclick=()=>{editing=true;renderSkillFile();};
+      $('#skill-delete').onclick=async()=>{if(!confirm(`Delete the entire ${skill.slug} skill folder?`))return;try{await api('DELETE',`/api/skills/${encodeURIComponent(slug)}`);toast('skill folder deleted');location.hash='#/skills';}catch(err){fail(err);}};
+      $('#skill-enabled').onchange=async e=>{try{await api('PATCH',`/api/skills/${encodeURIComponent(slug)}`,{enabled:e.target.checked});await render();}catch(err){fail(err);}};
+    }
+    $('#skill-create-title').oninput=e=>{const target=$('#skill-create-slug');if(!target.dataset.touched)target.value=slugifySkill(e.target.value);};
+    $('#skill-create-slug').oninput=e=>e.target.dataset.touched='1';
+    $('#skill-create-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/skills',{slug:$('#skill-create-slug').value.trim(),title:$('#skill-create-title').value.trim(),description:$('#skill-create-description').value.trim(),body:$('#skill-create-body').value,version:0});toast('skill folder created');$('#skill-create-dialog').close();location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+    $('#skill-choose-folder').onclick=()=>$('#skill-import-files').click();
+    $('#skill-import-files').onchange=e=>{importFiles=[...e.target.files];const first=importFiles[0]?.webkitRelativePath||'';const folder=first.split('/')[0]||'';$('#skill-import-slug').value=slugifySkill(folder);$('#skill-import-selection').textContent=importFiles.length?`${folder||'Folder'} · ${importFiles.length} files selected`:'No folder selected';$('#skill-import-submit').disabled=!importFiles.length;};
+    $('#skill-import-form').onsubmit=async e=>{e.preventDefault();if(!importFiles.length)return;try{const files=[];for(const file of importFiles){const parts=(file.webkitRelativePath||file.name).split('/');const relative=(parts.length>1?parts.slice(1):parts).join('/');const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,Math.min(i+0x8000,bytes.length)));files.push({path:relative,content_base64:btoa(binary)});}const saved=await api('POST','/api/skills',{action:'import',slug:$('#skill-import-slug').value.trim(),files});toast('skill folder added');$('#skill-import-dialog').close();location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+    if(createOpen)$('#skill-create-dialog').showModal();
   }
-  route(/^\/skills\/new$/,()=>skillPage());
-  route(/^\/skills\/([^/]+)$/,slug=>skillPage(slug));
+  const formatBytes=n=>{if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;return `${(n/1024/1024).toFixed(1)} MB`;};
+  const slugifySkill=value=>(value||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,80);
+  route(/^\/skills\/new$/,()=>skillManager('',true));
+  route(/^\/skills\/([^/]+)$/,slug=>skillManager(decodeURIComponent(slug)));
 
   route(/^\/agents\/([^/]+)$/, async (slug) => {
     setTab('agents');
@@ -893,7 +955,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const inbox = await GET(`/api/agents/${encodeURIComponent(slug)}/inbox`);
     const pages = (await GET('/api/wiki')).filter((p) => p.author === slug || p.updated_by === slug);
     paint(`<div class="pagehead"><div><h1 style="text-transform:none;font-family:var(--sans)">${esc(a.name)}</h1><div class="sub">${badge(a.role)} <span class="mono">${esc(a.slug)}</span> · dept ${esc(a.department || '—')} · rep <b>${a.reputation}</b> · last seen ${ago(a.last_seen) || 'never'}</div></div>
-        <div class="actions"><a class="btn" href="#/agents/${encodeURIComponent(slug)}/edit">Edit agent</a><a class="btn" href="#/skills">Shared skills</a><a class="btn" href="#/tickets/new?assignee=${encodeURIComponent(slug)}&dept=${encodeURIComponent(a.department)}">+ Ticket for ${esc(slug)}</a></div></div><div class="card" id="agent-progress"></div>
+        <div class="actions"><a class="btn" href="#/agents/${encodeURIComponent(slug)}/edit">Edit agent</a><a class="btn" href="#/skills">Skills</a><a class="btn" href="#/tickets/new?assignee=${encodeURIComponent(slug)}&dept=${encodeURIComponent(a.department)}">+ Ticket for ${esc(slug)}</a></div></div><div class="card" id="agent-progress"></div>
       ${layout({ id: 'agent', body: `
         <div class="card"><p>${esc(a.description)}</p>${a.instructions?`<h3>Agent instructions</h3><div class="md">${MD.render(a.instructions)}</div>`:''}<dl class="kv"><dt>codebases</dt><dd>${esc(a.codebases || '—')}</dd><dt>reads first</dt><dd>${esc(a.wiki_pages || '—')}</dd><dt>agent file</dt><dd>${esc(a.agent_file || '—')}</dd></dl></div>
         <div class="card"><h3>Assigned tickets</h3>${a.tickets.length ? `<div class="list">${a.tickets.map(ticketItem).join('')}</div>` : '<span class="muted">none</span>'}</div>

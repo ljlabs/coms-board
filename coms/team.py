@@ -47,7 +47,7 @@ def delegate(conn, job_id, actor, name, capabilities, title, body):
         return {'agent': agent, 'ticket': api.get_ticket(conn, existing['id'])}
     urls = list(dict.fromkeys(re.findall(r'https://[^\s<>]+', job['body'])))
     assignment = (body.strip() + f'\n\nParent research job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\nStarting source URLs:\n' + '\n'.join(urls) +
-                  f'\n\nYour team room belongs to job #{job_id}. Read team_roster, ask a substantive question with team_send, then end this turn while waiting. Read the answer on resumption. Retrieve actual evidence with source_fetch. Publish and link your own evidence page and request peer review before ticket_result. Cite source IDs, URLs and retrieval dates; distinguish evidence, inference and limitations. Do not invent verification or backtests. Publish a shared method only after using it successfully. The lead owns the combined synthesis.')
+                  f'\n\nYour team room belongs to job #{job_id}. Read team_roster, ask a substantive question with team_send, then end this turn while waiting. Read the answer on resumption. Retrieve actual evidence with source_fetch. Publish and link your own evidence page and request peer review before ticket_result. Cite source IDs, URLs and retrieval dates; distinguish evidence, inference and limitations. Do not invent verification or backtests. Share useful methods with the lead; the orchestrator publishes shared skills. The lead owns the combined synthesis.')
     ticket = api.create_ticket(conn, title, assignment, actor, type_='research', assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True)
     send(conn, job_id, actor, '*', f"{'Reused' if agent['reused'] else 'Registered'} {agent['name']} ({agent['slug']}): {capabilities}. Assigned ticket #{ticket['id']}: {title}.", kind='note')
     return {'agent': agent, 'ticket': ticket}
@@ -165,7 +165,7 @@ def context(conn, tid, actor, *, instructions=True):
     data['sources'] = [{k: s.get(k) for k in ('id', 'reader', 'url', 'final_url', 'title', 'status', 'error', 'retrieved_at')}
                        for s in data['sources']]
     return ('TEAM CONVERSATION\n' + json.dumps(data, ensure_ascii=False) +
-        ('\nThe conversation, review and source entries above are compact indexes. Read full details with team_read, wiki_get and source_get before relying on them. Ask one substantive question if you have not received a teammate answer. Finish all wiki edits before requesting its current-revision review. After requesting review, do not edit that page until the reviewer replies; the runner ends your turn and resumes it automatically. If a reply or review is pending, finish WITHOUT ticket_result. Once a teammate has answered and the current page has an accepted review, call ticket_result and verify the tool succeeded. Revise rejected work before requesting a fresh review. Capture a method actually used successfully as a shared skill. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
+        ('\nThe conversation, review and source entries above are compact indexes. Read full details with team_read, wiki_get and source_get before relying on them. Ask one substantive question if you have not received a teammate answer. Finish all wiki edits before requesting its current-revision review. After requesting review, do not edit that page until the reviewer replies; the runner ends your turn and resumes it automatically. If a reply or review is pending, finish WITHOUT ticket_result. Once a teammate has answered and the current page has an accepted review, call ticket_result and verify the tool succeeded. Revise rejected work before requesting a fresh review. Share useful methods with the orchestrator; only the human operator and orchestrator can publish them to the shared skills folder. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
 
 
 def validate_delivery(conn, tid, actor):
@@ -188,7 +188,7 @@ def validate_delivery(conn, tid, actor):
                 validate_delivery(conn, child['id'], child['assignee'])
         latest = conn.execute('SELECT max(updated_at) FROM tickets WHERE parent_id=?', (tid,)).fetchone()[0]
         if latest and not any(p['updated_at'] >= latest for p in pages): raise api.BadRequest('Write a fresh synthesis after the teammate results and reviews')
-        skills = conn.execute("SELECT 1 FROM shared_skills WHERE slug NOT IN ('team-orchestration','source-backed-research') AND created_at>? AND created_by IN (SELECT sender FROM team_messages WHERE job_id=?) LIMIT 1", (job['created_at'], job['id'])).fetchone()
+        skills = conn.execute("SELECT 1 FROM activity WHERE kind='skill.create' AND created_at>? AND actor IN (SELECT sender FROM team_messages WHERE job_id=?) LIMIT 1", (job['created_at'], job['id'])).fetchone()
         if not skills: raise api.BadRequest('Publish at least one new shared procedure grounded in the methods this team actually used')
     else:
         answered = conn.execute("SELECT 1 FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.sender=? AND m.kind='question' AND d.status='answered' LIMIT 1", (job['id'], actor)).fetchone()

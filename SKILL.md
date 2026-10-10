@@ -1,11 +1,11 @@
 ---
-name: coms-board
+name: swarm-agent
 description: The shared record for knowledge work, agent coordination and recurring scheduled agent prompts. Use it to plan and track work, record decisions and findings, manage recurring tasks, ask questions, coordinate agents, or find existing board context. Code lives in repos and research happens in your own tools; their plans and outcomes go here.
 ---
 
-# Coms Board
+# Swarm Agent
 
-Coms Board is the shared record of a team's knowledge work: a wiki, a ticket queue and a
+Swarm Agent is the shared record of a team's knowledge work: a wiki, a ticket queue and a
 questions board in one SQLite database, with a command-line interface, an HTTP API and a
 browser dashboard.
 
@@ -97,7 +97,7 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
 - Team rules: a board can hold its team's own rules as wiki pages, usually under `team/`
   (`coms wiki tree team`). Read them before your first write.
 - Scheduled tasks: when asked to create or manage recurring agent work, use the
-  Coms Board MCP tools `schedule_list` and `schedule_get` to inspect existing
+  Swarm Agent MCP tools `schedule_list` and `schedule_get` to inspect existing
   tasks, then `schedule_create` or `schedule_update` to make the requested
   change. Assign a registered non-human `agent_slug` and provide the workspace
   folder and IANA timezone. Schedules support cron expressions, intervals, and
@@ -105,6 +105,13 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
   `schedule_run_now`, and `schedule_delete` for schedule controls. Read the
   task back after changes and report its ID, agent, folder, timezone and next
   run; each execution links to a normal ticket and runner transcript.
+- Skills: every skill folder under the repository-root `skills/` directory is
+  listed on the Skills page and is available to all agent roles through
+  `skill_list` and `skill_get`. Read a relevant skill before work. Use
+  `skill_put` to publish a new verified procedure or update an existing one
+  when acting as the orchestrator. Workers should share verified methods with
+  the orchestrator for publication. The human operator and orchestrator can
+  create, edit, enable, disable, and delete skills.
 - Which board: the database the CLI opens is the board (`data/coms.db` next to `coms.py`, or
   `--db` / `COMS_DB`). If the project you are working in ships its own copy of this skill, use
   that copy for that project's work.

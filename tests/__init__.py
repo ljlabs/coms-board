@@ -1,4 +1,4 @@
-"""coms-board test suite (stdlib unittest only).
+"""Swarm Agent test suite (stdlib unittest only).
 
 Run from the skill root:  python3 -m unittest discover -s tests -v
 Every test uses a throwaway SQLite file under a TemporaryDirectory; the real

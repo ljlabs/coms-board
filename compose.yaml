@@ -51,6 +51,11 @@ services:
       - board-data:/data
       - agent-state:/home/board
       - type: bind
+        source: ./skills
+        target: /app/skills
+        bind:
+          create_host_path: false
+      - type: bind
         source: ${SWARM_WORKSPACE:-./agent-workspace}
         target: /workspace
         read_only: ${SWARM_WORKSPACE_READ_ONLY:-true}

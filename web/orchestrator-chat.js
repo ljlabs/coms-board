@@ -143,7 +143,7 @@
     const diagnostics=document.createElement('details');diagnostics.className='chat-logs';
     diagnostics.innerHTML='<summary>Debug logs</summary><div class="chat-log-list"></div>';
     diagnostics.hidden=true;box.append(diagnostics);
-    const empty=document.createElement('div');empty.className='chat-empty';empty.textContent='Start a conversation with the Coms Board orchestrator.';
+    const empty=document.createElement('div');empty.className='chat-empty';empty.textContent='Start a conversation with the Swarm Agent orchestrator.';
     box.prepend(empty);
 
     function create(m) {
