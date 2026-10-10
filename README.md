@@ -176,11 +176,17 @@ with unfinished child work.
 Each skill lives at `skills/<slug>/SKILL.md`; nested reference files are shown
 in the file browser. Search, import a skill folder, create or edit a skill,
 toggle whether it appears in the agent index, and delete folders from the
-manager. The orchestrator and every worker can list and read every enabled
-folder through `skill_list` and `skill_get`. The human operator and
-orchestrator can create, edit, enable, disable, and delete skills with the
-manager or `skill_put`; workers share verified methods with the orchestrator
-for publication. Existing database skills are copied into the folder once at
+manager. The file panel can create files and empty folders, rename entries,
+and move files or folders by dragging them onto a folder or **Skill root**.
+Select a folder before creating an entry to use it as the destination. The
+**Move** button offers the same operation with a folder picker. Moves preserve
+unsaved editor text and never overwrite another entry; the root `SKILL.md`
+stays in place. The orchestrator and every worker can list and read every enabled
+folder through `skill_list`, `skill_get`, and `skill_file_get`. The human operator and
+orchestrator can manage skill contents through the page or `skill_put`,
+`skill_file_write`, `skill_entry_create`, and `skill_entry_move`; workers share
+verified methods with the orchestrator for publication. Existing database
+skills are copied into the folder once at
 startup, then files become the source of truth.
 
 **Team rooms**, linked from Agents and each job ticket, show named questions,

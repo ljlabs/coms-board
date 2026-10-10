@@ -19,6 +19,8 @@ FILE_PART_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\Z")
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SKILL_BYTES = 8 * 1024 * 1024
 MAX_SKILL_FILES = 100
+MAX_SKILL_DIRECTORIES = 100
+WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL'} | {f'{prefix}{n}' for prefix in ('COM', 'LPT') for n in range(1, 10)}
 
 
 def _root() -> Path:
@@ -81,10 +83,12 @@ def _safe_relative(value: str) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value or value.startswith("/"):
         raise ValueError("skill file path must be a relative slash-separated path")
     path = PurePosixPath(value)
-    if path.is_absolute() or not path.parts or any(part in ("", ".", "..") for part in path.parts):
+    if path.is_absolute() or not path.parts or any(part in ("", ".", "..") for part in value.split('/')):
         raise ValueError("skill file path contains an invalid directory")
     if any(part.startswith(".") or not FILE_PART_RE.fullmatch(part) for part in path.parts):
         raise ValueError("skill file path contains a hidden or invalid name")
+    if any(part.endswith(('.', ' ')) or part.split('.')[0].upper() in WINDOWS_RESERVED_NAMES for part in path.parts):
+        raise ValueError("skill file path contains a name that is invalid on Windows")
     if path.as_posix() == "SKILL.md.disabled":
         raise ValueError("reserved skill metadata file")
     return path
@@ -166,6 +170,48 @@ def _skill_files(folder: Path) -> list[dict]:
     return files
 
 
+def _skill_directories(folder: Path) -> list[str]:
+    directories = []
+    for current, dirs, _ in os.walk(folder, followlinks=False):
+        here = Path(current)
+        allowed = []
+        for name in sorted(dirs):
+            path = here / name
+            if path.is_symlink():
+                continue
+            try:
+                relative = _safe_relative(path.relative_to(folder).as_posix()).as_posix()
+            except ValueError:
+                continue
+            allowed.append(name)
+            directories.append(relative)
+        dirs[:] = allowed
+    return sorted(directories)
+
+
+def _tree_version(folder: Path, files: list[dict], directories: list[str]) -> int:
+    entries = [('directory', name) for name in directories]
+    for item in files:
+        stat = folder.joinpath(*PurePosixPath(item['path']).parts).stat()
+        entries.append(('file', item['path'], stat.st_size, stat.st_mtime_ns, stat.st_ino))
+    return _version(json.dumps(entries, separators=(',', ':')).encode('utf-8'))
+
+
+def _check_tree_version(slug: str, expected_version) -> dict:
+    skill = get_skill(slug)
+    if type(expected_version) is not int or expected_version != skill['tree_version']:
+        raise ValueError("Skill files changed; refresh the file tree before trying again.")
+    return skill
+
+
+def _ensure_available(path: Path, source: Path | None = None) -> None:
+    if not path.parent.is_dir():
+        raise FileNotFoundError("destination folder does not exist")
+    for sibling in path.parent.iterdir():
+        if sibling.name.casefold() == path.name.casefold() and sibling != source:
+            raise ValueError("a file or folder with that name already exists")
+
+
 def list_skills() -> list[dict]:
     root = _root()
     skills = []
@@ -201,11 +247,14 @@ def get_skill(slug: str) -> dict:
         raise ValueError("SKILL.md is larger than the 1 MiB limit")
     content = raw.decode("utf-8")
     title, description = _metadata(content, slug)
+    files = _skill_files(folder)
+    directories = _skill_directories(folder)
     return {"slug": slug, "title": title, "description": description,
             "body": content, "version": _version(raw), "updated_at": _stamp(manifest),
-            "size": sum(item["size"] for item in _skill_files(folder)),
-            "file_count": len(_skill_files(folder)), "enabled": not (folder / ".disabled").exists(),
-            "files": _skill_files(folder)}
+            "size": sum(item["size"] for item in files),
+            "file_count": len(files), "enabled": not (folder / ".disabled").exists(),
+            "files": files, "directories": directories,
+            "tree_version": _tree_version(folder, files, directories)}
 
 
 def get_file(slug: str, relative: str) -> dict:
@@ -289,6 +338,56 @@ def write_file(slug: str, relative: str, content: str, expected_version=None) ->
             raise FileNotFoundError("skill file folder does not exist")
         _atomic_write(path, content.encode("utf-8"))
         return get_file(slug, relative)
+
+
+def create_entry(slug: str, relative: str, kind: str, tree_version, content: str = '') -> dict:
+    if kind not in ('file', 'folder'):
+        raise ValueError("entry kind must be file or folder")
+    if not isinstance(content, str):
+        raise ValueError("skill file content must be text")
+    if kind == 'folder' and content:
+        raise ValueError("folders cannot contain text")
+    with _skill_lock(slug):
+        skill = _check_tree_version(slug, tree_version)
+        path = _file_path(slug, relative)
+        _ensure_available(path)
+        if kind == 'folder':
+            if len(skill['directories']) >= MAX_SKILL_DIRECTORIES:
+                raise ValueError(f"skills are limited to {MAX_SKILL_DIRECTORIES} folders")
+            path.mkdir()
+        else:
+            if skill['file_count'] >= MAX_SKILL_FILES:
+                raise ValueError(f"skills are limited to {MAX_SKILL_FILES} files")
+            raw = content.encode('utf-8')
+            if skill['size'] + len(raw) > MAX_SKILL_BYTES:
+                raise ValueError("a skill cannot exceed 8 MiB")
+            _atomic_write(path, raw)
+        return {**get_skill(slug), 'path': _safe_relative(relative).as_posix(), 'kind': kind}
+
+
+def move_entry(slug: str, source: str, destination: str, tree_version) -> dict:
+    with _skill_lock(slug):
+        _check_tree_version(slug, tree_version)
+        origin = _file_path(slug, source)
+        target = _file_path(slug, destination)
+        if source.casefold() == 'skill.md' or destination.casefold() == 'skill.md':
+            raise ValueError("the root SKILL.md cannot be renamed, moved or replaced")
+        if source == destination:
+            raise ValueError("choose a different destination")
+        if not origin.exists():
+            raise FileNotFoundError(f"skill entry {source!r} not found")
+        if not origin.is_file() and not origin.is_dir():
+            raise ValueError("only regular files and folders can be moved")
+        kind = 'folder' if origin.is_dir() else 'file'
+        if kind == 'folder':
+            if target.parent.resolve().is_relative_to(origin.resolve()):
+                raise ValueError("a folder cannot be moved inside itself")
+            for current, dirs, names in os.walk(origin, followlinks=False):
+                if any((Path(current) / name).is_symlink() for name in dirs + names):
+                    raise ValueError("cannot move a folder containing symbolic links")
+        _ensure_available(target, origin)
+        origin.rename(target)
+        return {**get_skill(slug), 'source': source, 'path': _safe_relative(destination).as_posix(), 'kind': kind}
 
 
 def set_enabled(slug: str, enabled: bool) -> dict:

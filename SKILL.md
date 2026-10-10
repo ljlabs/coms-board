@@ -112,6 +112,12 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
   when acting as the orchestrator. Workers should share verified methods with
   the orchestrator for publication. The human operator and orchestrator can
   create, edit, enable, disable, and delete skills.
+  Use `skill_file_get` to read supporting files. Managers can edit text with
+  `skill_file_write`, add files or empty folders with `skill_entry_create`,
+  and rename or move entries with `skill_entry_move`. Create and move calls
+  require the current `tree_version` from `skill_get`; file edits require
+  the version from `skill_file_get`. Paths stay relative to the selected
+  skill, destination parents must exist, and the root `SKILL.md` stays in place.
 - Which board: the database the CLI opens is the board (`data/coms.db` next to `coms.py`, or
   `--db` / `COMS_DB`). If the project you are working in ships its own copy of this skill, use
   that copy for that project's work.

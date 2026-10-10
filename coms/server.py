@@ -293,6 +293,12 @@ def r_skills(conn, m, mm, q, b, actor):
         return api.save_skill(conn, slug or b.get('slug', ''), b.get('title', ''), b.get('body', ''), actor,
                               b.get('version'), b.get('description', ''))
     if m == 'PATCH' and slug:
+        if b.get('action') == 'create':
+            return api.create_skill_entry(conn, slug, b.get('path', ''), b.get('kind', ''), actor,
+                                          b.get('tree_version'), b.get('content', ''))
+        if b.get('action') == 'move':
+            return api.move_skill_entry(conn, slug, b.get('source', ''), b.get('destination', ''), actor,
+                                        b.get('tree_version'))
         if 'enabled' in b:
             return api.set_skill_enabled(conn, slug, b['enabled'], actor)
         if 'file' in b and 'content' in b:

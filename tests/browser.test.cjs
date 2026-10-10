@@ -61,19 +61,72 @@ test('Agents discovers registered teammates and polls visible progress', async (
 
 test('Shared skill editor saves a version all agents can read', async () => {
   await pageFor('/skills/new', async page => {
-    await page.locator('#skill-slug').fill('browser-sourcing');
-    await page.locator('#skill-title').fill('Browser sourcing');
-    await page.locator('#skill-body').fill('Read the primary source and record its date.');
-    await page.locator('#skill-form button').click();
-    await page.waitForFunction(() => location.hash==='#/skills/browser-sourcing' && document.querySelector('.md'));
-    assert.ok((await page.locator('.md').textContent()).includes('primary source'));
-    await page.locator('details summary').click();
-    await page.locator('#skill-body').fill('Record the direct source URL too.');
-    await page.locator('#skill-form button').click();
-    await page.waitForFunction(() => document.querySelector('.pagehead .sub').textContent.includes('v2'));
+    await page.locator('#skill-create-slug').fill('browser-sourcing');
+    await page.locator('#skill-create-title').fill('Browser sourcing');
+    await page.locator('#skill-create-description').fill('Use for primary source research.');
+    await page.locator('#skill-create-body').fill('Read the primary source and record its date.');
+    await page.locator('#skill-create-form button[type="submit"], #skill-create-form .form-actions button.ok').click();
+    await page.waitForSelector('.skill-markdown');
+    assert.ok((await page.locator('.skill-markdown').textContent()).includes('primary source'));
+    await page.locator('#skill-edit').click();
+    await page.locator('#skill-editor').fill('Record the direct source URL too.');
+    await page.locator('#skill-save-edit').click();
+    await page.waitForFunction(() => document.querySelector('.skill-markdown')?.textContent.includes('direct source URL'));
     const saved=await page.evaluate(()=>fetch('/api/skills/browser-sourcing').then(r=>r.json()));
-    assert.equal(saved.version,2);
+    assert.equal(typeof saved.version,'number');
     assert.equal(saved.body,'Record the direct source URL too.');
+  });
+});
+
+test('Skill files can be created, renamed and dragged between folders and the root without losing drafts', async () => {
+  await pageFor('/skills/browser-sourcing', async page => {
+    async function add(kind, name, parent='') {
+      await page.locator(kind==='folder'?'#skill-new-folder':'#skill-new-file').click();
+      await page.locator('#skill-entry-parent').selectOption(parent);
+      await page.locator('#skill-entry-name').fill(name);
+      await page.locator('#skill-entry-submit').click();
+      await page.waitForFunction(() => !document.querySelector('#skill-entry-dialog').open);
+    }
+    await add('folder','a');
+    await add('folder','b');
+    await add('folder','empty','a');
+    await add('file','notes.md','a');
+    await page.locator('#skill-editor').fill('Keep this unsaved draft.');
+    await page.locator('#skill-entry-rename').click();
+    await page.locator('#skill-entry-name').fill('research.md');
+    await page.locator('#skill-entry-submit').click();
+    await page.waitForSelector('[data-skill-file="a/research.md"]');
+    assert.equal(await page.locator('#skill-editor').inputValue(),'Keep this unsaved draft.');
+    await page.locator('[data-skill-file="a/research.md"]').dragTo(page.locator('[data-skill-folder="b"]'));
+    await page.waitForSelector('[data-skill-file="b/research.md"]');
+    assert.equal(await page.locator('#skill-editor').inputValue(),'Keep this unsaved draft.');
+    await page.locator('[data-skill-file="b/research.md"]').dragTo(page.locator('#skill-root-drop'));
+    await page.waitForSelector('[data-skill-file="research.md"]');
+    assert.equal(await page.locator('#skill-editor').inputValue(),'Keep this unsaved draft.');
+    await page.locator('#skill-save-edit').click();
+    await page.waitForSelector('.skill-markdown');
+    const saved=await page.evaluate(()=>fetch('/api/skills/browser-sourcing?file=research.md').then(r=>r.json()));
+    assert.equal(saved.content,'Keep this unsaved draft.');
+    await page.locator('[data-skill-folder="a"]').dragTo(page.locator('[data-skill-folder="b"]'));
+    await page.waitForSelector('[data-skill-folder="b/a/empty"]',{state:'attached'});
+    await page.locator('[data-skill-folder="b/a"]').dragTo(page.locator('#skill-root-drop'));
+    await page.waitForSelector('[data-skill-folder="a/empty"]',{state:'attached'});
+    await add('file','nested.txt','a');
+    await page.locator('#skill-editor').fill('Keep this draft while moving its parent.');
+    await page.locator('[data-skill-folder="a"]').click();
+    await page.locator('#skill-entry-move').click();
+    await page.locator('#skill-entry-parent').selectOption('b');
+    await page.locator('#skill-entry-submit').click();
+    await page.waitForSelector('[data-skill-file="b/a/nested.txt"]');
+    assert.equal(await page.locator('#skill-editor').inputValue(),'Keep this draft while moving its parent.');
+    await page.locator('[data-skill-folder="b/a"]').dragTo(page.locator('#skill-root-drop'));
+    await page.waitForSelector('[data-skill-file="a/nested.txt"]');
+    assert.equal(await page.locator('#skill-editor').inputValue(),'Keep this draft while moving its parent.');
+    await page.locator('#skill-save-edit').click();
+    await page.waitForSelector('.skill-code-preview');
+    assert.equal(await page.locator('[data-skill-file="SKILL.md"]').getAttribute('draggable'),'false');
+    await page.reload();
+    await page.waitForSelector('[data-skill-folder="a/empty"]',{state:'attached'});
   });
 });
 

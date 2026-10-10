@@ -54,6 +54,16 @@ TOOLS = [
          {"name": S, "slug": S, "role": S, "description": S, "instructions": S}, ["name"], True),
     tool("skill_list", "List skill folders in the repository-root skills/ directory. Every agent role can read enabled skills."),
     tool("skill_get", "Read an enabled skill folder's SKILL.md and file index. Every agent role can read every enabled skill.", {"slug": S}, ["slug"]),
+    tool("skill_file_get", "Read a supporting file in an enabled skill. Available to every agent role.",
+         {"slug": S, "path": S}, ["slug", "path"]),
+    tool("skill_file_write", "Edit a skill text file. Only the human operator and orchestrator can write. Pass the version from skill_file_get.",
+         {"slug": S, "path": S, "content": S, "version": I}, ["slug", "path", "content", "version"], True),
+    tool("skill_entry_create", "Add a file or empty folder inside a skill. Only the human operator and orchestrator can write. Pass tree_version from skill_get; the parent folder must exist.",
+         {"slug": S, "path": S, "kind": {"type": "string", "enum": ["file", "folder"]}, "content": S, "tree_version": I},
+         ["slug", "path", "kind", "tree_version"], True),
+    tool("skill_entry_move", "Rename or move a file or folder within a skill. Only the human operator and orchestrator can write. Pass tree_version from skill_get. The destination parent must exist; root SKILL.md stays in place and existing entries cannot be overwritten.",
+         {"slug": S, "source": S, "destination": S, "tree_version": I},
+         ["slug", "source", "destination", "tree_version"], True),
     tool("skill_put", "Create or update a verified reusable procedure in the root skills/ folder. Only the human operator and orchestrator can publish; workers should share methods with the orchestrator. For updates, pass the current version returned by skill_get.",
          {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
     tool("skill_set_enabled", "Enable or disable a root skill. Available to the human operator and orchestrator.",
@@ -87,8 +97,8 @@ TOOLS = [
     tool("source_get", "Read the content and retrieval status of a recorded research source.", {"source_id": I}, ['source_id']),
 ]
 
-COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
-DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
+COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch'}
+DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_file_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
 
 
 def validate(spec, arguments):
@@ -165,12 +175,20 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "agents_list": result = api.list_agents(conn)
     elif name == "agent_ensure": result = api.ensure_agent(conn, args['name'], args.get('role', 'expert'), args.get('description', ''), args.get('slug', ''), args.get('instructions', ''))
     elif name == "skill_list": result = api.list_skills(conn, enabled_only=True)
-    elif name == "skill_get":
+    elif name in ("skill_get", "skill_file_get"):
         skill = api.get_skill(conn, args['slug'])
         if not skill['enabled']:
             raise api.NotFound(f"enabled skill {args['slug']!r} not found")
-        api.record_skill_access(conn, args['slug'], actor)
-        result = skill
+        if not readonly:
+            api.record_skill_access(conn, args['slug'], actor)
+        result = skill if name == 'skill_get' else api.get_skill_file(conn, args['slug'], args['path'])
+    elif name == "skill_file_write":
+        result = api.write_skill_file(conn, args['slug'], args['path'], args['content'], actor, args['version'])
+    elif name == "skill_entry_create":
+        result = api.create_skill_entry(conn, args['slug'], args['path'], args['kind'], actor,
+                                        args['tree_version'], args.get('content', ''))
+    elif name == "skill_entry_move":
+        result = api.move_skill_entry(conn, args['slug'], args['source'], args['destination'], actor, args['tree_version'])
     elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
     elif name in ('skill_set_enabled', 'skill_delete'):
         agent = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()

@@ -374,6 +374,30 @@ def write_skill_file(conn, slug: str, relative: str, content: str, actor: str, e
     return saved
 
 
+def create_skill_entry(conn, slug: str, relative: str, kind: str, actor: str, tree_version=None, content: str = '') -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.create_entry(slug, relative, kind, tree_version, content)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, skill['title'], created=False)
+    return _skill_record(conn, skill)
+
+
+def move_skill_entry(conn, slug: str, source: str, destination: str, actor: str, tree_version=None) -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.move_entry(slug, source, destination, tree_version)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, skill['title'], created=False)
+    return _skill_record(conn, skill)
+
+
 def import_skill(conn, slug: str, files: list[dict], actor: str) -> dict:
     require_skill_manager(conn, actor)
     try:
@@ -443,7 +467,7 @@ def shared_skill_context(conn) -> str:
     skills = [skill for skill in list_skills(conn) if skill['enabled']]
     lines = ['ROOT SKILLS (from the repository skills/ folder; available to every agent role). Read relevant instructions with skill_get before acting:']
     lines.extend(f"- {skill['slug']}: {skill['description'] or skill['title']}" for skill in skills)
-    lines.append('Every enabled folder skill is available through skill_list and skill_get, including in worker, collaboration, review, and dispatch sessions. Only the human operator and orchestrator can create or edit skills with skill_put; workers should send verified methods to the orchestrator for publication.')
+    lines.append('Every enabled folder skill is available through skill_list, skill_get, and skill_file_get, including in worker, collaboration, review, and dispatch sessions. Only the human operator and orchestrator can create or edit skills with skill_put, skill_file_write, skill_entry_create, and skill_entry_move; workers should send verified methods to the orchestrator for publication.')
     return '\n'.join(lines)
 
 

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from coms import api, db, mcp, team
+from coms import api, db, mcp, team, skill_store
 from coms.runner import Runner, _team_retry_status
 from coms.acp import AcpConnection, AcpError
 from coms import progress
@@ -19,6 +19,8 @@ class TestTeamRuntime(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, {'COMS_DB': str(Path(self.tmp.name) / 'board.db')})
         self.env.start()
+        self.skill_root = patch.object(skill_store, 'SKILLS_ROOT', Path(self.tmp.name) / 'skills')
+        self.skill_root.start()
         db._local.__dict__.clear()
         self.conn = db.connect()
         self.workspace = Path(self.tmp.name) / 'work'
@@ -33,6 +35,7 @@ class TestTeamRuntime(unittest.TestCase):
         if conn: conn.close()
         db._local.__dict__.clear()
         self.env.stop()
+        self.skill_root.stop()
         self.tmp.cleanup()
 
     def test_jobs_reuse_a_registered_orchestrator(self):
@@ -84,15 +87,22 @@ class TestTeamRuntime(unittest.TestCase):
         team.validate_delivery(self.conn, child['id'], child['assignee'])
 
     def test_skills_are_shared_and_updates_require_current_version(self):
+        api.upsert_agent(self.conn, 'first', 'First', role='orchestrator')
+        api.upsert_agent(self.conn, 'second', 'Second', role='expert')
         with patch.dict(os.environ, {'COMS_AGENT': 'first'}):
             mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Read primary sources.'})
         with patch.dict(os.environ, {'COMS_AGENT': 'second'}):
             self.assertIn('sourcing', mcp.call_tool('skill_list', {})['content'][0]['text'])
             self.assertIn('Read primary sources.', mcp.call_tool('skill_get', {'slug': 'sourcing'})['content'][0]['text'])
-            mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Record dates too.', 'version': 1})
             with self.assertRaises(api.BadRequest):
-                mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Stale write', 'version': 1})
-        self.assertEqual(api.get_skill(self.conn, 'sourcing')['version'], 2)
+                mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Unauthorized update'})
+        original = api.get_skill(self.conn, 'sourcing')['version']
+        with patch.dict(os.environ, {'COMS_AGENT': 'first'}):
+            mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Record dates too.', 'version': original})
+            with self.assertRaises(api.BadRequest):
+                mcp.call_tool('skill_put', {'slug': 'sourcing', 'title': 'Sourcing', 'body': 'Stale write', 'version': original})
+        self.assertNotEqual(api.get_skill(self.conn, 'sourcing')['version'], original)
+        self.assertIn('Record dates too.', api.get_skill(self.conn, 'sourcing')['body'])
 
     def test_progress_coalesces_responses_and_keeps_a_thinking_heartbeat(self):
         ticket = api.create_ticket(self.conn, 'Work', '', 'admin')
