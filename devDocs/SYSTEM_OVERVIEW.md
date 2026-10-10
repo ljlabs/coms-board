@@ -34,8 +34,8 @@ database rather than changing that developer data.
 
 The HTTP server serves static files from `web/`. The dashboard sends JSON
 requests to `coms/server.py`. Route handlers pass requests to operations in
-`coms/api.py` and related domain modules. The CLI in `coms/cli.py` calls those application
-operations directly. Keep validation and business rules in the shared backend
+`coms/api.py` and related domain modules. The CLI in `coms/cli.py` calls those
+application operations directly. Keep validation and business rules in the shared backend
 path so that the dashboard, API, and CLI agree on behavior.
 
 When changing a feature, trace all of its entry points. A new operation may
@@ -53,6 +53,12 @@ transcripts, handles retries, and gates review or completion on required board
 actions. Team replies and reviews can pause and resume work. Scheduled prompts
 are dispatched as tickets for the runner to execute.
 
+Changes to agent behavior may cross several boundaries: tool schema and
+validation, database records, runner state transitions, delivery checks, and
+debug or progress views. Test both the operation and the state transition that
+consumes its result. Keep tool descriptions and agent instructions aligned with
+the actual behavior.
+
 ### Shared skills
 
 The repository-root `skills/` directory is the source of shared skill content.
@@ -61,12 +67,6 @@ the runner gives the orchestrator and ticket agents an index of enabled
 folders. Full instructions load through `skill_get` when needed. SQLite keeps
 per-agent read counts, edit audit events, and a one-time import marker for
 records from the former database-backed skill store.
-
-Changes to agent behavior may cross several boundaries: tool schema and
-validation, database records, runner state transitions, delivery checks, and
-debug or progress views. Test both the operation and the state transition that
-consumes its result. Keep tool descriptions and agent instructions aligned with
-the actual behavior.
 
 ## Compatibility and quality checks
 

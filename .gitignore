@@ -19,7 +19,10 @@ agent-workspace/*
 
 # Local application settings and task notes
 .kiro/
-.Codex/
+# Keep workspace agent guidance shareable; other Codex files remain local.
+!.Codex/
+.Codex/*
+!.Codex/agent.md
 .env
 
 # --- Python ---
