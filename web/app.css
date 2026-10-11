@@ -342,7 +342,10 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .team-message.peer_review { border-left:4px solid var(--yellow); padding-left:.6rem; }
 .team-message.reply { border-left:4px solid var(--green); padding-left:.6rem; }
 .team-members { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
-.team-form textarea { width:100%; }
+.team-form .grid-2 { grid-template-columns:minmax(12rem, 1fr) minmax(0, 3fr); }
+.team-form .grid-2 > label { min-width:0; }
+.team-form select { width:100%; min-width:0; }
+.team-form textarea { width:100%; min-width:0; }
 .progress-item.running { border-left:3px solid var(--cyan); }
 .progress-item.waiting { border-left:3px solid var(--yellow); }
 .progress-item.failed { border-left:3px solid var(--pink); }
