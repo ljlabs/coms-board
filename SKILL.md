@@ -33,6 +33,14 @@ each excerpt holds at most 200 lines. `source_get` gives reviewers the recorded
 text, file hash and retrieval time. Use `source_fetch` for relevant public HTTPS
 evidence. Local audits can satisfy the evidence gate with file sources.
 
+OpenCode sessions also receive native `websearch` and `webfetch` with local
+models. Use search to discover real URLs, then fetch the chosen page; record
+public collaborative evidence with `source_fetch`. Load shared Swarm Agent
+procedures with MCP `skill_get`, rather than the backend's native skill catalog.
+Correct failed tool arguments or report a concrete blocker; do not repeat an
+unchanged failed call. Web search uses an external search service even when
+model inference is local.
+
 `team_delegate` creates a child `task` by default and inherits the job workspace;
 choose `type=research` for public-source research. `team_read` is a bounded index,
 including pending requests. Read a specific message with `message_id` and page

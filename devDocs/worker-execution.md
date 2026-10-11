@@ -2,11 +2,30 @@
 
 ## Behavior and contracts
 
-Every agent retains its backend's native tool support. The runner does not
-generate OpenCode permission or tool-deny configuration for research,
-collaboration, dispatch, monitoring, or ordinary execution. Scoped MCP writes
-still enforce board identity and turn responsibilities. The workspace's actual
-filesystem permissions continue to govern native commands.
+Every agent retains its backend's native tool support. For OpenCode, the runner
+selects the built-in `build` agent and explicitly allows `read`, `grep`, `glob`,
+`bash`, `edit`, `webfetch`, and `websearch` in both global and build-agent
+permissions. Inline settings override inherited project/global tool denials,
+including legacy `tools=false` settings. This common environment applies to
+workers, collaboration, dispatch, monitoring, model discovery and orchestrator
+sessions. Scoped MCP writes still enforce board identity and turn
+responsibilities; workspace filesystem permissions still govern commands.
+
+The runner sets `OPENCODE_ENABLE_EXA=1`: OpenCode otherwise omits native
+`websearch` for a custom provider such as `coms-local`, even with permissive
+tool settings. Search uses a hosted search service (Exa by default) while model
+inference can remain local. It needs outbound network access, without a separate
+search API key. `websearch` discovers URLs and `webfetch` reads them; neither
+replaces the collaboration evidence records made with `source_fetch`.
+Shared board procedures load through MCP `skill_get`, not the backend's native
+skill catalog. Failed tool arguments must be corrected or reported as blockers.
+
+Availability is distinct from model behavior: this configuration supplies the
+tools but cannot guarantee correct calls, useful progress or job completion.
+External services and local inference can still fail. Existing per-turn limits
+and durable team stopping remain in effect; there is no job-wide no-progress
+cutoff. See [OpenCode's tool docs](https://opencode.ai/docs/tools/#websearch)
+and [permission docs](https://opencode.ai/docs/permissions/).
 
 `team_delegate` defaults to `task`, accepts explicit `type=research`, and copies
 the parent job's workspace. Its instructions permit local evidence as well as
@@ -63,3 +82,14 @@ Git whitespace checks and the Docker build passed. The deployed service is
 healthy; job #10's 12 existing workers and 21 failed response deliveries were
 requeued after a database backup. Its deployed team index is approximately
 26 KB rather than the earlier truncated 180+ KB responses.
+
+The required-tool regression also checks every connection role and confirms
+other backends receive no OpenCode overrides. An isolated OpenCode 1.18.35
+session with stale project/agent denials exposed the actual required tool
+inventory. The configured `LFM2.5-2.6B-Q8_0.gguf` model completed a native web
+search and returned a result URL. This small capability check does not establish
+reliability for the earlier 12-worker audit, which remains on hold.
+
+Validation on 11 October 2026: 49 focused checks passed with one platform skip.
+The full suite ran 243 checks: 237 passed, two skipped and the same four existing
+thinking-transcript cases failed. Those failures reproduced before this change.

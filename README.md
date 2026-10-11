@@ -366,6 +366,16 @@ your chosen backend before marking a ticket ready. Agents run with the local
 user's filesystem permissions, so use a trusted workspace and monitor the
 ticket transcript and runner logs.
 
+OpenCode sessions explicitly receive file reading/search, commands, editing,
+URL fetching and web search, including with a local OpenAI-compatible model.
+The runner selects OpenCode's `build` agent and overrides inherited denials for
+those core tools. It sets `OPENCODE_ENABLE_EXA=1` so custom providers also get
+native web search. Search queries go to a hosted search service (Exa by default);
+model inference can remain local. Search needs outbound network access and no
+separate API key. Tools being available does not guarantee the model uses them
+correctly or completes a complex job. See
+[worker tools and evidence](devDocs/worker-execution.md).
+
 Each ticket's **Agent runner chat** uses the orchestrator chat component to show
 Markdown replies, expandable tool calls, review decisions, and follow-up replies.
 Progress entries identify **Execution**, **Review**, or **Conversation**, even when

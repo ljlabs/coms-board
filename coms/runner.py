@@ -11,6 +11,9 @@ from .orchestrator_transcript import Transcript, begin_turn, conversation_messag
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
 OPENCODE_LOCAL_PROVIDER_ID = 'coms-local'
+OPENCODE_REQUIRED_PERMISSIONS = {
+    name: 'allow' for name in ('read', 'grep', 'glob', 'bash', 'edit', 'webfetch', 'websearch')
+}
 MAX_REVIEW_ATTEMPTS = 3
 REVIEW_RETRY_BASE_SECONDS = 15
 MAX_AGENT_RETRIES = 2
@@ -119,6 +122,12 @@ def backend_environment(name, settings, values=None):
         model_ids.insert(0, selected)
     config = {
         '$schema': 'https://opencode.ai/config.json',
+        # Inline configuration overrides inherited project/global defaults.
+        # Agent permissions take precedence over global ones, so pin the
+        # baseline on the selected build agent too. Keep unrelated policies.
+        'default_agent': 'build',
+        'permission': dict(OPENCODE_REQUIRED_PERMISSIONS),
+        'agent': {'build': {'permission': dict(OPENCODE_REQUIRED_PERMISSIONS)}},
         'provider': {
             OPENCODE_LOCAL_PROVIDER_ID: {
                 'npm': '@ai-sdk/openai-compatible',
@@ -135,6 +144,9 @@ def backend_environment(name, settings, values=None):
     if default_model:
         config['model'] = OPENCODE_LOCAL_PROVIDER_ID + '/' + default_model
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, separators=(',', ':'))
+    # OpenCode otherwise hides websearch for custom/local providers. This is
+    # tool registration, independent of whether the model chooses to call it.
+    env['OPENCODE_ENABLE_EXA'] = '1'
     env['COMS_OPENCODE_API_KEY'] = api_key
     return env
 
@@ -164,6 +176,8 @@ BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Swarm 
 Use the attached Swarm Agent MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Read relevant enabled skill folders with skill_list and skill_get before acting; every worker and collaboration agent can read every enabled skill in the repository-root skills/ folder. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
 
 Every agent can use native tools to inspect its workspace, run commands and perform the assigned work. For local code, tests or documents, record the inspected file lines with source_read_file and cite the returned source URL/ID in your wiki page. Use source_fetch for public HTTPS evidence when relevant. Local audits do not require unrelated web research. Record actual test commands and outcomes, including failures. team_read returns a bounded index: use message_id for a particular message, source_after_id to page through sources, and source_get for full evidence. If repeated reads reveal no new information, act on the assignment or record a concrete blocker and finish the turn.
+
+Use your backend's native web search to discover current sources and URL fetching to read known URLs (websearch and webfetch in OpenCode); do not invent repository or documentation URLs. For collaborative evidence, record the chosen public page with source_fetch before citing it. Shared Swarm Agent procedures are loaded with the MCP skill_get tool, rather than the backend's native skill tool. If a tool fails, inspect the error and correct its arguments or report the blocker instead of repeating an unchanged failed call.
 
 When asked to manage recurring agent work, inspect existing tasks with schedule_list/schedule_get and use schedule_create/schedule_update, schedule_pause/schedule_resume, schedule_run_now or schedule_delete as requested. Select a registered non-human agent and provide the requested workspace and timezone. Read the task back after changes and report the schedule ID and next run.
 
@@ -642,7 +656,7 @@ class Runner:
                 prompt += f"Peer review #{review['id']} of [[{review['artifact_slug']}]]: call wiki_get, inspect cited evidence with source_get (use source_read_file or native tools for current workspace files, source_fetch for public URLs), then team_review(review_id={review['id']}, decision=accepted or changes_requested, body=concrete findings). Do not rubber-stamp unsupported claims.\n"
             else:
                 prompt += f"Answer with team_reply(message_id={message_id}, body=your useful response). An assistant response alone does not deliver the reply. Give specific reasoning and identify uncertainties.\n"
-            prompt += f'\nYour workspace is {cwd}. Native tools are available for inspecting the assignment and evidence. Local evidence is recorded with source_read_file; public HTTPS evidence uses source_fetch. Read source_get for the cited snapshot. Do not repeatedly poll unchanged team_read output.\n'
+            prompt += f'\nYour workspace is {cwd}. Native tools are available for inspecting the assignment and evidence. Use native web search to discover sources and URL fetching for known URLs (websearch and webfetch in OpenCode); record public evidence with source_fetch and local evidence with source_read_file. Read source_get for the cited snapshot. Read shared Swarm Agent procedures with MCP skill_get. Do not repeatedly poll unchanged team_read output.\n'
             prompt += api.shared_skill_context(conn) + '\n' + team.context(conn, tid, recipient, instructions=False)
             prompt += '\n' + api.triggered_skill_context(conn, message['body'], recipient)
             prompt += '\nREQUIRED ACTION: deliver the requested team_review decision or team_reply using its tool, then finish this response turn. Do not publish ticket_result or create new work.\n'
@@ -1334,6 +1348,7 @@ class Runner:
             guide=(f"You are the Swarm Agent main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
                    "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
                    "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
+                   "Use native web search to find current sources and URL fetching to read known URLs (websearch and webfetch in OpenCode). Record public team evidence with source_fetch. Correct failed tool arguments or report a blocker; do not repeat unchanged failed calls. "
                    "Use the attached Swarm Agent MCP tools for all board operations. Read relevant enabled skills with skill_list and skill_get; the orchestrator and all ticket workers can read every root skills/ folder entry. Only the human operator and orchestrator can use skill_put to publish or edit a verified procedure; workers should share methods with the orchestrator. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
                    "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
                    "When asked to stop or kill a team, call team_stop with its job_id and verify stopped=true. Killing worker processes or posting STOP notes leaves the runner queue eligible and can restart the work. "

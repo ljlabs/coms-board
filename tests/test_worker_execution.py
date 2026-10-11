@@ -46,11 +46,18 @@ class WorkerExecutionTests(unittest.TestCase):
         self.env.stop()
         self.tmp.cleanup()
 
-    def test_native_tools_are_never_disabled_even_with_legacy_board_only_flag(self):
+    def test_local_provider_gets_search_and_required_native_tools_despite_legacy_flags(self):
         with patch('coms.runner._opencode_model_ids', return_value=['model']):
-            env = backend_environment('opencode', {}, {'COMS_BOARD_ONLY': '1'})
+            env = backend_environment('opencode', {}, {'COMS_BOARD_ONLY': '1', 'OPENCODE_ENABLE_EXA': '0'})
         config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
-        self.assertNotIn('permission', config)
+        self.assertEqual(env['OPENCODE_ENABLE_EXA'], '1')
+        self.assertEqual(config['default_agent'], 'build')
+        for name in ('read', 'grep', 'glob', 'bash', 'edit', 'webfetch', 'websearch'):
+            with self.subTest(tool=name):
+                self.assertEqual(config['permission'][name], 'allow')
+                self.assertEqual(config['agent']['build']['permission'][name], 'allow')
+        self.assertNotIn('*', config['permission'])
+        self.assertNotIn('doom_loop', config['permission'])
         self.assertNotIn('tools', config)
 
     def test_all_connection_roles_keep_native_tool_configuration(self):
@@ -59,7 +66,23 @@ class WorkerExecutionTests(unittest.TestCase):
                 self.runner._conn(self.worker['id'], 'opencode', str(self.workspace), **mode)
                 env = backend.call_args.kwargs['env']
                 self.assertNotIn('COMS_BOARD_ONLY', env)
-                self.assertNotIn('permission', json.loads(env['OPENCODE_CONFIG_CONTENT']))
+                self.assertEqual(env['OPENCODE_ENABLE_EXA'], '1')
+                self.assertEqual(json.loads(env['OPENCODE_CONFIG_CONTENT'])['permission']['websearch'], 'allow')
+
+    def test_orchestrator_gets_the_same_required_tool_environment(self):
+        settings = self.runner.settings()
+        settings['opencode_command'] = 'unused-acp-command'
+        with patch('coms.runner.AcpConnection', return_value=Mock(session_id='fake')) as backend, patch('coms.runner._opencode_model_ids', return_value=['model']), patch.object(self.runner, '_apply_model'):
+            self.runner._orchestrator_connection('opencode', str(self.workspace), settings)
+        env = backend.call_args.kwargs['env']
+        self.assertEqual(env['OPENCODE_ENABLE_EXA'], '1')
+        self.assertEqual(json.loads(env['OPENCODE_CONFIG_CONTENT'])['permission']['websearch'], 'allow')
+
+    def test_other_backends_do_not_receive_opencode_tool_overrides(self):
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend), patch('coms.runner._opencode_model_ids') as discovery:
+                self.assertEqual(backend_environment(backend, {}, {'COMS_AGENT': 'Tess'}), {'COMS_AGENT': 'Tess'})
+                discovery.assert_not_called()
 
     def test_response_turn_uses_recipient_workspace_without_requiring_research_skill(self):
         reply_workspace = self.root / 'reply-workspace'
