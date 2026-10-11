@@ -215,6 +215,23 @@ class TestServer(unittest.TestCase):
                 urllib.request.urlopen(r)
             self.assertEqual(error.exception.code, 403)
 
+    def test_listed_trusted_host_accepted_others_rejected(self):
+        import os
+        listed = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/overview", headers={"Host": f"phone.local:{self.port}"})
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(listed)
+        self.assertEqual(error.exception.code, 403)
+        with patch.dict(os.environ, {"COMS_TRUSTED_HOSTS": "phone.local, other.local"}):
+            with urllib.request.urlopen(listed) as response:
+                self.assertEqual(response.status, 200)
+            for headers in [{"Host": f"evil.example:{self.port}"}, {"Host": "phone.local:9999"},
+                            {"Host": f"phone.local:{self.port}", "Origin": "https://evil.example"}]:
+                r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/overview", headers=headers)
+                with self.subTest(headers=headers), self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(r)
+                self.assertEqual(error.exception.code, 403)
+
     def test_workspace_settings_reject_app_and_accept_separate_directory(self):
         from coms.workspace import APP_ROOT
         for workspace in [str(APP_ROOT), str(APP_ROOT.parent), str(APP_ROOT / "data"), "relative", ""]:

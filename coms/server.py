@@ -4,6 +4,8 @@
 
 Serves the web UI from ../web and a JSON API under /api/. Binds to loopback
 by default: there is NO authentication, so do not expose it beyond localhost.
+Docker LAN access (e.g. from a phone) is opt-in via COMS_TRUSTED_HOSTS;
+see devDocs/lan-access.md.
 The acting identity for write calls comes from the X-Coms-Agent header
 (the UI sends the admin actor by default, see coms.api.ADMIN_ACTOR) or an
 `actor` field in the JSON body.
@@ -83,12 +85,19 @@ class Handler(BaseHTTPRequestHandler):
     def _trusted_request(self):
         # Local services are otherwise vulnerable to DNS rebinding and
         # cross-origin requests from websites opened in the same browser.
+        # COMS_TRUSTED_HOSTS (comma-separated hostnames/IPs, no ports) opts
+        # additional LAN hosts into the same checks; it is empty by default.
         host = self.headers.get("Host", "")
         try:
             authority = urlsplit("//" + host)
-            local = authority.hostname == "localhost" or ipaddress.ip_address(authority.hostname).is_loopback
+            hostname = (authority.hostname or "").lower()
+            try:
+                local = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                local = hostname == "localhost"
             public_port = int(os.environ.get("COMS_PUBLIC_PORT", self.server.server_port))
-            trusted = local and authority.port == public_port
+            extra = {h.strip().lower() for h in os.environ.get("COMS_TRUSTED_HOSTS", "").split(",") if h.strip()}
+            trusted = (local or hostname in extra) and authority.port == public_port
         except ValueError: trusted = False
         origin = self.headers.get("Origin")
         if origin and origin != "http://" + host: trusted = False

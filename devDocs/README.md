@@ -32,6 +32,8 @@ adds durable behavior that needs its own design note.
   keyboard/touch controls.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent
   access.
+- [LAN access](lan-access.md): opt-in Docker publishing and trusted-host
+  requests for phones/tablets on the local network.
 - [Feature template](FEATURE_TEMPLATE.md): starting point for a new feature note.
 
 ## Change workflow

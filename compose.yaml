@@ -35,13 +35,14 @@ services:
     mem_limit: 4g
     cpus: 4.0
     ports:
-      - "127.0.0.1:${SWARM_PORT:-18765}:8765"
+      - "${SWARM_BIND:-127.0.0.1}:${SWARM_PORT:-18765}:8765"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       COMS_DB: /data/coms.db
       COMS_IN_DOCKER: "1"
       COMS_PUBLIC_PORT: ${SWARM_PORT:-18765}
+      COMS_TRUSTED_HOSTS: ${COMS_TRUSTED_HOSTS:-}
       COMS_LLAMACPP_BASE_URL: ${COMS_LLAMACPP_BASE_URL:-http://host.docker.internal:11434/v1}
       COMS_LLAMACPP_MODEL: ${COMS_LLAMACPP_MODEL:-LFM2.5-2.6B-Q8_0.gguf}
       HOME: /home/board

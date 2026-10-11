@@ -75,6 +75,38 @@ Running `python .\coms.py` on Windows opens the seed database under `data/`;
 that file is not updated after Compose imports it. Use the wrapper for all
 board work while Docker is running.
 
+### Opening the board to your LAN (phone access)
+
+The Compose port publishes on `127.0.0.1` only, and the server rejects
+non-loopback browsers, so a phone cannot reach the board by default. To opt
+in on a trusted home network:
+
+1. Find this PC's LAN address (PowerShell: `ipconfig`; use the IPv4 address
+   of your Wi-Fi adapter, e.g. `192.168.1.50`).
+2. In a local `.env` file next to `compose.yaml`, set:
+
+   ```env
+   SWARM_BIND=0.0.0.0
+   COMS_TRUSTED_HOSTS=192.168.1.50
+   ```
+
+   List every hostname or IP you will type into a browser (phone browsers
+   send it as the `Host` header); anything unlisted still gets `403`.
+3. Recreate the board container so the new binding applies:
+
+   ```powershell
+   docker compose up -d
+   ```
+
+4. Join the same Wi-Fi on the phone and open `http://192.168.1.50:18765/`
+   (your IP and `SWARM_PORT`).
+
+Warnings: the dashboard has **no login**. Anyone on the LAN can read and
+change the board and run agents, so use a trusted network only and revert to
+`SWARM_BIND=127.0.0.1` (then `docker compose up -d` again) when done.
+Windows Firewall may ask to allow the connection the first time. See
+[LAN access](devDocs/lan-access.md) for the trust contract.
+
 ```sh
 git clone https://github.com/ljlabs/swarmagent.git
 cd swarmagent
