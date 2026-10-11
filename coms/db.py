@@ -387,6 +387,8 @@ MIGRATIONS = [
     ("tickets", "agent_retry_count", "INTEGER NOT NULL DEFAULT 0"),
     ("tickets", "agent_retry_requested", "INTEGER NOT NULL DEFAULT 0"),
     ("tickets", "workspace", "TEXT NOT NULL DEFAULT ''"),
+    ("tickets", "source_ticket_id", "INTEGER"),
+    ("tickets", "source_session_id", "TEXT NOT NULL DEFAULT ''"),
     ("team_deliveries", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),

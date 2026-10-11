@@ -162,10 +162,17 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "ticket_list": result = api.list_tickets(conn, include_closed=True)
     elif name == "ticket_get": result = api.get_ticket(conn, args["id"])
     elif name == "ticket_create":
+        # The shared orchestrator ACP/MCP process serves successive chats. Resolve
+        # its current durable turn here instead of freezing a session in its env.
+        source_session = None
+        if not assigned and conn.execute("SELECT 1 FROM agents WHERE slug=? AND role='orchestrator'", (actor,)).fetchone():
+            source_session = conn.execute("SELECT session_id FROM orchestrator_turns WHERE status='running' ORDER BY started_at DESC LIMIT 1").fetchone()
         result = api.create_ticket(conn, args["title"], args.get("body", ""), actor,
                                    type_=args.get('type', 'task'), priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
                                    tags=args.get("tags"), parent_id=args.get("parent_id"),
-                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'), workspace=args.get('workspace', ''))
+                                   ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'), workspace=args.get('workspace', ''),
+                                   source_ticket_id=int(assigned) if assigned else None,
+                                   source_session_id=source_session['session_id'] if source_session else '')
         if args.get('ready'):
             api.resolve_ticket_agent(conn, result)
             result = api.get_ticket(conn, result['id'])

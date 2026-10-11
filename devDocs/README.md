@@ -13,6 +13,8 @@ adds durable behavior that needs its own design note.
 ## Documentation index
 
 - [System overview](SYSTEM_OVERVIEW.md): components and request paths.
+- [Agent activity and sources](agent-activity.md): source attribution and loading
+  indicators for nested work in chats and scheduled tasks.
 - [Agent instruction setup](AGENT_INSTRUCTIONS.md): which files tools load and
   how to maintain the shared guidance.
 - [Scheduled agent tasks](scheduled-agent-tasks.md): recurrence and execution

@@ -637,8 +637,12 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .chat-thinking-body .chat-text>:first-child{margin-top:0}
 .chat-activity{position:absolute;right:.85rem;bottom:.55rem;width:106px;display:flex;flex-direction:column;align-items:center;pointer-events:none;z-index:1}
 .chat-activity[hidden]{display:none}
-.chat-loading-art{width:100px;height:100px}
-.chat-loading-art svg{display:block;width:100%;height:100%}
+.activity-spinner{display:inline-block;flex:none;align-self:center;width:18px;height:18px;border:3px solid var(--ink);border-right-color:transparent;border-radius:50%;animation:agent-spin .8s linear infinite}
+.chat-session-row>.activity-spinner{margin:0 .35rem}
+.chat-activity>.activity-spinner{width:28px;height:28px;margin-bottom:.4rem}
+.progress-source{margin:.4rem 0;overflow-wrap:anywhere}
+@keyframes agent-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.activity-spinner{animation:none}}
 .chat-activity>span{padding:.2rem .45rem;border:2px solid var(--ink);background:var(--yellow);box-shadow:2px 2px 0 var(--ink);font:700 .65rem var(--mono)}
 .chat-is-working .chat-transcript{padding-bottom:9rem}
 .chat-is-working .chat-latest{right:8.5rem}

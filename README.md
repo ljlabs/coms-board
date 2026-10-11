@@ -190,6 +190,14 @@ The lead releases its execution slot while waiting and resumes automatically
 to verify and synthesize worker results. Final review cannot close a parent
 with unfinished child work.
 
+**Live agent progress** on Agents shows who spawned each worker and links to
+its scheduled task or chat when known. Runner focuses on configuration. Circular
+indicators beside chats and scheduled tasks stay visible while related work is
+queued, running, or waiting, including nested subagents. The chat also shows the
+indicator while awaiting a response or teammates; an idle orchestrator remains
+available for follow-up messages. See
+[`devDocs/agent-activity.md`](devDocs/agent-activity.md).
+
 **Skills** reads skill folders from the repository-root `skills/` directory.
 The manager includes built-in SwarmBoard, ticket, wiki/Q&A, scheduling, team
 orchestration and source-backed research workflows. Built-in instruction files

@@ -292,7 +292,7 @@
     let sending=false, stopRequested=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
     const expandedGroups=new Set([detail.project_id?`project:${detail.project_id}`:'root']);
     let pickerTarget=null,pickerData=null,folderRequestSerial=0,folderAction=null,folderSaving=false,projectWorkspace='',creatingProject=false;
-    const sessionLink=s=>`<div class="chat-session-row"><a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a><button class="chat-delete" type="button" data-delete-chat="${esc(s.id)}" aria-label="Delete chat ${esc(s.title)}" title="Delete chat">×</button></div>`;
+    const sessionLink=s=>`<div class="chat-session-row"><a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a>${s.working?'<span class="activity-spinner" role="status" aria-label="Agent work in progress" title="Agent work in progress"></span>':''}<button class="chat-delete" type="button" data-delete-chat="${esc(s.id)}" aria-label="Delete chat ${esc(s.title)}" title="Delete chat">×</button></div>`;
     function groupMarkup(project) {
       const isRoot=!project,key=isRoot?'root':`project:${project.id}`;
       const items=sessions.filter(s=>String(s.project_id || '')===String(isRoot?'':project.id));
@@ -320,45 +320,30 @@
     const box=$('#chat-messages');
     const activity=document.createElement('div');activity.id='chat-activity';activity.className='chat-activity';activity.hidden=true;
     activity.setAttribute('role','status');activity.setAttribute('aria-live','polite');
-    activity.innerHTML='<div class="chat-loading-art" aria-hidden="true"></div><span>Thinking…</span>';
+    activity.innerHTML='<i class="activity-spinner" aria-hidden="true"></i><span>Thinking…</span>';
     box.parentElement.append(activity);
-    const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
-    let animation=null,animationLoading=false;
     function updateActivity() {
-      const working=Boolean(sending || detail.busy || detail.active_turn_id);
+      const working=Boolean(sending || detail.busy || detail.active_turn_id || detail.working);
       activity.hidden=!working;
       box.parentElement.classList.toggle('chat-is-working',working);
       const activeMessages=(detail.messages || []).filter(message=>message.turn_id===detail.active_turn_id);
       const latest=activeMessages[activeMessages.length-1];
-      setText(activity.querySelector('span'),sending?'Sending…':latest?.kind==='text'?'Responding…':latest?.kind==='tool_call'?'Working…':'Thinking…');
-      if (animation) {
-        if (reducedMotion.matches) animation.goToAndStop(45,true);
-        else if (working && !document.hidden) animation.play();
-        else animation.pause();
-      } else if (working && !animationLoading && window.lottie) {
-        animationLoading=true;
-        GET('/animations/chat-loading-neobrutalist.json').then(data=>{
-          if (!box.isConnected || h.signal?.aborted) return;
-          animation=window.lottie.loadAnimation({container:activity.querySelector('.chat-loading-art'),renderer:'svg',loop:true,autoplay:false,animationData:data,rendererSettings:{progressiveLoad:true,hideOnTransparent:true}});
-          animation.setSubframe(false);
-          animation.addEventListener('DOMLoaded',updateActivity);
-          updateActivity();
-        }).catch(()=>{ /* The text status remains visible if the artwork cannot load. */ });
-      }
+      setText(activity.querySelector('span'),sending?'Sending…':!detail.busy && !detail.active_turn_id && detail.working?'Waiting for teammates…':latest?.kind==='text'?'Responding…':latest?.kind==='tool_call'?'Working…':'Thinking…');
     }
     document.addEventListener('visibilitychange',updateActivity);
     document.addEventListener('selectionchange',queueStreamRender);
-    reducedMotion.addEventListener('change',updateActivity);
     h.onCleanup?.(()=>{
       document.removeEventListener('visibilitychange',updateActivity);
       document.removeEventListener('selectionchange',queueStreamRender);
-      reducedMotion.removeEventListener('change',updateActivity);
-      animation?.destroy();
       streamSource?.close();
       if (renderFrame!==null) cancelAnimationFrame(renderFrame);
     });
     const groups=$('#orch-sidebar .chat-projects');
-    function renderGroups() { groups.innerHTML=projectList(); }
+    let groupSignature=projectList();
+    function renderGroups() {
+      const next=projectList();if(next===groupSignature)return;
+      const scroll=groups.scrollTop;groups.innerHTML=next;groups.scrollTop=scroll;groupSignature=next;
+    }
     function renderProjectWorkspace() {
       $('#project-source-empty').hidden=Boolean(projectWorkspace);
       $('#project-source-selected').hidden=!projectWorkspace;
@@ -381,8 +366,8 @@
       h.restoreScroll(box,scroll);onScroll();
       const otherBusy=detail.runner_busy && !detail.busy;
       const states={completed:'ready',running:'working',failed:'failed',interrupted:'interrupted',cancelled:'cancelled',refused:'declined',limited:'limit reached'};
-      const status=$('#chat-status');setText(status,detail.busy?'working':otherBusy?'runner busy':states[detail.state] || 'ready');
-      status.className=`chat-status badge ${detail.busy || otherBusy?'in_progress':detail.state==='failed'||detail.state==='interrupted'?'blocked':'open'}`;
+      const status=$('#chat-status');setText(status,detail.busy?'working':detail.working?'waiting for teammates':otherBusy?'runner busy':states[detail.state] || 'ready');
+      status.className=`chat-status badge ${detail.busy || detail.working || otherBusy?'in_progress':detail.state==='failed'||detail.state==='interrupted'?'blocked':'open'}`;
       const sessionBusy=Boolean(detail.busy || detail.active_turn_id);
       const send=$('#chat-send');
       send.disabled=Boolean(detail.runner_busy || sessionBusy || sending || detail.chat_available===false);
@@ -400,7 +385,7 @@
       if ($('#move-project')) $('#move-project').value=detail.project_id || '';
       h.onDetail?.(detail);
       const current=sessions.find(s=>s.id===activeId);
-      if (current && current.title!==detail.title) {current.title=detail.title;current.updated_at=detail.updated_at;renderGroups();}
+      if (current) {current.title=detail.title;current.updated_at=detail.updated_at;current.working=Boolean(sending || detail.working || sessionBusy);renderGroups();}
     }
     function connectionError(error) { if (error.name==='AbortError') return;setText($('#chat-connection'),`Could not refresh this conversation: ${error.message}`);$('#chat-connection').hidden=false; }
     async function fetchDetail(includeLogs=loadedLogs) {
@@ -607,6 +592,14 @@
     if (!ticketMode) startStream();
     poll(async()=>{
       try {
+        if (!ticketMode) {
+          sessions=await GET('/api/runner/sessions');
+          if (!box.isConnected) return;
+          const current=sessions.find(session=>session.id===activeId);
+          if (current) {detail.working=current.working;detail.activity=current.activity;}
+          renderGroups();
+          if (streamHealthy) applyDetail();
+        }
         if (!streamHealthy) await fetchDetail();
         else if (loadedLogs && transcript.diagnostics.open) {
           const next=await GET(path+'?include_logs=1');

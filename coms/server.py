@@ -601,6 +601,9 @@ def r_runner_debug(conn, m, _mm, q, b, actor):
 def r_runner_status(conn, m, _mm, q, b, actor):
     if m != 'GET': return None
     from .runner import RUNNER
+    if q.get('activity') == '1':
+        data = progress.activity(conn)
+        return {kind: data[kind] for kind in ('tickets', 'sessions', 'schedules')}
     state = progress.snapshot(conn, ticket=q.get('ticket'), agent=q.get('agent'))
     settings = RUNNER.settings()
     state['capacity'] = int(settings.get('parallel_agents', '2'))

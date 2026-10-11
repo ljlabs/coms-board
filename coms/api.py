@@ -1053,7 +1053,8 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
                   parent_id: int | None = None, board_id: int | None = None,
                   ready_for_execution: bool = False,
                   agent_template_id: int | None = None, recommended_workers: int | None = None,
-                  collaboration_required: bool | None = None, workspace: str = "") -> dict:
+                  collaboration_required: bool | None = None, workspace: str = "",
+                  source_ticket_id: int | None = None, source_session_id: str = "") -> dict:
     if not title.strip():
         raise BadRequest("title required")
     if type_ not in TICKET_TYPES:
@@ -1068,6 +1069,10 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
         elif _board_id(board_id) != parent_board:
             raise BadRequest("parent and child tickets must belong to the same board")
     board_id = get_ticket_board(conn, 1 if board_id is None else board_id)["id"]
+    if source_ticket_id is not None:
+        get_ticket(conn, source_ticket_id)
+    if source_session_id and not conn.execute('SELECT 1 FROM orchestrator_sessions WHERE id=?', (source_session_id,)).fetchone():
+        raise NotFound('Source chat not found')
     ready_for_execution = _execution_flag(ready_for_execution)
     agent_template_id = _template_id(conn, agent_template_id)
     recommended_workers = _worker_count(recommended_workers)
@@ -1086,6 +1091,8 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
          agent_template_id, ts, ts, recommended_workers, collaboration_required, workspace or ""),
     )
     tid = cur.lastrowid
+    conn.execute('UPDATE tickets SET source_ticket_id=?,source_session_id=? WHERE id=?',
+                 (source_ticket_id, source_session_id, tid))
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
     _index_ticket(conn, t)
     log_activity(conn, requester, "ticket.create", f"ticket:{tid}",

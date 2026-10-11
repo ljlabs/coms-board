@@ -996,7 +996,12 @@ class Runner:
     def orchestrator_projects(self):
         conn=db.connect(); return [dict(r) for r in conn.execute('SELECT * FROM orchestrator_projects ORDER BY name')]
     def orchestrator_sessions(self):
-        conn=db.connect(); return [dict(r) for r in conn.execute('SELECT * FROM orchestrator_sessions ORDER BY updated_at DESC')]
+        conn=db.connect(); activity=progress.activity(conn)
+        rows=[dict(r) for r in conn.execute('SELECT * FROM orchestrator_sessions ORDER BY updated_at DESC')]
+        for row in rows:
+            row.update(progress.activity_status(activity, 'sessions', row['id']))
+            if self.orchestrator_busy and self.orchestrator_session == row['id']: row['working']=True
+        return rows
     def delete_orchestrator_project(self,project_id):
         conn=db.connect()
         project=conn.execute('SELECT id FROM orchestrator_projects WHERE id=?',(int(project_id),)).fetchone()
@@ -1061,6 +1066,8 @@ class Runner:
         active=next((t for t in reversed(out['turns']) if t['status']=='running'),None)
         out['active_turn_id']=active['id'] if active else None
         out['state']='running' if out['busy'] else out['turns'][-1]['status'] if out['turns'] else 'ready'
+        out.update(progress.activity_status(progress.activity(conn), 'sessions', sid))
+        out['working']=out['working'] or out['busy']
         return out
     def delete_orchestrator_session(self,sid):
         with self.lock:

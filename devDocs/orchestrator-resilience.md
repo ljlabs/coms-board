@@ -9,6 +9,12 @@ preserves the existing conversation and unsent composer draft so the user can
 steer the same session. Stopping an orchestrator response does not cancel
 independent child worker runs.
 
+Chat activity remains visible while descendant workers run, wait, or queue,
+including descendants of descendants. This activity is distinct from an active
+ACP response: an idle chat accepts steering while its workers continue. The
+shared circular indicator and provenance contract are documented in
+[`agent-activity.md`](agent-activity.md).
+
 The runner checks idle Orchestrator ACP liveness every 30 seconds and
 asynchronously recreates a dead session. The interval is the check cadence; it
 does not promise that replacement initialization will finish within 30 seconds.

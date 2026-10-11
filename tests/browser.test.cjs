@@ -8,6 +8,61 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 let server, browser, base, temp;
+
+test('Runner omits live progress and Agents links execution sources', async () => {
+  await pageFor('/runner', async page => {
+    assert.equal(await page.locator('#runner-progress').count(), 0);
+    assert.equal(await page.getByRole('heading', {name:'Live agent progress'}).count(), 0);
+    await page.route('**/api/runner/status', route => route.fulfill({json:{
+      generated_at:new Date().toISOString(),active_count:1,waiting_count:0,
+      items:[{key:'source-test',agent_slug:'worker',agent_name:'Worker',state:'running',phase:'thinking',
+        stage:'execute',ticket_id:1,ticket_title:'Delegated work',summary:'Thinking',backend:'codex',
+        response_chars:0,tool_calls:0,idle_seconds:0,source:{kind:'agent',slug:'lead',name:'Lead'},
+        schedule:{id:42,name:'Recurring report'}}]
+    }}));
+    await page.goto(base + '/#/agents');
+    await page.waitForSelector('.progress-source');
+    assert.equal(await page.locator('.progress-source a[href="#/agents/lead"]').textContent(), 'Lead');
+    assert.equal(await page.locator('.progress-source a[href="#/schedule/42"]').textContent(), 'Recurring report');
+  });
+});
+
+test('nested chat work shows circular activity while an idle chat allows steering', async () => {
+  await pageFor('/orchestrator?session=browser-chat', async page => {
+    let working=true;
+    await page.route('**/api/runner/sessions', async route => {
+      const data=await (await route.fetch()).json();
+      await route.fulfill({json:data.map(row=>({...row,working:row.id==='browser-chat'&&working}))});
+    });
+    await page.route('**/api/runner/sessions/browser-chat', async route => {
+      const data=await (await route.fetch()).json();
+      await route.fulfill({json:{...data,working,activity:{active_count:working?1:0,waiting_count:0,queued_count:0}}});
+    });
+    await page.reload();
+    await page.waitForSelector('.chat-session-row .activity-spinner');
+    await page.waitForSelector('#chat-activity:not([hidden]) .activity-spinner');
+    assert.equal(await page.locator('#chat-send').isEnabled(), true);
+    assert.equal(await page.locator('#chat-stop').isVisible(), false);
+    assert.match(await page.locator('#chat-activity').textContent(), /teammates/i);
+    working=false;
+    await page.waitForFunction(()=>document.querySelector('#chat-activity').hidden);
+    await page.waitForFunction(()=>!document.querySelector('.chat-session-row .activity-spinner'));
+  });
+});
+
+test('Schedule rows show circular activity and clear it when descendants finish', async () => {
+  await pageFor('/schedule', async page => {
+    let working=true;
+    await page.route('**/api/scheduled-tasks', route=>route.fulfill({json:[{
+      id:42,name:'Recurring report',agent_slug:'lead',workspace:'/workspace',timezone:'UTC',
+      schedule_type:'interval',schedule_config:{every:1,unit:'hours'},status:'active',working
+    }]}));
+    await page.reload();
+    await page.waitForSelector('[data-schedule-row] .activity-spinner');
+    working=false;
+    await page.waitForFunction(()=>!document.querySelector('[data-schedule-row] .activity-spinner'));
+  });
+});
 before(async () => {
   temp = mkdtempSync(path.join(tmpdir(), 'coms-browser-'));
   server = spawn(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'), ['tests/fixtures/browser_server.py'], {

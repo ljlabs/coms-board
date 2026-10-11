@@ -52,9 +52,11 @@ def conversation(conn, tid, runner, include_logs=False):
         connected = bool(runner.conns.get(tid) and runner.conns[tid].alive)
     available = connected or any(run['status'] == 'completed' and run['stage'] == 'execute' for run in runs)
     latest = runs[0] if runs else {}
-    return {'title': 'Agent runner chat', 'assistant_name': name, 'messages': messages,
+    activity = progress.activity(conn)
+    return {**progress.activity_status(activity, 'tickets', tid),
+            'title': 'Agent runner chat', 'assistant_name': name, 'messages': messages,
             'logs': logs if include_logs else [], 'log_count': len(logs), 'runs': runs,
-            'progress': progress.snapshot(conn, ticket=tid), 'retry': api.ticket_retry_state(conn, tid),
+            'progress': progress.snapshot(conn, ticket=tid, activity_data=activity), 'retry': api.ticket_retry_state(conn, tid),
             'busy': busy, 'runner_busy': busy, 'state': latest.get('status', 'completed'),
             'backend': latest.get('backend') or runner.settings().get('active_backend'),
             'workspace': ticket.get('workspace') or runner.settings().get('workspace'),

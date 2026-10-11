@@ -261,14 +261,17 @@ def list_tasks(conn, *, include_deleted: bool = False) -> list[dict]:
         FROM scheduled_tasks s LEFT JOIN agents a ON a.slug=s.agent_slug {where}
         ORDER BY CASE s.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                  s.next_run_at,s.id""").fetchall()
-    return [_decode(row) for row in rows]
+    from . import progress
+    activity = progress.activity(conn)
+    return [{**_decode(row), **progress.activity_status(activity, 'schedules', row['id'])} for row in rows]
 
 
 def get_task(conn, task_id: int) -> dict:
     row = conn.execute("SELECT s.*,a.name AS agent_name FROM scheduled_tasks s LEFT JOIN agents a ON a.slug=s.agent_slug WHERE s.id=?", (int(task_id),)).fetchone()
     if not row:
         raise api.NotFound(f"scheduled task #{task_id} not found")
-    return _decode(row)
+    from . import progress
+    return {**_decode(row), **progress.activity_status(progress.activity(conn), 'schedules', int(task_id))}
 
 
 def create_task(conn, data: dict, actor: str) -> dict:
@@ -376,7 +379,8 @@ def get_run(conn, run_id: int) -> dict:
         FROM scheduled_task_runs r LEFT JOIN tickets t ON t.id=r.ticket_id WHERE r.id=?""", (int(run_id),)).fetchone()
     if not row:
         raise api.NotFound(f"scheduled execution #{run_id} not found")
-    return dict(row)
+    from . import progress
+    return {**dict(row), **progress.activity_status(progress.activity(conn), 'tickets', row['ticket_id'])}
 
 
 def list_runs(conn, task_id: int, limit: int = 100) -> list[dict]:
@@ -386,7 +390,9 @@ def list_runs(conn, task_id: int, limit: int = 100) -> list[dict]:
         (SELECT status FROM agent_runs a WHERE a.ticket_id=r.ticket_id AND a.stage!='collaborate' ORDER BY a.id DESC LIMIT 1) AS agent_run_status
         FROM scheduled_task_runs r LEFT JOIN tickets t ON t.id=r.ticket_id
         WHERE r.task_id=? ORDER BY r.id DESC LIMIT ?""", (int(task_id), limit)).fetchall()
-    return [dict(row) for row in rows]
+    from . import progress
+    activity = progress.activity(conn)
+    return [{**dict(row), **progress.activity_status(activity, 'tickets', row['ticket_id'])} for row in rows]
 
 
 def mark_ticket(conn, ticket_id: int, status: str, error: str = "") -> None:
