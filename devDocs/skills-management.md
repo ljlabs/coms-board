@@ -3,7 +3,8 @@
 ## Behavior and contracts
 
 The Skills page manages repository-root `skills/<slug>/` folders. A skill is
-listed when its folder contains a UTF-8 `SKILL.md`. Nested files are available
+listed when its folder name is a valid slug, neither the folder nor its
+`SKILL.md` is a symlink, and `SKILL.md` is a UTF-8 file within the size limit. Nested files are available
 in the file browser and imports preserve their relative paths. Skill content is
 the source of truth; SQLite stores agent-read counters and audit events only.
 The hidden `.disabled` marker keeps a skill visible in the manager while
@@ -28,7 +29,8 @@ it during creation. Up to 32 entries of 1–80 characters are accepted; control
 characters are rejected, whitespace is normalized and case-insensitive
 duplicates are removed. An empty or absent list means on-demand loading only.
 `PATCH /api/skills/<slug>` accepts `{trigger_words: [...], version}` using the
-manifest's current content version. Creation and `skill_put` accept optional
+skill's current effective content version (for built-ins with trigger
+overrides this includes the override, not just the manifest). Creation and `skill_put` accept optional
 `trigger_words`; direct manifest edits and imports validate the same metadata.
 
 Each orchestrator message, ticket assignment/review, ticket follow-up and team
@@ -48,7 +50,8 @@ the parent directory; **Move** selects a destination folder. Files and folders
 can also be dragged onto another folder or the **Skill root** drop target.
 Moving a folder preserves its subtree, including empty folders and binary
 files. Renaming or moving the file being edited preserves its unsaved text.
-Switching files or refreshing prompts before discarding an unsaved edit.
+Switching files or skills, refreshing, or starting a new entry asks for
+confirmation before discarding an unsaved edit.
 
 All agent roles can call `skill_list`, `skill_get`, and `skill_file_get`,
 including in collaboration and dispatch sessions. The orchestrator and

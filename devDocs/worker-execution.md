@@ -25,7 +25,7 @@ artifact. These records reuse `research_sources` and `source_reads`, so delivery
 and current-revision review require the same recorded evidence inspection as
 web sources. No database migration or weakened review gate is needed.
 
-MCP `team_read` and injected team context use a bounded index, at most 32,000
+MCP `team_read` and injected team context use a bounded index, at most 31,900
 encoded bytes, with counts, recent message previews, pending/failed requests,
 source metadata, progress and review summaries. A specific `message_id` returns
 that job's message in bounded pages using `offset`/`next_offset`. Sources page

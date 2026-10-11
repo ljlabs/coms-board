@@ -73,14 +73,18 @@ the documentation updates for one cohesive change together in the same commit.
    described in the root `README.md` (`npm ci`, install Playwright Chromium if
    needed, then `npm run test:browser`). Fix failures caused by the change; if a
    check cannot be run, record that clearly rather than reporting it as passed.
-5. **Record and maintain the design docs.** Update the relevant feature note
-   whenever behavior, interfaces, data shape, or implementation flow changes.
-   Add a feature note for new durable behavior using
-   [`FEATURE_TEMPLATE.md`](FEATURE_TEMPLATE.md). Keep it concise and describe
-   contracts and relationships that help the next agent make a correct change,
-   not a line-by-line copy of the source. Update other applicable docs too:
+5. **Record and maintain the design docs — every change updates them.** The
+   `devDocs/` notes are the living record of the full system and all its
+   features. Update the relevant note in the same commit whenever behavior,
+   interfaces, data shapes, entry points, or implementation flow change, and
+   correct any stale claim the change exposes (constants, tool names, limits,
+   routes, module responsibilities). Add a feature note for new durable
+   behavior using [`FEATURE_TEMPLATE.md`](FEATURE_TEMPLATE.md), and add it to
+   the documentation index above. Keep notes concise: contracts and
+   relationships that help the next agent make a correct change, not a
+   line-by-line copy of the source. Update other applicable docs too:
    `README.md` for setup and user-facing behavior, and `SKILL.md` for agent
-   instructions. Add new feature notes to the documentation index above.
+   instructions. A change with no doc update is incomplete.
 6. **Review the commit as a unit.** Before committing, inspect the complete
    staged diff and complete the checklist below. Stage the intended files or
    hunks explicitly when other work is present in the checkout.
@@ -96,8 +100,8 @@ suite at commit time.
   cases.
 - [ ] Focused feature tests and applicable regression checks have been run;
   any failures or unavailable checks are recorded accurately.
-- [ ] Feature notes reflect the current behavior, interfaces, data, and code
-  flow; affected setup and agent instructions are updated too.
+- [ ] devDocs cover the full changed surface and no stale claim remains;
+   affected setup and agent instructions are updated too.
 - [ ] `git diff --cached` contains the intended code, tests, and docs, and
   `git diff --cached --check` passes.
 

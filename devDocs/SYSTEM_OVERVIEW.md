@@ -13,7 +13,7 @@ for setup, user-facing behavior, configuration, and security limits.
 | `coms/db.py` | SQLite schema, connection setup, and migrations for existing databases. |
 | `coms/api.py` | Shared application operations and validation over a database connection. |
 | `coms/server.py` | Local HTTP server, JSON API routes, static dashboard assets, and live orchestrator events. |
-| `coms/cli.py` | Command-line interface; invokes the same application operations as the HTTP API. |
+| `coms/cli.py` | Command-line interface; invokes the same application operations as the HTTP API (the read-only `agent templates` list queries the database directly). |
 | `web/` | Browser dashboard. It calls the server API and presents wiki, tickets, Q&A, runner, and orchestrator features. |
 | `coms/runner.py` | Agent queue, ACP sessions, ticket execution and review, orchestrator sessions, retries, and scheduled-task dispatch. |
 | `coms/acp.py` | ACP process connection and protocol handling for configured agent backends. |
@@ -34,9 +34,11 @@ database rather than changing that developer data.
 
 The HTTP server serves static files from `web/`. The dashboard sends JSON
 requests to `coms/server.py`. Route handlers pass requests to operations in
-`coms/api.py` and related domain modules. The CLI in `coms/cli.py` calls those
-application operations directly. Keep validation and business rules in the shared backend
-path so that the dashboard, API, and CLI agree on behavior.
+`coms/api.py` and related domain modules, except a few settings/list views
+(runner settings, team job list, agent templates) that query or validate
+inline in `coms/server.py`. The CLI in `coms/cli.py` calls those
+application operations directly. Keep validation and business rules for writes
+in the shared backend path so that the dashboard, API, and CLI agree on behavior.
 
 When changing a feature, trace all of its entry points. A new operation may
 need a domain implementation, an HTTP route, a CLI command, a dashboard control,

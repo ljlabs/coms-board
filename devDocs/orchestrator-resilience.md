@@ -58,8 +58,9 @@ lead can guide existing workers with `team_send` or `team_note`, and answer
 existing questions with `team_reply`, scoped to the
 assigned job. The `--monitor` MCP surface permits reads and those scoped
 coordination actions, but blocks authorship, redelegation, and result delivery.
-The lead returns to waiting after monitoring, and normal resume/synthesis
-continues when child work is ready.
+The lead returns to waiting after monitoring while child work is still
+unfinished, and normal resume/synthesis continues when it is ready; when all
+child work is ready, the monitor finishes completed so synthesis can run.
 
 The heartbeat also recovers a stale persisted failed lead whose child work is
 unfinished, including one that exhausted normal ticket retries before a server
