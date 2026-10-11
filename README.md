@@ -104,8 +104,16 @@ in on a trusted home network:
 Warnings: the dashboard has **no login**. Anyone on the LAN can read and
 change the board and run agents, so use a trusted network only and revert to
 `SWARM_BIND=127.0.0.1` (then `docker compose up -d` again) when done.
-Windows Firewall may ask to allow the connection the first time. See
-[LAN access](devDocs/lan-access.md) for the trust contract.
+Windows does not prompt for this connection, so allow it once from an
+elevated PowerShell (right-click PowerShell → Run as Administrator):
+
+```powershell
+New-NetFirewallRule -DisplayName "Swarm Agent board (TCP 18765)" -Direction Inbound -Protocol TCP -LocalPort 18765 -Action Allow -Profile Private
+```
+
+Verify from the laptop itself via `http://192.168.1.50:18765/` (your IP and
+`SWARM_PORT`) before testing the phone. See [LAN access](devDocs/lan-access.md)
+for the trust contract.
 
 ```sh
 git clone https://github.com/ljlabs/swarmagent.git

@@ -22,6 +22,12 @@
 - There is no authentication: anyone reaching a trusted host and port has
   full board control. Treat LAN access as trusted-network-only and revert
   afterwards.
+- Windows host: publishing the port is not enough by itself. Windows
+  Defender Firewall shows no prompt for this traffic, so add a manual
+  inbound TCP allow for the port (see README for the exact command), then
+  verify from the host via `http://<lan-ip>:<port>/` before testing the
+  phone. A timeout on the LAN address while `127.0.0.1` answers points at
+  the firewall, not the container.
 
 ## Implementation path
 
