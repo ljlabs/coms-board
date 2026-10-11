@@ -844,6 +844,7 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .skill-list-badges { display:flex; flex-direction:column; gap:.3rem; grid-column:2; grid-row:1 / span 2; align-self:start; align-items:flex-end; justify-content:flex-start; }
 .skill-list-entry[hidden] { display:none; }
 .skill-builtin { background:var(--cyan); }
+.skill-readonly { background:var(--pink); }
 .skill-list-triggers { grid-column:1 / -1; color:var(--muted); font:.62rem/1.5 var(--mono); overflow-wrap:anywhere; }
 .skill-trigger-form { padding:.8rem 1rem; border-bottom:2px solid var(--ink); background:#f7f5ee; }
 .skill-trigger-form>label { display:flex; justify-content:space-between; gap:.5rem; font-weight:700; margin-bottom:.4rem; }

@@ -50,3 +50,4 @@ Thumbs.db
 *.swp
 skills/.locks/
 skills/*/.trigger-words.json
+debug.log
