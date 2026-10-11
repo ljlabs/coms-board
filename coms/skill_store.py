@@ -20,6 +20,10 @@ MAX_FILE_BYTES = 1024 * 1024
 MAX_SKILL_BYTES = 8 * 1024 * 1024
 MAX_SKILL_FILES = 100
 MAX_SKILL_DIRECTORIES = 100
+MAX_TRIGGER_WORDS = 32
+MAX_TRIGGER_LENGTH = 80
+BUILTIN_SKILL_SLUGS = frozenset({'swarmboard', 'ticket-management', 'knowledge-management',
+                               'scheduled-agent-tasks', 'team-orchestration', 'source-backed-research'})
 WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL'} | {f'{prefix}{n}' for prefix in ('COM', 'LPT') for n in range(1, 10)}
 
 
@@ -143,6 +147,69 @@ def _metadata(content: str, slug: str) -> tuple[str, str]:
     return title, description
 
 
+def validate_trigger_words(value) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_TRIGGER_WORDS:
+        raise ValueError(f"trigger_words must be a list of at most {MAX_TRIGGER_WORDS} words or phrases")
+    result, seen = [], set()
+    for word in value:
+        if not isinstance(word, str) or any(ord(char) < 32 for char in word):
+            raise ValueError("trigger words must be single-line text")
+        word = ' '.join(word.split())
+        if not word or len(word) > MAX_TRIGGER_LENGTH:
+            raise ValueError(f"each trigger word or phrase must contain 1 to {MAX_TRIGGER_LENGTH} characters")
+        if word.casefold() not in seen:
+            result.append(word)
+            seen.add(word.casefold())
+    return result
+
+
+def _trigger_metadata(content: str) -> dict:
+    fields = _frontmatter(content)
+    value = fields.get('trigger_words', '[]')
+    if value == '':
+        frontmatter = re.match(r'\A---\s*\r?\n(.*?)\r?\n---(?:\r?\n|\Z)', content, re.S)
+        block = re.search(r'(?m)^trigger_words:[ \t]*\r?\n((?:[ \t]+-[^\r\n]*(?:\r?\n|$))+)', frontmatter.group(1))
+        value = [line.strip()[1:].strip().strip('\"\'') for line in block.group(1).splitlines()] if block else []
+    elif isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("trigger_words must use a JSON array or an indented list") from exc
+    return {'trigger_words': validate_trigger_words(value), 'builtin': fields.get('builtin', '').lower() == 'true'}
+
+
+def _with_trigger_words(content: str, words: list[str]) -> str:
+    field = 'trigger_words: ' + json.dumps(words, ensure_ascii=False)
+    match = re.match(r'\A---[^\S\r\n]*\r?\n(.*?)\r?\n---(?=\r?\n|\Z)', content, re.S)
+    if not match:
+        return '---\n' + field + '\n---\n\n' + content
+    metadata = re.sub(r'(?m)^trigger_words:[^\r\n]*(?:\r?\n[ \t]+-[^\r\n]*)*', '', match.group(1))
+    metadata = metadata.rstrip() + '\n' + field
+    return '---\n' + metadata + '\n---' + content[match.end():]
+
+
+def _skill_settings(folder: Path, content: str, raw: bytes) -> dict:
+    metadata = _trigger_metadata(content)
+    metadata['builtin'] = metadata['builtin'] or folder.name in BUILTIN_SKILL_SLUGS
+    metadata['read_only'] = metadata['builtin']
+    metadata['version'] = _version(raw)
+    settings = folder / '.trigger-words.json'
+    if settings.is_symlink():
+        raise ValueError('skill trigger settings cannot be symbolic links')
+    if settings.exists():
+        override = settings.read_bytes()
+        if len(override) > MAX_FILE_BYTES:
+            raise ValueError('skill trigger settings are too large')
+        metadata['trigger_words'] = validate_trigger_words(json.loads(override.decode('utf-8')))
+        metadata['version'] = _version(raw + b'\0trigger-words\0' + override)
+    return metadata
+
+
+def _require_writable(slug: str) -> None:
+    if slug in BUILTIN_SKILL_SLUGS or get_skill(slug)['read_only']:
+        raise ValueError('Built-in skill files are read-only; only enabled state and trigger settings can be changed.')
+
+
 def _version(content: bytes) -> int:
     return int(hashlib.sha256(content).hexdigest()[:12], 16)
 
@@ -231,8 +298,9 @@ def list_skills() -> list[dict]:
             skills.append({"slug": folder.name, "title": title, "description": description,
                            "version": _version(raw), "updated_at": _stamp(manifest),
                            "size": sum(item["size"] for item in files), "file_count": len(files),
-                           "enabled": not (folder / ".disabled").exists(), "files": files})
-        except (OSError, UnicodeDecodeError):
+                           "enabled": not (folder / ".disabled").exists(), "files": files,
+                           **_skill_settings(folder, content, raw)})
+        except (OSError, UnicodeDecodeError, ValueError):
             continue
     return skills
 
@@ -254,7 +322,7 @@ def get_skill(slug: str) -> dict:
             "size": sum(item["size"] for item in files),
             "file_count": len(files), "enabled": not (folder / ".disabled").exists(),
             "files": files, "directories": directories,
-            "tree_version": _tree_version(folder, files, directories)}
+            "tree_version": _tree_version(folder, files, directories), **_skill_settings(folder, content, raw)}
 
 
 def get_file(slug: str, relative: str) -> dict:
@@ -300,16 +368,21 @@ def _atomic_write(path: Path, raw: bytes) -> None:
             pass
 
 
-def save_skill(slug: str, title: str, description: str, body: str, version=None) -> tuple[dict, bool]:
+def save_skill(slug: str, title: str, description: str, body: str, version=None, trigger_words=None) -> tuple[dict, bool]:
     if not isinstance(title, str) or not title.strip():
         raise ValueError("skill title is required")
     if not isinstance(description, str) or not isinstance(body, str) or not body.strip():
         raise ValueError("skill description and instructions are required")
+    content = _compose(slug, title, description, body)
+    if trigger_words is not None:
+        content = _with_trigger_words(content, validate_trigger_words(trigger_words))
+    _trigger_metadata(content)
     with _skill_lock(slug):
         folder = _slug_dir(slug)
         manifest = folder / "SKILL.md"
         exists = manifest.is_file() and not manifest.is_symlink()
         if exists:
+            _require_writable(slug)
             current = get_skill(slug)
             if type(version) is not int or version != current["version"]:
                 raise ValueError("Skill changed; read the current file before updating it.")
@@ -318,8 +391,10 @@ def save_skill(slug: str, title: str, description: str, body: str, version=None)
         elif version not in (None, 0):
             raise ValueError("new skills start without a version")
         else:
+            if slug in BUILTIN_SKILL_SLUGS:
+                raise ValueError('Built-in skill files are read-only.')
             folder.mkdir()
-        raw = _compose(slug, title, description, body).encode("utf-8")
+        raw = content.encode("utf-8")
         _atomic_write(manifest, raw)
         return get_skill(slug), not exists
 
@@ -327,7 +402,10 @@ def save_skill(slug: str, title: str, description: str, body: str, version=None)
 def write_file(slug: str, relative: str, content: str, expected_version=None) -> dict:
     if not isinstance(content, str):
         raise ValueError("skill file content must be text")
+    if relative == 'SKILL.md':
+        _trigger_metadata(content)
     with _skill_lock(slug):
+        _require_writable(slug)
         path = _file_path(slug, relative)
         if path.exists():
             if not path.is_file():
@@ -340,6 +418,19 @@ def write_file(slug: str, relative: str, content: str, expected_version=None) ->
         return get_file(slug, relative)
 
 
+def set_trigger_words(slug: str, words, version) -> dict:
+    words = validate_trigger_words(words)
+    with _skill_lock(slug):
+        skill = get_skill(slug)
+        if type(version) is not int or version != skill['version']:
+            raise ValueError("Skill changed; read the current file before updating it.")
+        if skill['read_only']:
+            _atomic_write(_slug_dir(slug) / '.trigger-words.json', json.dumps(words, ensure_ascii=False).encode('utf-8'))
+        else:
+            _atomic_write(_file_path(slug, 'SKILL.md'), _with_trigger_words(skill['body'], words).encode('utf-8'))
+        return get_skill(slug)
+
+
 def create_entry(slug: str, relative: str, kind: str, tree_version, content: str = '') -> dict:
     if kind not in ('file', 'folder'):
         raise ValueError("entry kind must be file or folder")
@@ -348,6 +439,7 @@ def create_entry(slug: str, relative: str, kind: str, tree_version, content: str
     if kind == 'folder' and content:
         raise ValueError("folders cannot contain text")
     with _skill_lock(slug):
+        _require_writable(slug)
         skill = _check_tree_version(slug, tree_version)
         path = _file_path(slug, relative)
         _ensure_available(path)
@@ -367,6 +459,7 @@ def create_entry(slug: str, relative: str, kind: str, tree_version, content: str
 
 def move_entry(slug: str, source: str, destination: str, tree_version) -> dict:
     with _skill_lock(slug):
+        _require_writable(slug)
         _check_tree_version(slug, tree_version)
         origin = _file_path(slug, source)
         target = _file_path(slug, destination)
@@ -412,6 +505,7 @@ def set_enabled(slug: str, enabled: bool) -> dict:
 
 def delete_skill(slug: str) -> None:
     with _skill_lock(slug):
+        _require_writable(slug)
         folder = _slug_dir(slug)
         if not (folder / "SKILL.md").is_file():
             raise FileNotFoundError(f"skill {slug!r} not found")
@@ -456,10 +550,13 @@ def import_skill(slug: str, files: list[dict]) -> dict:
     try:
         if not manifest.decode("utf-8").strip():
             raise ValueError("the imported SKILL.md cannot be empty")
+        _trigger_metadata(manifest.decode('utf-8'))
     except UnicodeDecodeError as exc:
         raise ValueError("the imported SKILL.md must be UTF-8 text") from exc
     root = _root()
     with _skill_lock(slug):
+        if slug in BUILTIN_SKILL_SLUGS:
+            raise ValueError('Built-in skill files are read-only.')
         if folder.exists():
             raise ValueError("a skill with this slug already exists")
         staging = root / ("." + slug + ".import-" + uuid.uuid4().hex)

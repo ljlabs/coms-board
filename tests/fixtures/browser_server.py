@@ -3,6 +3,7 @@ import sys
 import shlex
 import threading
 import json
+import shutil
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from http.server import ThreadingHTTPServer
@@ -12,6 +13,8 @@ from coms.runner import RUNNER
 from coms.orchestrator_transcript import Transcript, begin_turn
 
 skill_store.SKILLS_ROOT = Path(db.db_path()).parent / 'skills'
+shutil.copytree(Path(__file__).resolve().parents[2] / 'skills', skill_store.SKILLS_ROOT,
+                ignore=shutil.ignore_patterns('.*'))
 conn = db.connect()
 t = api.create_ticket(conn, 'Browser regression ticket', '\n\n'.join('Paragraph ' + str(i) for i in range(45)), 'admin')
 api.ask_question(conn, 'Browser question', 'Question body', 'other')

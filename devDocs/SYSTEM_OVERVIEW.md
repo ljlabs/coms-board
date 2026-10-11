@@ -64,7 +64,10 @@ the actual behavior.
 The repository-root `skills/` directory is the source of shared skill content.
 The Skills page and `skill_list`/`skill_get` MCP tools read from that directory;
 the runner gives the orchestrator and ticket agents an index of enabled
-folders. Full instructions load through `skill_get` when needed. SQLite keeps
+folders, including the shipped board workflows. Full instructions load through
+`skill_get` when needed or automatically when `trigger_words` in a skill's
+frontmatter match the current message or assignment. Matching excludes disabled
+skills and never scans generated context or replayed history. SQLite keeps
 per-agent read counts, edit audit events, and a one-time import marker for
 records from the former database-backed skill store.
 

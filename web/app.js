@@ -963,7 +963,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   async function skillManager(selectedSlug, createOpen=false){
     setTab('skills');
     const skills=await GET('/api/skills');
-    const slug=selectedSlug||skills[0]?.slug||'';
+    const slug=selectedSlug||skills.find(s=>s.slug==='swarmboard')?.slug||skills[0]?.slug||'';
     let skill=slug?await GET('/api/skills/'+encodeURIComponent(slug)):null;
     let currentFile='SKILL.md',fileData=skill?{path:currentFile,content:skill.body,version:skill.version,size:skill.body.length,binary:false}:null,editing=false,importFiles=[];
     let draft=fileData?.content||'',selectedEntry={path:'SKILL.md',kind:'file'},treeBusy=false,dialogAction=null,draggedPath=null;
@@ -972,10 +972,14 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     const parentPath=path=>path.includes('/')?path.slice(0,path.lastIndexOf('/')):'';
     const fileName=path=>path.split('/').at(-1);
     const joinPath=(parent,name)=>parent?parent+'/'+name:name;
-    const dirty=()=>editing&&fileData&&!fileData.binary&&draft!==fileData.content;
-    const canDiscard=()=>!dirty()||confirm('Discard the unsaved changes in '+currentFile+'?');
+    const fileDirty=()=>editing&&fileData&&!fileData.binary&&draft!==fileData.content;
+    const triggerDirty=()=>!!skill&&!!$('#skill-trigger-words')&&JSON.stringify(parseSkillTriggers($('#skill-trigger-words').value))!==JSON.stringify(skill.trigger_words||[]);
+    const dirty=()=>fileDirty()||triggerDirty();
+    const canDiscard=()=>!dirty()||confirm('Discard unsaved skill changes?');
     const tokens=skills.filter(s=>s.enabled).reduce((sum,s)=>sum+(s.context_tokens||1),0)+48;
-    const list=skills.map(s=>`<button class="skill-list-entry${s.slug===slug?' selected':''}" type="button" data-skill-slug="${esc(s.slug)}" data-search="${esc((s.title+' '+s.slug+' '+s.description).toLowerCase())}"><span class="skill-list-entry-title">${esc(s.title)}</span><span class="skill-list-entry-slug">${esc(s.slug)}</span><span class="badge skill-on-demand">on-demand</span>${s.enabled?'':'<span class="badge skill-disabled">disabled</span>'}</button>`).join('')||'<div class="empty">No skill folders found. Create a skill or add one from a folder.</div>';
+    const skillBadges=s=>`${s.builtin?'<span class="badge skill-builtin">built-in</span>':''}<span class="badge skill-on-demand">${s.trigger_words?.length?'auto-load':'on-demand'}</span>${s.enabled?'':'<span class="badge skill-disabled">disabled</span>'}`;
+    const skillSearch=s=>(s.title+' '+s.slug+' '+s.description+' '+(s.trigger_words||[]).join(' ')).toLowerCase();
+    const list=skills.map(s=>`<button class="skill-list-entry${s.slug===slug?' selected':''}" type="button" data-skill-slug="${esc(s.slug)}" data-search="${esc(skillSearch(s))}"><span class="skill-list-entry-title">${esc(s.title)}</span><span class="skill-list-entry-slug">${esc(s.slug)}</span><span class="skill-list-badges">${skillBadges(s)}</span><span class="skill-list-triggers">${esc((s.trigger_words||[]).join(', '))}</span></button>`).join('')||'<div class="empty">No skill folders found. Create a skill or add one from a folder.</div>';
     function fileTreeHTML(){
       const root={dirs:new Map(),files:[]};
       const directory=parts=>{let node=root;for(const part of parts){if(!node.dirs.has(part))node.dirs.set(part,{dirs:new Map(),files:[]});node=node.dirs.get(part);}return node;};
@@ -985,26 +989,28 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         const path=prefix+name;
         return `<details class="skill-tree-folder" data-skill-directory="${esc(path)}"${openFolders.has(path)||currentFile.startsWith(path+'/')?' open':''}><summary draggable="true" data-skill-entry="${esc(path)}" data-skill-kind="folder" data-skill-folder="${esc(path)}" data-skill-drop="${esc(path)}" class="${path===selectedEntry.path?'selected':''}"><span class="skill-folder-caret">▸</span><span class="skill-folder-name">${esc(name)}</span></summary><div class="skill-tree-children">${draw(node.dirs.get(name),path+'/')}</div></details>`;
       }).join('');
-      return draw(root);
+      return skill?.read_only?draw(root).replaceAll('draggable="true"','draggable="false"'):draw(root);
     }
     const loaded=skill?.loaded_by?.length?skill.loaded_by.map(chip).join(' '):'<span class="muted small">No agents have read this skill yet</span>';
     const preview=fileData?(fileData.binary?'<div class="skill-binary-note">This file is stored with the skill. Text preview is unavailable.</div>':fileData.path.toLowerCase().endsWith('.md')?`<div class="md skill-markdown">${MD.render(fileData.content)}</div>`:`<pre class="skill-code-preview">${esc(fileData.content)}</pre>`):'<div class="empty">Select a file to read it.</div>';
     const filePane=editing&&fileData&&!fileData.binary?`<textarea id="skill-editor" class="skill-editor" spellcheck="false">${esc(fileData.content)}</textarea><div class="skill-editor-actions"><span class="small muted">Editing ${esc(fileData.path)}</span><button class="btn sm" id="skill-cancel-edit" type="button">Cancel</button><button class="btn sm ok" id="skill-save-edit" type="button">Save file</button></div>`:preview;
     paint(`<div class="skills-page">
       <div class="pagehead skills-pagehead"><div><h1>Skills <span class="skill-count">${skills.length}</span></h1><div class="sub">Skill folders in <code>/skills</code> · enabled skills are available to the orchestrator and every worker agent.</div></div><div class="actions"><button class="btn" id="skill-context-budget">Context budget →</button><button class="btn" id="skill-add">↓ Add Skill</button><button class="btn ok" id="skill-create">Create New Skill</button></div></div>
-      <div class="skills-note">Agents see the skill index at the start of a run and read full instructions on demand. Use the enabled switch to control which folders enter that index.</div>
+      <div class="skills-note">Enabled skills load full instructions automatically when their trigger words or phrases appear in a message or assignment. Agents can also read skills on demand.</div>
       <div class="skills-toolbar"><input id="skills-filter" type="search" placeholder="⌕  Filter skills…" autocomplete="off"><button class="btn sm" id="skills-refresh" title="Refresh folder listing">↻ Refresh</button><span class="skills-folder mono">${skills.length} folders</span></div>
       <div class="skills-manager"><aside class="skills-index" aria-label="Skill folders">${list}</aside>
       ${skill?`<section class="skills-detail" aria-label="Selected skill">
-        <header class="skills-detail-head"><div class="skills-detail-title"><h2>${esc(skill.title)}</h2><span class="mono small">${esc(skill.slug)}</span></div><div class="actions"><button class="btn sm" id="skill-edit" type="button"${fileData?.binary?' disabled':''}>Edit</button><button class="btn sm danger" id="skill-delete" type="button">Delete</button></div></header>
+        <header class="skills-detail-head"><div class="skills-detail-title"><h2>${esc(skill.title)}</h2><span class="mono small">${esc(skill.slug)}</span></div><div class="actions"><button class="btn sm" id="skill-edit" type="button"${fileData?.binary||skill.read_only?' disabled':''}>Edit</button><button class="btn sm danger" id="skill-delete" type="button"${skill.read_only?' disabled':''}>Delete</button></div></header>
+        ${skill.read_only?'<div class="skills-readonly">Built-in skill files are read-only. You can configure trigger words and enabled state below.</div>':''}
         <div class="skills-detail-summary"><div class="skills-description"><b>Description</b><p>${esc(skill.description||'No description in SKILL.md frontmatter.')}</p><div class="skills-loaded"><b>Loaded by agents</b><div>${loaded}</div></div></div><label class="skill-enable-control"><span class="skill-switch-wrap"><input id="skill-enabled" type="checkbox" class="skill-switch"${skill.enabled?' checked':''}><span class="skill-switch-track"></span></span><span>${skill.enabled?'Enabled':'Disabled'}</span></label></div>
         <div class="skills-meta mono"><span>${formatBytes(skill.size)} total</span><span>${skill.file_count} file${skill.file_count===1?'':'s'}</span><span>${skill.last_used_at?'last read '+ago(skill.last_used_at):'not read yet'}</span><span>updated ${ago(skill.updated_at)} by ${esc(skill.updated_by)}</span></div>
+        <form class="skill-trigger-form" id="skill-trigger-form"><label for="skill-trigger-words">Trigger words <span class="small muted">${skill.builtin?'Built-in workflow':''}</span></label><div class="skill-trigger-controls"><input id="skill-trigger-words" value="${esc((skill.trigger_words||[]).join(', '))}" placeholder="research, peer review"><button class="btn sm" id="skill-save-triggers" type="submit">Save triggers</button></div><p class="small muted">Separate words or phrases with commas. Matching ignores case and uses whole words. Clear the field for on-demand use.</p><div id="skill-trigger-status" class="small" role="status" aria-live="polite"></div></form>
         <div class="skills-file-layout"><nav class="skills-file-tree" aria-label="Skill files"><div class="skills-file-tree-head">FILES <span id="skill-file-count">${skill.files.length}</span></div><div class="skill-tree-tools"><button class="btn sm" id="skill-new-file" type="button">+ File</button><button class="btn sm" id="skill-new-folder" type="button">+ Folder</button><button class="btn sm" id="skill-entry-rename" type="button" disabled>Rename</button><button class="btn sm" id="skill-entry-move" type="button" disabled>Move</button></div><div class="skill-tree-selection mono" id="skill-entry-selection">SKILL.md</div><button class="skill-root-drop" id="skill-root-drop" data-skill-drop="" type="button" title="Drop files or folders here to move them to the skill root">⌂ Skill root <small>drop here</small></button><div id="skill-tree-entries">${fileTreeHTML()}</div><p class="skill-tree-help">Drag files or folders onto a folder or Skill root. Select a folder to add items inside it.</p><div class="skill-tree-status" id="skill-tree-status" role="status" aria-live="polite"></div></nav><div class="skills-file-view"><div class="skills-file-view-head"><span class="mono">${esc(fileData?.path||'')}</span><span class="small muted">${fileData?formatBytes(fileData.size):''}</span></div><div class="skills-file-content" id="skill-file-content">${filePane}</div></div></div>
       </section>`:'<section class="skills-detail skills-empty-detail"><div class="empty">Create or add a skill folder to get started.</div></section>'}</div>
-      <dialog class="board-dialog card skills-dialog" id="skill-create-dialog"><form id="skill-create-form" class="form"><div class="card-title"><h2>Create skill</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-create-dialog">Close</button></div><label>Folder name<input id="skill-create-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" placeholder="example-skill"></label><label>Title<input id="skill-create-title" required placeholder="Example skill"></label><label>Description<input id="skill-create-description" required maxlength="280" placeholder="When should agents use this skill?"></label><label>Instructions<textarea id="skill-create-body" required rows="10" placeholder="Write the steps agents should follow…"></textarea></label><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-create-dialog">Cancel</button><button class="btn ok">Create skill</button></div></form></dialog>
+      <dialog class="board-dialog card skills-dialog" id="skill-create-dialog"><form id="skill-create-form" class="form"><div class="card-title"><h2>Create skill</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-create-dialog">Close</button></div><label>Folder name<input id="skill-create-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" placeholder="example-skill"></label><label>Title<input id="skill-create-title" required placeholder="Example skill"></label><label>Description<input id="skill-create-description" required maxlength="280" placeholder="When should agents use this skill?"></label><label>Trigger words<input id="skill-create-triggers" placeholder="research, peer review"><span class="small muted">Comma-separated words or phrases; optional.</span></label><label>Instructions<textarea id="skill-create-body" required rows="10" placeholder="Write the steps agents should follow…"></textarea></label><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-create-dialog">Cancel</button><button class="btn ok">Create skill</button></div></form></dialog>
       <dialog class="board-dialog card skills-dialog" id="skill-import-dialog"><form id="skill-import-form" class="form"><div class="card-title"><h2>Add skill folder</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-import-dialog">Close</button></div><p class="small muted">Choose a skill directory containing a root SKILL.md. Its files will be copied into <code>/skills</code>.</p><label>Folder name<input id="skill-import-slug" required pattern="[a-z0-9][a-z0-9-]{0,79}" placeholder="example-skill"></label><input id="skill-import-files" type="file" webkitdirectory multiple hidden><button class="btn" id="skill-choose-folder" type="button">Choose folder</button><div class="skill-import-selection" id="skill-import-selection">No folder selected</div><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-import-dialog">Cancel</button><button class="btn ok" id="skill-import-submit" disabled>Add skill</button></div></form></dialog>
       <dialog class="board-dialog card skills-dialog" id="skill-entry-dialog"><form id="skill-entry-form" class="form"><div class="card-title"><h2 id="skill-entry-title">New file</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-entry-dialog">Close</button></div><label id="skill-entry-parent-label">Folder<select id="skill-entry-parent"></select></label><label id="skill-entry-name-label">Name<input id="skill-entry-name" required maxlength="128" autocomplete="off" placeholder="notes.md"></label><p class="small muted" id="skill-entry-hint"></p><p class="error" id="skill-entry-error" role="alert" hidden></p><div class="form-actions"><button class="btn" type="button" data-close-dialog="skill-entry-dialog">Cancel</button><button class="btn ok" id="skill-entry-submit" type="submit">Create file</button></div></form></dialog>
-      <dialog class="board-dialog card skills-dialog" id="skill-budget-dialog"><div class="form"><div class="card-title"><h2>Context budget</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-budget-dialog">Close</button></div><div class="skill-budget-number">~${tokens.toLocaleString()} <small>tokens</small></div><p>The enabled skill names and descriptions use an estimated ${tokens.toLocaleString()} tokens in each new agent run. Full <code>SKILL.md</code> instructions load on demand through <code>skill_get</code>; agents can read every enabled folder in this list.</p><div class="skill-budget-list">${skills.filter(s=>s.enabled).map(s=>`<div><span>${esc(s.slug)}</span><b>~${(s.context_tokens||1).toLocaleString()} tokens</b></div>`).join('')||'<span class="muted">No enabled skills</span>'}</div></div></dialog>
+      <dialog class="board-dialog card skills-dialog" id="skill-budget-dialog"><div class="form"><div class="card-title"><h2>Context budget</h2><button class="btn sm ghost" type="button" data-close-dialog="skill-budget-dialog">Close</button></div><div class="skill-budget-number">~${tokens.toLocaleString()} <small>tokens</small></div><p>The enabled skill index uses an estimated ${tokens.toLocaleString()} tokens. Matching trigger words add full <code>SKILL.md</code> instructions to that turn; their size is additional. Agents can also load instructions through <code>skill_get</code>.</p><div class="skill-budget-list">${skills.filter(s=>s.enabled).map(s=>`<div><span>${esc(s.slug)}</span><b>~${(s.context_tokens||1).toLocaleString()} tokens</b></div>`).join('')||'<span class="muted">No enabled skills</span>'}</div></div></dialog>
     </div>`);
     $('#skills-filter').oninput=e=>{const needle=e.target.value.toLowerCase().trim();for(const row of app.querySelectorAll('[data-skill-slug]'))row.hidden=!row.dataset.search.includes(needle);};
     $('#skills-refresh').onclick=()=>{if(canDiscard())render();};
@@ -1015,7 +1021,11 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     for(const button of app.querySelectorAll('[data-skill-slug]'))button.onclick=()=>{if(canDiscard())location.hash='#/skills/'+encodeURIComponent(button.dataset.skillSlug);};
     function treeStatus(message,error=false){const status=$('#skill-tree-status');if(status){status.textContent=message;status.classList.toggle('error',error);}}
     function updateSkill(next){
+      const keepTriggerDraft=triggerDirty();
       skill=next;
+      if(!keepTriggerDraft)$('#skill-trigger-words').value=(skill.trigger_words||[]).join(', ');
+      const row=app.querySelector('[data-skill-slug="'+slug+'"]');
+      if(row){row.dataset.search=skillSearch(skill);row.querySelector('.skill-list-badges').innerHTML=skillBadges(skill);row.querySelector('.skill-list-triggers').textContent=(skill.trigger_words||[]).join(', ');}
       $('#skill-file-count').textContent=String(skill.file_count);
       $('.skills-detail-title h2').textContent=skill.title;
       $('.skills-description p').textContent=skill.description||'No description in SKILL.md frontmatter.';
@@ -1026,8 +1036,10 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       $('#skill-root-drop').classList.toggle('selected',selectedEntry.kind==='folder'&&!selectedEntry.path);
       $('#skill-entry-selection').textContent=selectedEntry.path||'Skill root';
       const protectedEntry=!selectedEntry.path||selectedEntry.path==='SKILL.md';
-      $('#skill-entry-rename').disabled=protectedEntry||treeBusy;
-      $('#skill-entry-move').disabled=protectedEntry||treeBusy;
+      $('#skill-entry-rename').disabled=protectedEntry||treeBusy||skill.read_only;
+      $('#skill-entry-move').disabled=protectedEntry||treeBusy||skill.read_only;
+      $('#skill-new-file').disabled=treeBusy||skill.read_only;
+      $('#skill-new-folder').disabled=treeBusy||skill.read_only;
     }
     function renderTree(){
       $('#skill-tree-entries').innerHTML=fileTreeHTML();
@@ -1046,7 +1058,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
           }catch(err){fail(err);}
         };
         item.ondragstart=event=>{
-          if(treeBusy||item.dataset.skillEntry==='SKILL.md'){event.preventDefault();return;}
+          if(treeBusy||skill.read_only||item.dataset.skillEntry==='SKILL.md'){event.preventDefault();return;}
           draggedPath=item.dataset.skillEntry;
           event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/x-swarm-skill-entry',draggedPath);event.dataTransfer.setData('text/plain',draggedPath);
           item.classList.add('dragging');treeStatus('Drop '+fileName(draggedPath)+' onto a folder or Skill root.');
@@ -1074,8 +1086,8 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       const host=$('#skill-file-content');if(!host)return;
       const content=editing&&!fileData.binary?`<textarea id="skill-editor" class="skill-editor" spellcheck="false" aria-label="Edit ${esc(fileData.path)}">${esc(draft)}</textarea><div class="skill-editor-actions"><span class="small muted">Editing ${esc(fileData.path)}</span><button class="btn sm" id="skill-cancel-edit" type="button">Cancel</button><button class="btn sm ok" id="skill-save-edit" type="button">Save file</button></div>`:fileData.binary?'<div class="skill-binary-note">This file is stored with the skill. Text preview is unavailable.</div>':fileData.path.toLowerCase().endsWith('.md')?`<div class="md skill-markdown">${MD.render(fileData.content)}</div>`:`<pre class="skill-code-preview">${esc(fileData.content)}</pre>`;
       host.innerHTML=content;const label=$('.skills-file-view-head .mono');if(label)label.textContent=fileData.path;const size=$('.skills-file-view-head .small');if(size)size.textContent=formatBytes(fileData.size);
-      const edit=$('#skill-edit');if(edit)edit.disabled=fileData.binary;
-      if(edit)edit.onclick=()=>{editing=true;renderSkillFile();};
+      const edit=$('#skill-edit');if(edit)edit.disabled=fileData.binary||skill.read_only;
+      if(edit)edit.onclick=()=>{if(skill.read_only)return;editing=true;renderSkillFile();};
       const editor=$('#skill-editor');if(editor)editor.oninput=()=>{draft=editor.value;};
       const cancel=$('#skill-cancel-edit');if(cancel)cancel.onclick=()=>{if(!canDiscard())return;editing=false;draft=fileData.content;renderSkillFile();};
       const save=$('#skill-save-edit');if(save)save.onclick=async()=>{
@@ -1098,7 +1110,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       }finally{treeBusy=false;markSelection();}
     }
     function showEntryDialog(action,kind=selectedEntry.kind){
-      if(treeBusy)return;
+      if(treeBusy||skill.read_only)return;
       dialogAction={action,kind,source:selectedEntry.path};
       const parent=selectedEntry.kind==='folder'?selectedEntry.path:parentPath(selectedEntry.path);
       const directories=(skill.directories||[]).filter(path=>action!=='move'||(path!==selectedEntry.path&&!path.startsWith(selectedEntry.path+'/')));
@@ -1115,6 +1127,19 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
       (action==='move'?$('#skill-entry-parent'):$('#skill-entry-name')).focus();
     }
     if(skill){
+      $('#skill-trigger-form').onsubmit=async event=>{
+        event.preventDefault();if(treeBusy)return;
+        const status=$('#skill-trigger-status');status.classList.remove('error');
+        if(currentFile==='SKILL.md'&&fileDirty()){status.textContent='Save or cancel your SKILL.md edit before changing triggers.';status.classList.add('error');return;}
+        treeBusy=true;$('#skill-save-triggers').disabled=true;
+        try{
+          const saved=await api('PATCH',skillURL,{trigger_words:parseSkillTriggers($('#skill-trigger-words').value),version:skill.version});
+          $('#skill-trigger-words').value=(saved.trigger_words||[]).join(', ');updateSkill(saved);
+          if(currentFile==='SKILL.md'){fileData={...fileData,content:saved.body,version:saved.version,size:saved.body.length};draft=fileData.content;renderSkillFile();}
+          renderTree();status.textContent='Trigger words saved.';
+        }catch(err){status.textContent=err.message;status.classList.add('error');}
+        finally{treeBusy=false;$('#skill-save-triggers').disabled=false;markSelection();}
+      };
       renderTree();renderSkillFile();
       $('#skill-root-drop').onclick=()=>{selectedEntry={path:'',kind:'folder'};markSelection();};
       $('#skill-new-file').onclick=()=>showEntryDialog('create','file');
@@ -1147,7 +1172,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
     }
     $('#skill-create-title').oninput=e=>{const target=$('#skill-create-slug');if(!target.dataset.touched)target.value=slugifySkill(e.target.value);};
     $('#skill-create-slug').oninput=e=>e.target.dataset.touched='1';
-    $('#skill-create-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/skills',{slug:$('#skill-create-slug').value.trim(),title:$('#skill-create-title').value.trim(),description:$('#skill-create-description').value.trim(),body:$('#skill-create-body').value,version:0});toast('skill folder created');$('#skill-create-dialog').close();location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
+    $('#skill-create-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('POST','/api/skills',{slug:$('#skill-create-slug').value.trim(),title:$('#skill-create-title').value.trim(),description:$('#skill-create-description').value.trim(),trigger_words:parseSkillTriggers($('#skill-create-triggers').value),body:$('#skill-create-body').value,version:0});toast('skill folder created');$('#skill-create-dialog').close();location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
     $('#skill-choose-folder').onclick=()=>$('#skill-import-files').click();
     $('#skill-import-files').onchange=e=>{importFiles=[...e.target.files];const first=importFiles[0]?.webkitRelativePath||'';const folder=first.split('/')[0]||'';$('#skill-import-slug').value=slugifySkill(folder);$('#skill-import-selection').textContent=importFiles.length?`${folder||'Folder'} · ${importFiles.length} files selected`:'No folder selected';$('#skill-import-submit').disabled=!importFiles.length;};
     $('#skill-import-form').onsubmit=async e=>{e.preventDefault();if(!importFiles.length)return;try{const files=[];for(const file of importFiles){const parts=(file.webkitRelativePath||file.name).split('/');const relative=(parts.length>1?parts.slice(1):parts).join('/');const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,Math.min(i+0x8000,bytes.length)));files.push({path:relative,content_base64:btoa(binary)});}const saved=await api('POST','/api/skills',{action:'import',slug:$('#skill-import-slug').value.trim(),files});toast('skill folder added');$('#skill-import-dialog').close();location.hash='#/skills/'+encodeURIComponent(saved.slug);}catch(err){fail(err);}};
@@ -1155,6 +1180,7 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
   }
   const formatBytes=n=>{if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;return `${(n/1024/1024).toFixed(1)} MB`;};
   const slugifySkill=value=>(value||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,80);
+  const parseSkillTriggers=value=>value.split(',').map(word=>word.trim()).filter(Boolean);
   route(/^\/skills\/new$/,()=>skillManager('',true));
   route(/^\/skills\/([^/]+)$/,slug=>skillManager(decodeURIComponent(slug)));
 

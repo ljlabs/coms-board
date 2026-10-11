@@ -56,7 +56,7 @@ TOOLS = [
     tool("skill_get", "Read an enabled skill folder's SKILL.md and file index. Every agent role can read every enabled skill.", {"slug": S}, ["slug"]),
     tool("skill_file_get", "Read a supporting file in an enabled skill. Available to every agent role.",
          {"slug": S, "path": S}, ["slug", "path"]),
-    tool("skill_file_write", "Edit a skill text file. Only the human operator and orchestrator can write. Pass the version from skill_file_get.",
+    tool("skill_file_write", "Edit a custom skill text file. Built-in files are read-only. Only the human operator and orchestrator can write. Pass the version from skill_file_get.",
          {"slug": S, "path": S, "content": S, "version": I}, ["slug", "path", "content", "version"], True),
     tool("skill_entry_create", "Add a file or empty folder inside a skill. Only the human operator and orchestrator can write. Pass tree_version from skill_get; the parent folder must exist.",
          {"slug": S, "path": S, "kind": {"type": "string", "enum": ["file", "folder"]}, "content": S, "tree_version": I},
@@ -64,8 +64,8 @@ TOOLS = [
     tool("skill_entry_move", "Rename or move a file or folder within a skill. Only the human operator and orchestrator can write. Pass tree_version from skill_get. The destination parent must exist; root SKILL.md stays in place and existing entries cannot be overwritten.",
          {"slug": S, "source": S, "destination": S, "tree_version": I},
          ["slug", "source", "destination", "tree_version"], True),
-    tool("skill_put", "Create or update a verified reusable procedure in the root skills/ folder. Only the human operator and orchestrator can publish; workers should share methods with the orchestrator. For updates, pass the current version returned by skill_get.",
-         {"slug": S, "title": S, "body": S, "version": I}, ["slug", "title", "body"], True),
+    tool("skill_put", "Create or update a verified reusable custom procedure in the root skills/ folder. Built-ins are read-only. Optional trigger_words automatically load instructions on matching messages. Only the human operator and orchestrator can publish; workers should share methods with the orchestrator. For updates, pass the current version returned by skill_get.",
+         {"slug": S, "title": S, "body": S, "version": I, "trigger_words": {"type": "array", "items": S, "maxItems": 32}}, ["slug", "title", "body"], True),
     tool("skill_set_enabled", "Enable or disable a root skill. Available to the human operator and orchestrator.",
          {"slug": S, "enabled": B}, ["slug", "enabled"], True),
     tool("skill_delete", "Permanently remove a skill folder from the repository root. Available to the human operator and orchestrator.",
@@ -197,7 +197,7 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
                                         args['tree_version'], args.get('content', ''))
     elif name == "skill_entry_move":
         result = api.move_skill_entry(conn, args['slug'], args['source'], args['destination'], actor, args['tree_version'])
-    elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'))
+    elif name == "skill_put": result = api.save_skill(conn, args['slug'], args['title'], args['body'], actor, args.get('version'), trigger_words=args.get('trigger_words'))
     elif name in ('skill_set_enabled', 'skill_delete'):
         agent = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()
         if actor != api.ADMIN_ACTOR and (not agent or agent['role'] != 'orchestrator'):

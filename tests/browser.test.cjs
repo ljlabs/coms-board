@@ -67,6 +67,7 @@ test('Shared skill editor saves a version all agents can read', async () => {
     await page.locator('#skill-create-description').fill('Use for primary source research.');
     await page.locator('#skill-create-body').fill('Read the primary source and record its date.');
     await page.locator('#skill-create-form button[type="submit"], #skill-create-form .form-actions button.ok').click();
+    await page.waitForFunction(() => document.querySelector('.skills-detail-title .mono')?.textContent === 'browser-sourcing');
     await page.waitForSelector('.skill-markdown');
     assert.ok((await page.locator('.skill-markdown').textContent()).includes('primary source'));
     await page.locator('#skill-edit').click();
@@ -76,6 +77,60 @@ test('Shared skill editor saves a version all agents can read', async () => {
     const saved=await page.evaluate(()=>fetch('/api/skills/browser-sourcing').then(r=>r.json()));
     assert.equal(typeof saved.version,'number');
     assert.equal(saved.body,'Record the direct source URL too.');
+  });
+});
+
+test('Skills lists built-ins and saves searchable trigger words through reload', async () => {
+  await pageFor('/skills/new', async page => {
+    assert.ok(await page.locator('.skill-builtin').count() >= 6);
+    await page.locator('#skill-create-slug').fill('browser-triggers');
+    await page.locator('#skill-create-title').fill('Triggered procedure');
+    await page.locator('#skill-create-description').fill('Check evidence.');
+    await page.locator('#skill-create-triggers').fill('audit, peer review');
+    await page.locator('#skill-create-body').fill('Verify current evidence.');
+    await page.locator('#skill-create-form .form-actions button.ok').click();
+    await page.waitForFunction(() => document.querySelector('.skills-detail-title .mono')?.textContent === 'browser-triggers');
+    await page.waitForSelector('#skill-trigger-words');
+    assert.equal(await page.locator('#skill-trigger-words').inputValue(), 'audit, peer review');
+    await page.locator('#skill-trigger-words').fill('  Inspect, inspect, fact check ');
+    await page.locator('#skill-save-triggers').click();
+    await page.waitForFunction(() => document.querySelector('#skill-trigger-status').textContent === 'Trigger words saved.');
+    await page.reload();
+    await page.waitForSelector('#skill-trigger-words');
+    assert.equal(await page.locator('#skill-trigger-words').inputValue(), 'Inspect, fact check');
+    const saved = await page.evaluate(() => fetch('/api/skills/browser-triggers').then(r => r.json()));
+    assert.deepEqual(saved.trigger_words, ['Inspect', 'fact check']);
+    assert.ok(saved.body.includes('Verify current evidence.'));
+    await page.locator('#skills-filter').fill('fact check');
+    assert.equal(await page.locator('[data-skill-slug]:visible').count(), 1);
+    await page.locator('#skill-enabled').uncheck();
+    await page.reload();
+    await page.waitForSelector('#skill-trigger-words');
+    assert.equal(await page.locator('#skill-enabled').isChecked(), false);
+    assert.equal(await page.locator('#skill-trigger-words').inputValue(), 'Inspect, fact check');
+  });
+});
+
+test('Built-in skill files are read-only while triggers remain configurable', async () => {
+  await pageFor('/skills/swarmboard', async page => {
+    for (const id of ['skill-edit', 'skill-delete', 'skill-new-file', 'skill-new-folder', 'skill-entry-rename', 'skill-entry-move']) {
+      assert.equal(await page.locator('#' + id).isDisabled(), true, id + ' is disabled');
+    }
+    assert.equal(await page.locator('[data-skill-file="SKILL.md"]').getAttribute('draggable'), 'false');
+    assert.ok((await page.locator('.skills-readonly').textContent()).includes('read-only'));
+    const original = await page.evaluate(() => fetch('/api/skills/swarmboard').then(r => r.json()));
+    await page.locator('#skill-trigger-words').fill('board procedure');
+    await page.locator('#skill-save-triggers').click();
+    await page.waitForFunction(() => document.querySelector('#skill-trigger-status').textContent === 'Trigger words saved.');
+    const saved = await page.evaluate(() => fetch('/api/skills/swarmboard').then(r => r.json()));
+    assert.equal(saved.body, original.body);
+    assert.deepEqual(saved.trigger_words, ['board procedure']);
+    const blocked = await page.evaluate(() => fetch('/api/skills/swarmboard', {method:'DELETE'}).then(r => r.status));
+    assert.equal(blocked, 400);
+    await page.reload();
+    await page.waitForSelector('#skill-trigger-words');
+    assert.equal(await page.locator('#skill-trigger-words').inputValue(), 'board procedure');
+    assert.equal(await page.locator('#skill-edit').isDisabled(), true);
   });
 });
 

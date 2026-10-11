@@ -291,8 +291,10 @@ def r_skills(conn, m, mm, q, b, actor):
         if b.get('action') == 'import':
             return api.import_skill(conn, b.get('slug', ''), b.get('files', []), actor)
         return api.save_skill(conn, slug or b.get('slug', ''), b.get('title', ''), b.get('body', ''), actor,
-                              b.get('version'), b.get('description', ''))
+                              b.get('version'), b.get('description', ''), b.get('trigger_words'))
     if m == 'PATCH' and slug:
+        if 'trigger_words' in b:
+            return api.set_skill_trigger_words(conn, slug, b['trigger_words'], actor, b.get('version'))
         if b.get('action') == 'create':
             return api.create_skill_entry(conn, slug, b.get('path', ''), b.get('kind', ''), actor,
                                           b.get('tree_version'), b.get('content', ''))

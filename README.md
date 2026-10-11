@@ -191,6 +191,16 @@ to verify and synthesize worker results. Final review cannot close a parent
 with unfinished child work.
 
 **Skills** reads skill folders from the repository-root `skills/` directory.
+The manager includes built-in SwarmBoard, ticket, wiki/Q&A, scheduling, team
+orchestration and source-backed research workflows. Built-in instruction files
+are read-only and cannot be edited or deleted through the page or agent tools;
+their enabled state and triggers remain configurable. Each skill can have
+comma-separated **Trigger words** such as `research, peer review`. When a word
+or phrase matches a message or assignment, the enabled skill's full instructions
+are automatically added to that conversation turn. Matching ignores case,
+uses whole words and loads each matching skill once. Edit triggers with **Save
+triggers**, or clear them for on-demand use. Disabling a skill stops future
+automatic loads; existing conversations can retain previously loaded context.
 Each skill lives at `skills/<slug>/SKILL.md`; nested reference files are shown
 in the file browser. Search, import a skill folder, create or edit a skill,
 toggle whether it appears in the agent index, and delete folders from the

@@ -602,6 +602,7 @@ class Runner:
                 prompt += f"Answer with team_reply(message_id={message_id}, body=your useful response). An assistant response alone does not deliver the reply. Give specific reasoning and identify uncertainties.\n"
             prompt += f'\nYour workspace is {cwd}. Native tools are available for inspecting the assignment and evidence. Local evidence is recorded with source_read_file; public HTTPS evidence uses source_fetch. Read source_get for the cited snapshot. Do not repeatedly poll unchanged team_read output.\n'
             prompt += api.shared_skill_context(conn) + '\n' + team.context(conn, tid, recipient, instructions=False)
+            prompt += '\n' + api.triggered_skill_context(conn, message['body'], recipient)
             prompt += '\nREQUIRED ACTION: deliver the requested team_review decision or team_reply using its tool, then finish this response turn. Do not publish ticket_result or create new work.\n'
             self._message(tid, rid, 'system', 'acp-prompt', prompt)
             recorder.set('collaborating', 'Answering ' + message['sender'] + (' — peer review' if review else ' — teammate question'))
@@ -689,6 +690,7 @@ class Runner:
             prompt=BASE_AGENT_SYSTEM_PROMPT+'\n\n'
             prompt += f"REGISTERED AGENT\nName: {agent['name']}\nIdentity: {agent['slug']}\nRole: {agent['role']}\nCapabilities: {agent['description']}\nInstructions: {agent.get('instructions', '')}\n\n"
             prompt += api.shared_skill_context(conn) + '\n\n'
+            prompt += api.triggered_skill_context(conn, t['title'] + '\n' + t['body'], agent['slug'])
             prompt += team.context(conn, tid, agent['slug']) + '\n\n'
             if t['type'] == 'job':
                 prompt += ("ORCHESTRATION JOB\nYou are the lead orchestrator for this job. Prefer reusing teammates from agents_list; agent_ensure creates a named specialist only when needed. Create child tickets with explicit assignees and parent_id matching this job. Workers deliver findings on their own tickets; only the lead owns the combined wiki page. After delegation, finish your dispatch turn without ticket_result; the runner waits for worker results and resumes you automatically for synthesis. Reserve ticket_result for the final synthesis after your teammates deliver.\n"
@@ -821,6 +823,7 @@ class Runner:
         return {'accepted':True}
     def _prompt(self,c,tid,text):
         ticket = api.get_ticket(db.connect(), tid)
+        skill_context = api.triggered_skill_context(db.connect(), text, ticket['assignee'] or 'agent-runner')
         run = db.connect().execute("SELECT * FROM agent_runs WHERE ticket_id=? AND stage='execute' ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
         backend = run['backend'] if run else self.settings().get('active_backend', 'opencode')
         recorder = progress.Recorder('ticket-chat:' + uuid.uuid4().hex, ticket['assignee'] or 'agent-runner', tid, None, backend)
@@ -838,7 +841,7 @@ class Runner:
                             + json.dumps({'ticket': ticket, 'recent_conversation': list(reversed(history))}, ensure_ascii=False)
                             + '\nUser follow-up: ' + text)
             c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
-            c.prompt(text,timeout=3600)
+            c.prompt(skill_context + text,timeout=3600)
             recorder.finish('completed', 'Ticket conversation finished')
         except Exception as e:
             self._message(tid,None,'system','error',str(e))
@@ -886,6 +889,7 @@ class Runner:
             team.validate_delivery(conn, tid, current['assignee'])
             prompt=("You are the Swarm Agent orchestrator performing the final review of a completed ticket. Review the acceptance criteria, delivered result, ticket discussion, and execution transcript. Inspect the linked wiki with wiki_get and source records with source_get. Do not change files, tickets, or comments. Choose human_review for a specific unresolved requirement or a decision explicitly reserved for a human. Educational research does not require human judgment merely because the topic involves financial risk. Reported evidence limitations are acceptable when no claim falsely asserts verification. Otherwise choose close. Respond with exactly one valid JSON object and no other text. Use decision value close or human_review, for example: {\"decision\":\"close\",\"reason\":\"Acceptance criteria are met.\"}.\n\n"
                     f"Ticket #{tid}: {current['title']}\nPriority: {current['priority']}\nDescription / acceptance criteria:\n{current['body']}\n\nDelivered result:\n{current['result']}\n\nTicket discussion:\n{discussion}\n\nExecution transcript:\n{transcript}\n\n{team.context(conn, tid, agent['slug'], instructions=False)}")
+            prompt += '\n' + api.triggered_skill_context(conn, current['title'] + '\n' + current['body'], agent['slug'])
             recorder.set('reviewing', 'Checking the deliverable and acceptance criteria (3 minute limit)')
             c.prompt(prompt,timeout=180,total_timeout=180)
             recorder.flush(True)
@@ -1234,6 +1238,7 @@ class Runner:
             context=history_before(sid,transcript.user_id) if not restored else ''
             first_turn=not restored
             prefix=guide+'\n\nWorkspace: '+cwd+'\n\n'
+            prefix += api.triggered_skill_context(db.connect(), text, agent['slug'])
             if context and first_turn: prefix+='Previous conversation (restored from Swarm Agent history):\n'+context+'\n\n'
             if stop_event.is_set(): raise AcpError('Orchestrator response cancelled')
             result=c.prompt(prefix+'User: '+text,timeout=3600)

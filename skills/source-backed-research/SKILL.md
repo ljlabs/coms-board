@@ -1,6 +1,8 @@
 ---
 name: source-backed-research
 description: Retrieve primary sources, record evidence, and separate verified facts from inference in collaborative research.
+builtin: true
+trigger_words: ["research", "evidence", "sources", "citation", "citations"]
 ---
 
 # Source backed research

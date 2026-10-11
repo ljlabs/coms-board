@@ -9,6 +9,39 @@ the source of truth; SQLite stores agent-read counters and audit events only.
 The hidden `.disabled` marker keeps a skill visible in the manager while
 excluding it from the index supplied to new agent runs.
 
+Six built-in workflows are shipped as read-only skill folders:
+`swarmboard`, `ticket-management`, `knowledge-management`,
+`scheduled-agent-tasks`, `team-orchestration`, and `source-backed-research`.
+Their `builtin: true` frontmatter labels them in the manager. The bundled slug
+catalog also protects these files if their frontmatter is removed outside the
+application. Storage rejects content writes, creation, moves and deletion even
+for the operator/orchestrator; API and MCP reuse those checks. The page disables
+file-edit controls and dragging. Enabled state and triggers remain configurable.
+Built-in trigger overrides live in a hidden `.trigger-words.json`, leaving
+bundled `SKILL.md` bytes unchanged. The effective content version includes this
+override, so concurrent trigger updates still reject stale revisions. Custom
+skill triggers are saved in their manifest. Files remain the source of truth.
+
+`trigger_words` frontmatter stores a JSON array of words or phrases (an indented
+YAML list is also accepted). The manager edits this field separately and can set
+it during creation. Up to 32 entries of 1–80 characters are accepted; control
+characters are rejected, whitespace is normalized and case-insensitive
+duplicates are removed. An empty or absent list means on-demand loading only.
+`PATCH /api/skills/<slug>` accepts `{trigger_words: [...], version}` using the
+manifest's current content version. Creation and `skill_put` accept optional
+`trigger_words`; direct manifest edits and imports validate the same metadata.
+
+Each orchestrator message, ticket assignment/review, ticket follow-up and team
+response is matched against enabled skills at prompt construction time. Matching
+ignores case, accepts whitespace between phrase words, and requires word
+boundaries rather than substrings. Each matching skill's complete `SKILL.md`
+is included once and counted in `skill_accesses` for the receiving agent.
+Supporting files still load through `skill_file_get`. Matching uses only the
+current user text, assignment title/body, or teammate message; generated indices
+and restored history never activate new loads. Resumed ACP sessions can retain
+previously supplied context; disabling a skill prevents future injection.
+Injected instructions remain subject to the turn's role and tool permissions.
+
 The file panel lists empty directories as well as files. Select a folder,
 then use **File** or **Folder** to create an entry inside it. **Rename** keeps
 the parent directory; **Move** selects a destination folder. Files and folders
@@ -20,8 +53,9 @@ Switching files or refreshing prompts before discarding an unsaved edit.
 All agent roles can call `skill_list`, `skill_get`, and `skill_file_get`,
 including in collaboration and dispatch sessions. The orchestrator and
 ticket workers receive the enabled skill index in their startup context, then
-read full instructions on demand. Only the human operator and orchestrator can
-create, edit, import, enable, disable, or delete skills. Workers share verified
+read full instructions on demand or receive them through matching trigger words.
+Only the human operator and orchestrator can create, edit, import or delete
+custom skills, or configure trigger/enabled settings. Workers share verified
 methods with the orchestrator, who publishes a new root skill during team-job
 synthesis when required by the delivery gate.
 Read-only sessions can read skills and supporting files without updating
@@ -64,14 +98,21 @@ the existing content version. New entries respect the 1 MiB file, 8 MiB skill,
   binary content, collisions, manifest protection, stale revisions, invalid
   paths, limits, symlinks, HTTP routing, and agent access. Fixtures keep skills
   and SQLite records in temporary directories.
+- `tests/test_skill_triggers.py` covers built-in metadata, validated and versioned
+  trigger changes, boundary/phrase matching, disabled skills, usage tracking,
+  read-only enforcement and settings isolation, invalid imports, and injection
+  into orchestrator, worker, teammate and resumed ticket conversations.
 - Headless browser tests exercise file creation, rename, folder and root
   drops, persistence after reload, and unsaved draft retention. They use the
   real HTTP routes and never open a visible web preview.
-- Focused checks pass on Windows and Linux, including all 14 filesystem and
-  agent-access tests on Linux and both skill editor browser tests. The full
-  suites have four transcript failures in Python and seven chat/tool failures
-  in the browser; each also reproduces on the prior commit. Detailed results
-  are recorded in this change's commit description.
+- Current Windows checks: the focused Python suite ran 47 tests successfully
+  (one platform skip), and all four Skills browser tests passed. The full Python
+  suite ran 199 tests with four existing transcript failures and two skips;
+  those four failures reproduce on the unchanged commit. The full browser suite
+  ran 24 tests with seven chat/tool failures, outside the Skills paths. The
+  baseline comparison reproduced five before it was stopped at the operator's
+  request to leave further UI testing to them. Detailed results are recorded
+  in the commit description.
 
 ## Maintenance notes
 

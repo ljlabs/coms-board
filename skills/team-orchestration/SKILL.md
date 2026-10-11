@@ -1,6 +1,8 @@
 ---
 name: team-orchestration
 description: Coordinate an orchestrator led team, delegate focused work, and complete peer reviewed synthesis.
+builtin: true
+trigger_words: ["team", "delegate", "delegation", "teammate", "peer review", "synthesis"]
 ---
 
 # Team orchestration

@@ -1,6 +1,7 @@
 ---
 name: crypto-evidence-review-method
 description: "Crypto Strategy Evidence & Review Method"
+trigger_words: ["crypto", "cryptocurrency", "backtest"]
 ---
 
 # Crypto Strategy Evidence & Review Method

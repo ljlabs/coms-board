@@ -297,7 +297,7 @@ def _skill_record(conn, skill: dict) -> dict:
     skill['loaded_by'] = [row['agent_slug'] for row in usage]
     skill['last_used_at'] = usage[0]['last_accessed_at'] if usage else ''
     skill['access_count'] = sum(row['access_count'] for row in usage)
-    skill['context_tokens'] = max(1, (len(skill['slug']) + len(skill['description']) + 3) // 4 + 5)
+    skill['context_tokens'] = max(1, (len(skill['slug']) + len(skill['description']) + len(', '.join(skill['trigger_words'])) + 3) // 4 + 5)
     return skill
 
 
@@ -343,7 +343,7 @@ def _record_skill_write(conn, slug: str, actor: str, title: str, *, created: boo
     conn.commit()
 
 
-def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None, description: str = '') -> dict:
+def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None, description: str = '', trigger_words=None) -> dict:
     require_skill_manager(conn, actor)
     if not isinstance(slug, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', slug):
         raise BadRequest('invalid skill slug')
@@ -352,7 +352,7 @@ def save_skill(conn, slug: str, title: str, body: str, actor: str, version=None,
     if len(body.encode('utf-8')) > skill_store.MAX_FILE_BYTES:
         raise BadRequest('skill instructions are limited to 1 MiB')
     try:
-        skill, created = skill_store.save_skill(slug, title, description, body, version)
+        skill, created = skill_store.save_skill(slug, title, description, body, version, trigger_words)
     except FileNotFoundError as exc:
         raise NotFound(str(exc)) from exc
     except (ValueError, OSError) as exc:
@@ -425,6 +425,18 @@ def set_skill_enabled(conn, slug: str, enabled: bool, actor: str) -> dict:
     return get_skill(conn, slug)
 
 
+def set_skill_trigger_words(conn, slug: str, words, actor: str, version=None) -> dict:
+    require_skill_manager(conn, actor)
+    try:
+        skill = skill_store.set_trigger_words(slug, words, version)
+    except FileNotFoundError as exc:
+        raise NotFound(str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise BadRequest(str(exc)) from exc
+    _record_skill_write(conn, slug, actor, skill['title'], created=False)
+    return get_skill(conn, slug)
+
+
 def delete_skill(conn, slug: str, actor: str) -> dict:
     require_skill_manager(conn, actor)
     try:
@@ -466,9 +478,35 @@ def children_resolved(conn, tid: int) -> bool:
 def shared_skill_context(conn) -> str:
     skills = [skill for skill in list_skills(conn) if skill['enabled']]
     lines = ['ROOT SKILLS (from the repository skills/ folder; available to every agent role). Read relevant instructions with skill_get before acting:']
-    lines.extend(f"- {skill['slug']}: {skill['description'] or skill['title']}" for skill in skills)
+    lines.extend(f"- {skill['slug']}: {skill['description'] or skill['title']}" +
+                 (" (triggers: " + ', '.join(skill['trigger_words']) + ")" if skill['trigger_words'] else '') for skill in skills)
     lines.append('Every enabled folder skill is available through skill_list, skill_get, and skill_file_get, including in worker, collaboration, review, and dispatch sessions. Only the human operator and orchestrator can create or edit skills with skill_put, skill_file_write, skill_entry_create, and skill_entry_move; workers should send verified methods to the orchestrator for publication.')
     return '\n'.join(lines)
+
+
+def triggered_skill_context(conn, text: str, actor: str = '') -> str:
+    """Load enabled skills matching the current request, never generated context."""
+    if not text:
+        return ''
+    sections = []
+    for skill in skill_store.list_skills():
+        if not skill['enabled']:
+            continue
+        matches = [word for word in skill['trigger_words']
+                   if re.search(r'(?<!\w)' + r'\s+'.join(re.escape(part) for part in word.casefold().split()) + r'(?!\w)', text.casefold())]
+        if not matches:
+            continue
+        try:
+            current = skill_store.get_skill(skill['slug'])
+        except (FileNotFoundError, ValueError):
+            continue
+        if not current['enabled']:
+            continue
+        sections.append(f"SKILL: {skill['slug']} (matched: {', '.join(matches)})\n{current['body']}")
+        record_skill_access(conn, skill['slug'], actor)
+    if not sections:
+        return ''
+    return 'TRIGGERED SKILL INSTRUCTIONS (apply within this turn\'s role and tool permissions):\n\n' + '\n\n'.join(sections) + '\n\n'
 
 
 def seed_shared_skills(conn):

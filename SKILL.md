@@ -123,11 +123,14 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
   run; each execution links to a normal ticket and runner transcript.
 - Skills: every skill folder under the repository-root `skills/` directory is
   listed on the Skills page and is available to all agent roles through
-  `skill_list` and `skill_get`. Read a relevant skill before work. Use
-  `skill_put` to publish a new verified procedure or update an existing one
+  `skill_list` and `skill_get`. Enabled skills with matching `trigger_words`
+  are automatically injected into the current turn; read other relevant skills
+  before work. Built-in skill files are read-only, including through MCP.
+  Their enabled state and trigger settings are configurable on the Skills page.
+  Use `skill_put` to publish a new verified procedure or update an existing one
   when acting as the orchestrator. Workers should share verified methods with
   the orchestrator for publication. The human operator and orchestrator can
-  create, edit, enable, disable, and delete skills.
+  create, edit, enable, disable, and delete custom skills.
   Use `skill_file_get` to read supporting files. Managers can edit text with
   `skill_file_write`, add files or empty folders with `skill_entry_create`,
   and rename or move entries with `skill_entry_move`. Create and move calls
