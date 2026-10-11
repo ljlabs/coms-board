@@ -54,6 +54,19 @@ write to a workspace, set `SWARM_WORKSPACE_READ_ONLY=false` in a local `.env` fi
 `SWARM_WORKSPACE` pointed at a dedicated project folder; writable mode allows
 agents to change files inside that folder.
 
+The image also includes Playwright CLI `0.1.22`, its matching Chromium browser,
+and Chromium's Linux dependencies. Agents use `playwright-cli` directly; they do
+not need npm or npx downloads in the read-only container. Browser binaries are
+baked into the image at `/ms-playwright`. Browser profiles and output files live
+under `/home/board` on the persistent `agent-state` volume, so they survive
+container recreation. Rebuild the image with `docker compose up --build -d` to
+update the pinned CLI/browser version. To check the installed browser:
+
+```powershell
+docker compose run --rm --no-deps board playwright-cli --help
+docker compose run --rm --no-deps board sh -c "playwright-cli open about:blank && playwright-cli close"
+```
+
 The container connects to llama.cpp at
 `http://host.docker.internal:11434/v1` with model
 `LFM2.5-2.6B-Q8_0.gguf`. Docker Desktop resolves `host.docker.internal` to the

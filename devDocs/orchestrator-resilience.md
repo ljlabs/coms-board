@@ -95,7 +95,7 @@ An earlier full-suite snapshot had four thinking-transcript failures and nine
 browser failures. ACP thought chunks now stay in opt-in diagnostics, legacy
 thought rows are hidden from public chat responses, and browser coverage follows
 the current UI and SSE fallback behavior. The latest full checkout run passes
-all 253 Python tests (two platform skips) and all 31 browser tests.
+all 257 Python tests (two platform skips) and all 31 browser tests.
 
 On 11 October 2026, the live audit job #10 and its twelve worker tickets were
 backed up and held. Its waiting runs and pending deliveries were cancelled.

@@ -64,7 +64,7 @@ or browser tests.
 The 48 focused backend checks pass; the Lottie correction also reran all ten
 activity regressions successfully. An earlier 11 October full-suite snapshot
 had four existing thinking-transcript assertions failing on unchanged HEAD
-`016eac5`. The latest full checkout run passes all 253 Python tests (two
+`016eac5`. The latest full checkout run passes all 257 Python tests (two
 platform skips) and all 31 browser tests, including nested chat activity and
 Stop visibility while child work continues.
 

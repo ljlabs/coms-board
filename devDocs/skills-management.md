@@ -110,7 +110,7 @@ the existing content version. New entries respect the 1 MiB file, 8 MiB skill,
   real HTTP routes and never open a visible web preview.
 - Earlier Windows checks passed the focused Skills Python and browser cases but
   recorded failures in unrelated transcript and chat checks. The latest full
-  checkout run passes all 253 Python tests (two platform skips) and all 31
+  checkout run passes all 257 Python tests (two platform skips) and all 31
   browser tests, including the built-in skill read-only controls.
 
 ## Maintenance notes

@@ -34,6 +34,7 @@ services:
     pids_limit: 128
     mem_limit: 4g
     cpus: 4.0
+    shm_size: 512m
     ports:
       - "${SWARM_BIND:-127.0.0.1}:${SWARM_PORT:-18765}:8765"
     extra_hosts:
@@ -46,6 +47,9 @@ services:
       COMS_LLAMACPP_BASE_URL: ${COMS_LLAMACPP_BASE_URL:-http://host.docker.internal:11434/v1}
       COMS_LLAMACPP_MODEL: ${COMS_LLAMACPP_MODEL:-LFM2.5-2.6B-Q8_0.gguf}
       HOME: /home/board
+      XDG_CACHE_HOME: /home/board/.cache
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      PLAYWRIGHT_MCP_CONFIG: /app/playwright-cli.config.json
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     volumes:

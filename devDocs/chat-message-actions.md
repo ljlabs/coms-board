@@ -56,7 +56,7 @@ On 2026-10-11, all 16 new backend checks and four new browser checks passed.
 The initial full-checkout runs exposed four transcript and nine browser
 regressions. The transcript now keeps ACP thoughts in opt-in logs, and browser
 checks follow the current SSE, dialog, and tool-panel contracts. Latest full
-verification passed: 253 Python tests with two platform skips, and all 31
+verification passed: 257 Python tests with two platform skips, and all 31
 browser tests. JavaScript syntax and Git whitespace checks also pass.
 
 ## Maintenance notes

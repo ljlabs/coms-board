@@ -41,6 +41,23 @@ the context is smaller. A stale saved OpenCode selection falls back to the
 configured live catalog default; other ACP backends keep their normal
 selection validation.
 
+### Playwright automation in Docker
+
+The Docker image pins `@playwright/cli` at `0.1.22` and installs its matching
+Chromium browser plus Linux dependencies during image build. Agents use the
+global `playwright-cli` binary; runtime npm/npx downloads cannot work reliably
+because the container root filesystem is read-only. Browser binaries live in
+the image at `/ms-playwright`. The CLI config at
+`/app/playwright-cli.config.json` sends snapshots and other output to
+`/home/board/playwright-output`; `XDG_CACHE_HOME` keeps persistent browser
+profiles under `/home/board/.cache`. Both directories are on the existing
+`agent-state` volume and survive container recreation. The entrypoint creates
+them for old volumes too. The agent workspace may stay read-only, so browser
+artifacts should remain under the configured home directory. Compose allocates
+512 MiB of shared memory for Chromium. Rebuild the image to update the pinned
+CLI and browser; do not `docker compose down --volumes` to update it because that
+also erases board and agent state.
+
 Availability is distinct from model behavior: this configuration supplies the
 tools but cannot guarantee correct calls, useful progress or job completion.
 External services and local inference can still fail. Existing per-turn limits
@@ -119,5 +136,12 @@ thinking-transcript cases failed. Those failures reproduced before this change.
 OpenCode model-metadata validation on 11 October 2026: 23 focused worker tests
 ran with one platform skip. A later privacy and regression cleanup kept ACP
 thought chunks out of public transcripts and corrected browser checks to match
-the live UI and SSE fallback. The latest full suite passes all 253 Python tests
+the live UI and SSE fallback. The latest full suite passes all 257 Python tests
 (two platform skips) and all 31 browser tests.
+
+Docker Playwright validation on 11 October 2026: four focused runtime-contract
+tests pass; Compose configuration and image build pass. A non-root, read-only
+container opened Chromium, saved snapshots and a screenshot to `/home/board`,
+and a newly created container confirmed the output and browser binary persisted.
+The running board service was recreated from the image with its named volumes
+preserved and passed its health check and a second browser launch.
