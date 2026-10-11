@@ -8,16 +8,18 @@ can identify its spawning agent and link to its originating scheduled task or
 Orchestrator chat.
 
 Running, waiting, and queued ready work propagate to every ancestor through
-both ticket hierarchy and recorded execution origins. Chats and schedules show
-a circular indicator on the right while their work remains active, including
-grandchildren after a lead finishes its own turn. The same indicator appears
-inside a chat while awaiting an answer or delegated work. Waiting for children
-does not reserve an ACP slot or disable steering an otherwise idle chat. Stop
-continues to apply only to a currently running orchestrator response.
+both ticket hierarchy and recorded execution origins. Chat sidebar entries and
+scheduled tasks show a circular indicator on their right while their work
+remains active, including grandchildren after a lead finishes its own turn.
+Inside a chat, the existing Lottie animation appears while awaiting an answer
+or delegated work. Waiting for children does not reserve an ACP slot or disable
+steering an otherwise idle chat. Stop continues to apply only to a currently
+running orchestrator response.
 
 Schedule history and individual execution chats share this activity signal.
 Indicators clear when the related work finishes; unrelated chats/schedules
-remain idle. Reduced-motion preferences replace spinning with a static circle.
+remain idle. Reduced-motion preferences show a static circle in the sidebar
+and a fixed frame of the Lottie artwork inside the conversation.
 
 ## Implementation path
 
@@ -40,7 +42,9 @@ remain idle. Reduced-motion preferences replace spinning with a static circle.
 - `web/app.js` renders source links and schedule indicators;
   `web/orchestrator-chat.js` polls activity even with a healthy transcript
   stream, preserves sidebar groups, and keeps response controls tied to the
-  agent's own busy turn. `web/app.css` supplies the shared circular animation.
+  agent's own busy turn. It retains the conversation's Lottie animation and
+  pauses it when hidden, respects reduced motion, and destroys it on cleanup.
+  `web/app.css` supplies the sidebar and schedule circles and Lottie sizing.
 
 ## Verification
 
@@ -51,8 +55,9 @@ JavaScript syntax is checked. Browser regression cases are provided but are
 left for user testing under the explicit instruction not to run browser tools
 or browser tests.
 
-The 48 focused backend checks pass. The full Python run on 11 October 2026
-ran 223 tests: 217 passed, two skipped, and four existing thinking-transcript
+The 48 focused backend checks pass; the Lottie correction also reran all ten
+activity regressions successfully. The full Python run on 11 October 2026
+ran 225 tests: 219 passed, two skipped, and four existing thinking-transcript
 assertions failed. All four failures reproduce on unchanged HEAD `016eac5`.
 
 ## Maintenance notes

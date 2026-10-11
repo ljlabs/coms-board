@@ -205,9 +205,9 @@ with unfinished child work.
 **Live agent progress** on Agents shows who spawned each worker and links to
 its scheduled task or chat when known. Runner focuses on configuration. Circular
 indicators beside chats and scheduled tasks stay visible while related work is
-queued, running, or waiting, including nested subagents. The chat also shows the
-indicator while awaiting a response or teammates; an idle orchestrator remains
-available for follow-up messages. See
+queued, running, or waiting, including nested subagents. Inside the conversation,
+the existing Lottie animation runs while awaiting a response or teammates;
+an idle orchestrator remains available for follow-up messages. See
 [`devDocs/agent-activity.md`](devDocs/agent-activity.md).
 
 **Skills** reads skill folders from the repository-root `skills/` directory.

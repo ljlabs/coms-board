@@ -378,8 +378,10 @@
     const box=$('#chat-messages');
     const activity=document.createElement('div');activity.id='chat-activity';activity.className='chat-activity';activity.hidden=true;
     activity.setAttribute('role','status');activity.setAttribute('aria-live','polite');
-    activity.innerHTML='<i class="activity-spinner" aria-hidden="true"></i><span>Thinking…</span>';
+    activity.innerHTML='<div class="chat-loading-art" aria-hidden="true"></div><span>Thinking…</span>';
     box.parentElement.append(activity);
+    const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
+    let animation=null,animationLoading=false;
     function updateActivity() {
       const working=Boolean(sending || detail.busy || detail.active_turn_id || detail.working);
       activity.hidden=!working;
@@ -387,12 +389,29 @@
       const activeMessages=(detail.messages || []).filter(message=>message.turn_id===detail.active_turn_id);
       const latest=activeMessages[activeMessages.length-1];
       setText(activity.querySelector('span'),sending?'Sending…':!detail.busy && !detail.active_turn_id && detail.working?'Waiting for teammates…':latest?.kind==='text'?'Responding…':latest?.kind==='tool_call'?'Working…':'Thinking…');
+      if (animation) {
+        if (reducedMotion.matches) animation.goToAndStop(45,true);
+        else if (working && !document.hidden) animation.play();
+        else animation.pause();
+      } else if (working && !animationLoading && window.lottie) {
+        animationLoading=true;
+        GET('/animations/chat-loading-neobrutalist.json').then(data=>{
+          if (!box.isConnected || h.signal?.aborted) return;
+          animation=window.lottie.loadAnimation({container:activity.querySelector('.chat-loading-art'),renderer:'svg',loop:true,autoplay:false,animationData:data,rendererSettings:{progressiveLoad:true,hideOnTransparent:true}});
+          animation.setSubframe(false);
+          animation.addEventListener('DOMLoaded',updateActivity);
+          updateActivity();
+        }).catch(()=>{ /* The text status remains visible if the artwork cannot load. */ });
+      }
     }
     document.addEventListener('visibilitychange',updateActivity);
     document.addEventListener('selectionchange',queueStreamRender);
+    reducedMotion.addEventListener('change',updateActivity);
     h.onCleanup?.(()=>{
       document.removeEventListener('visibilitychange',updateActivity);
       document.removeEventListener('selectionchange',queueStreamRender);
+      reducedMotion.removeEventListener('change',updateActivity);
+      animation?.destroy();
       streamSource?.close();
       if (renderFrame!==null) cancelAnimationFrame(renderFrame);
     });

@@ -27,7 +27,7 @@ test('Runner omits live progress and Agents links execution sources', async () =
   });
 });
 
-test('nested chat work shows circular activity while an idle chat allows steering', async () => {
+test('nested chat work shows a sidebar circle and conversation Lottie while allowing steering', async () => {
   await pageFor('/orchestrator?session=browser-chat', async page => {
     let working=true;
     await page.route('**/api/runner/sessions', async route => {
@@ -40,7 +40,8 @@ test('nested chat work shows circular activity while an idle chat allows steerin
     });
     await page.reload();
     await page.waitForSelector('.chat-session-row .activity-spinner');
-    await page.waitForSelector('#chat-activity:not([hidden]) .activity-spinner');
+    await page.waitForSelector('#chat-activity:not([hidden]) .chat-loading-art svg');
+    assert.equal(await page.locator('#chat-activity .activity-spinner').count(), 0);
     assert.equal(await page.locator('#chat-send').isEnabled(), true);
     assert.equal(await page.locator('#chat-stop').isVisible(), false);
     assert.match(await page.locator('#chat-activity').textContent(), /teammates/i);
