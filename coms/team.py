@@ -35,7 +35,56 @@ def member(conn, job_id, actor):
         raise api.BadRequest('Agent is not a member of this job team')
 
 
+def is_stopped(conn, tid):
+    """A held ancestor also prevents work created through execution provenance."""
+    return bool(conn.execute("""WITH RECURSIVE lineage(id) AS (
+        SELECT id FROM tickets WHERE id=? UNION
+        SELECT t.parent_id FROM tickets t JOIN lineage l ON t.id=l.id WHERE t.parent_id IS NOT NULL UNION
+        SELECT t.source_ticket_id FROM tickets t JOIN lineage l ON t.id=l.id WHERE t.source_ticket_id IS NOT NULL)
+        SELECT 1 FROM tickets t JOIN lineage l ON t.id=l.id
+        WHERE t.ready_for_execution=0 AND t.status IN ('blocked','wontfix') LIMIT 1""", (tid,)).fetchone())
+
+
+def require_running(conn, tid):
+    if is_stopped(conn, tid):
+        raise api.BadRequest(f'Ticket #{tid} belongs to a stopped team; resume it explicitly before executing')
+
+
+def stop(conn, job_id, actor):
+    """Hold a whole team atomically; killing a process alone is retryable."""
+    job = api.get_ticket(conn, job_id)
+    role = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()
+    if job['type'] != 'job': raise api.BadRequest('Team stop requires a job ticket')
+    if actor != api.ADMIN_ACTOR and actor != job['assignee'] and (not role or role['role'] != 'orchestrator'):
+        raise api.BadRequest('Only the human operator, orchestrator, or assigned job lead can stop a team')
+    from . import schedules
+    if not conn.in_transaction: conn.execute('BEGIN IMMEDIATE')
+    try:
+        ids = [row[0] for row in conn.execute("""WITH RECURSIVE work(id) AS (
+            SELECT id FROM tickets WHERE id=? UNION
+            SELECT t.id FROM tickets t JOIN work w ON t.parent_id=w.id OR t.source_ticket_id=w.id)
+            SELECT id FROM work ORDER BY id""", (job_id,))]
+        marks = ','.join('?' for _ in ids)
+        stamp, reason = api.now(), 'Team stopped by the operator; resume work explicitly'
+        conn.execute(f"UPDATE tickets SET ready_for_execution=0,agent_retry_requested=0,status=CASE WHEN status IN ('done','wontfix') THEN status ELSE 'blocked' END,updated_at=? WHERE id IN ({marks})", [stamp] + ids)
+        conn.execute(f"UPDATE agent_runs SET status='cancelled',finished_at=?,error=? WHERE ticket_id IN ({marks}) AND status IN ('queued','running','waiting')", [stamp, reason] + ids)
+        conn.execute(f"UPDATE agent_runtime SET state='cancelled',phase='cancelled',summary=?,updated_at=?,finished_at=? WHERE ticket_id IN ({marks}) AND state IN ('running','waiting')", [reason, stamp, stamp] + ids)
+        conn.execute(f"UPDATE team_deliveries SET status='cancelled',error=?,updated_at=? WHERE message_id IN (SELECT id FROM team_messages WHERE job_id IN ({marks})) AND status IN ('pending','responding','failed')", [reason, stamp] + ids)
+        conn.execute(f"UPDATE peer_reviews SET status='cancelled',reason=?,updated_at=? WHERE job_id IN ({marks}) AND status IN ('requested','failed')", [reason, stamp] + ids)
+        conn.execute(f"UPDATE ticket_reviews SET status='cancelled',reason=?,finished_at=? WHERE ticket_id IN ({marks}) AND status IN ('queued','running','failed')", [reason, stamp] + ids)
+        for tid in ids:
+            api._index_ticket(conn, dict(conn.execute('SELECT * FROM tickets WHERE id=?', (tid,)).fetchone()))
+            schedules.mark_ticket(conn, tid, 'cancelled', reason)
+        api.log_activity(conn, actor, 'team.stop', f'ticket:{job_id}', f'Stopped team and held {len(ids)} tickets')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {'job_id': int(job_id), 'stopped': True, 'ticket_ids': ids}
+
+
 def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='task'):
+    require_running(conn, job_id)
     job = api.get_ticket(conn, job_id)
     if job['type'] != 'job' or job['assignee'] != actor:
         raise api.BadRequest('Only the assigned job lead can delegate teammates')
@@ -123,6 +172,7 @@ def read_room(conn, job_id, after_id=0, *, message_id=None, offset=0, source_aft
 
 
 def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, commit=True):
+    if kind in ('question', 'review_request'): require_running(conn, job_id)
     member(conn, job_id, sender)
     if not isinstance(body, str) or not body.strip() or len(body) > 16000:
         raise api.BadRequest('A team message must contain 1–16000 characters')
@@ -148,7 +198,7 @@ def reply(conn, message_id, actor, body, *, commit=True):
     if original['recipient'] != actor: raise api.BadRequest('Only the addressed teammate can reply')
     if original['kind'] == 'review_request': raise api.BadRequest('Use team_review to decide a peer review')
     delivery = conn.execute('SELECT status,response_id FROM team_deliveries WHERE message_id=? AND recipient=?', (message_id, actor)).fetchone()
-    if not delivery or delivery['status'] == 'answered': raise api.BadRequest('This request already has a response')
+    if not delivery or delivery['status'] in ('answered', 'cancelled'): raise api.BadRequest('This request already has a response or was cancelled')
     response = send(conn, original['job_id'], actor, original['sender'], body, kind='reply', reply_to=message_id, commit=False)
     conn.execute("UPDATE team_deliveries SET status='answered',response_id=?,error='',updated_at=? WHERE message_id=? AND recipient=?", (response['id'], api.now(), message_id, actor))
     if commit: conn.commit()

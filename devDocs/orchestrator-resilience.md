@@ -9,6 +9,31 @@ preserves the existing conversation and unsent composer draft so the user can
 steer the same session. Stopping an orchestrator response does not cancel
 independent child worker runs.
 
+To stop a whole team, the operator, Orchestrator, or assigned job lead calls
+`team_stop(job_id)` (HTTP: `POST /api/teams/<job_id>/stop`). It atomically sets
+the job and descendants to `ready_for_execution=0`, holds unfinished tickets
+as `blocked`, and cancels queued/running/waiting runs, pending deliveries and
+reviews. Completed results, artifacts, transcripts and unrelated jobs remain
+available. Descendants follow both `parent_id` and `source_ticket_id`, with
+cycle protection. Repeating the request is safe.
+
+The runner checks held connections on each scheduling tick, including ACP
+startup, team replies and final review, and closes them. Startup and prompt
+boundaries recheck the hold. Cancelled status is terminal for that run: late
+notifications and cleanup cannot change it to waiting or failed. Heartbeats,
+automatic retries and reply delivery cannot restart held work, including after
+a server restart. A held ancestor also blocks executing a child reenabled on
+its own. Creating new work from a held execution context is rejected; creation
+and stop serialize through SQLite's write lock so descendants cannot escape
+the stop traversal. The MCP tool permits reads of stopped work but rejects
+new writes from those workers.
+
+The Orchestrator's instructions require `team_stop` when asked to stop or kill
+a team and require checking `stopped=true`. Process termination and textual
+STOP notes do not change execution eligibility. Resuming requires an explicit
+operator action to reopen and enable the desired job/worker tickets; cancelled
+reply and review requests require fresh requests. No schema migration is used.
+
 Chat activity remains visible while descendant workers run, wait, or queue,
 including descendants of descendants. This activity is distinct from an active
 ACP response: an idle chat accepts steering while its workers continue. The
@@ -60,6 +85,19 @@ slot if children finish between scheduling and starting the monitor. Existing `a
   `team_read` and scope `team_send`/`team_note`/`team_reply` to the assigned job.
 
 ## Verification
+
+`tests/test_team_stop.py` adds 16 regressions for recursive/provenance holds,
+cycle handling, permissions, idempotence, HTTP/MCP access, run/delivery/review
+cancellation, startup and cleanup races, ancestor holds and restart persistence.
+The focused recovery/tool/activity run passed 52 checks with one platform skip.
+The full Python run exercised 241 tests: 235 passed, two were skipped, and four
+thinking-transcript assertions failed. All four reproduce on untouched HEAD
+`173d9d9`. There are no dashboard changes in this fix.
+
+On 11 October 2026, the live audit job #10 and its twelve worker tickets were
+backed up and held. Its waiting runs and pending deliveries were cancelled.
+The subsequent database inspection showed no active audit runs or deliveries
+and no other running jobs before deployment.
 
 - Twenty new backend checks pass. Coverage exercises Stop, startup/ignored cancellation,
   transcript and worker preservation, timer scoping, EOF cleanup, model

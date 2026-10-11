@@ -46,6 +46,12 @@ and a fixed frame of the Lottie artwork inside the conversation.
   pauses it when hidden, respects reduced motion, and destroys it on cleanup.
   `web/app.css` supplies the sidebar and schedule circles and Lottie sizing.
 
+A durable `team_stop` cancels live runtime records and holds ticket execution.
+Late ACP notifications cannot overwrite a cancelled runtime record. Held
+blocked tickets contribute no activity, so their chat/schedule indicators clear.
+The response-only Stop control retains its existing semantics; see
+[`orchestrator-resilience.md`](orchestrator-resilience.md).
+
 ## Verification
 
 Focused backend regressions cover nested work, schedule/chat isolation,

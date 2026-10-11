@@ -87,6 +87,7 @@ TOOLS = [
     tool("schedule_delete", "Delete a recurring schedule while retaining its execution history.", {"id": I}, ["id"], True),
     tool("team_roster", "List teammates on a job, with distinct names, identities, capabilities and assigned tickets.", {"job_id": I}, ['job_id']),
     tool("team_delegate", "Delegate one specialty to a named teammate. Creates a ready child task with inherited workspace and collaboration requirements. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
+    tool("team_stop", "Stop a job and all descendant workers durably. Disables execution, retries, queued replies and heartbeats; preserves tickets and results. Use when asked to stop or kill a team. Only the operator, orchestrator or job lead may call this. STOP notes and process kills alone do not stop queued work.", {'job_id': I}, ['job_id'], True),
     tool("team_read", "Read a bounded job index with recent messages, pending requests, progress, reviews and sources. Use message_id for a full message (offset pages long bodies), source_after_id for more sources, and source_get/wiki_get for evidence. Act on the assignment instead of repeatedly polling unchanged output.", {"job_id": I, "after_id": I, "message_id": I, "offset": I, "source_after_id": I}, ['job_id']),
     tool("team_send", "Ask one teammate a substantive question. The runner wakes the recipient for a response. Finish your turn if waiting; you resume after replies.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
     tool("team_note", "Post a useful update or staffing decision to the shared job conversation; does not demand replies.", {"job_id": I, "body": S}, ['job_id', 'body'], True),
@@ -139,6 +140,8 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     if assigned and name in ("ticket_result", "ticket_comment", "ticket_link") and args["id"] != int(assigned):
         raise ValueError("execution agent may only change its assigned ticket")
     conn = db.connect(readonly=readonly)
+    if assigned and name != 'team_stop' and not spec['annotations']['readOnlyHint']:
+        team.require_running(conn, int(assigned))
     if monitor_only and name=='team_reply':
         message=conn.execute('SELECT job_id FROM team_messages WHERE id=?',(args['message_id'],)).fetchone()
         if not message or message['job_id']!=int(assigned):
@@ -227,6 +230,9 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == 'team_delegate':
         if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
         result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'], type_=args.get('type', 'task'))
+    elif name == 'team_stop':
+        if assigned and int(assigned) != args['job_id']: raise ValueError('Stop your assigned job only')
+        result = team.stop(conn, args['job_id'], actor)
     elif name == 'team_read': result = team.read_room(conn, args['job_id'], args.get('after_id', 0), message_id=args.get('message_id'), offset=args.get('offset', 0), source_after_id=args.get('source_after_id', 0))
     elif name == 'team_send': result = team.send(conn, args['job_id'], actor, args['to'], args['body'])
     elif name == 'team_note': result = team.send(conn, args['job_id'], actor, '*', args['body'], kind='note')

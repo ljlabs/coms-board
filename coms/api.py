@@ -1081,6 +1081,16 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
         from .workspace import workspace_path
         try: workspace = workspace_path({"workspace": workspace}, create_default=False)
         except ValueError as exc: raise BadRequest(str(exc))
+    # Serialize descendant creation with team.stop after input validation.
+    if parent_id is not None or source_ticket_id is not None:
+        from . import team
+        if not conn.in_transaction: conn.execute('BEGIN IMMEDIATE')
+        try:
+            for origin in (parent_id, source_ticket_id):
+                if origin is not None: team.require_running(conn, origin)
+        except Exception:
+            conn.rollback()
+            raise
     ts = now()
     cur = conn.execute(
         "INSERT INTO tickets(title, body, type, status, priority, department, assignee, requester, "

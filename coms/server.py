@@ -480,6 +480,10 @@ def r_team(conn, m, mm, q, b, actor):
         return team.send(conn, job_id, actor, b.get('to', '*'), b.get('body', ''), kind='note' if b.get('to', '*') == '*' else 'question')
 
 
+def r_team_stop(conn, m, mm, q, b, actor):
+    if m == 'POST': return team.stop(conn, int(mm.group(1)), actor)
+
+
 def r_runner_settings(conn, m, _mm, q, b, actor):
     if m == "GET":
         values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
@@ -826,6 +830,7 @@ def r_question_comment_item(conn, m, mm, _q, b, actor):
 
 ROUTES = [
     (r"/api/teams", r_teams),
+    (r"/api/teams/(\d+)/stop", r_team_stop),
     (r"/api/teams/(\d+)", r_team),
     (r"/api/skills/([a-z0-9-]+)", r_skills),
     (r"/api/skills", r_skills),

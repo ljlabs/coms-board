@@ -27,6 +27,11 @@ perform the assignment or record a concrete blocker and finish the turn.
 
 The lead delegates child tickets and waits for worker results and reviews. Only the lead owns the synthesis. After all workers finish, write a fresh combined wiki page, link it to the job, obtain a current revision peer review, and deliver with `ticket_result`.
 
+If the human asks to stop or kill the team, call `team_stop(job_id)` and verify
+`stopped=true`. This holds all descendants and cancels runs, replies and reviews
+without deleting results. Process kills and STOP notes do not disable the
+runner queue. Do not recreate or reenable stopped work without a human request.
+
 ## Workers and reviewers
 
 Workers use `team_roster` and `team_send` for substantive questions. Recipients are awakened automatically. Sending a question or requesting peer review pauses the sender until the response arrives. Resumed workers read `team_read`, publish their own wiki pages, link them to their ticket, and request a review of the current revision with `team_request_review`.

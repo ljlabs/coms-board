@@ -202,6 +202,14 @@ The lead releases its execution slot while waiting and resumes automatically
 to verify and synthesize worker results. Final review cannot close a parent
 with unfinished child work.
 
+When you ask the Orchestrator to stop or kill a team, it uses `team_stop` to
+hold the job and all descendants and cancel queued replies, retries, reviews
+and heartbeats. Tickets and existing results are preserved. Worker connections
+are closed, and the team stays stopped across server restarts until you
+explicitly reopen and enable the work. The equivalent local HTTP operation is
+`POST /api/teams/<job_id>/stop`. The chat composer's **Stop** button still
+cancels only the Orchestrator's current response.
+
 **Live agent progress** on Agents shows who spawned each worker and links to
 its scheduled task or chat when known. Runner focuses on configuration. Circular
 indicators beside chats and scheduled tasks stay visible while related work is

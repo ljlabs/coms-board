@@ -41,6 +41,14 @@ long bodies with `offset`; page sources with `source_after_id`, then use
 new information. Execution turns have a 15-minute hard deadline and bounded
 retries; record blockers and actual test outcomes before finishing.
 
+When the human asks to stop or kill a team, the orchestrator or assigned job
+lead must call `team_stop(job_id)` and check `stopped=true`. It holds the job
+and every descendant, cancels pending replies/reviews and prevents automatic
+restarts. Preserve the tickets and results. Killing processes or posting STOP
+messages leaves the execution queue eligible; use the durable stop tool.
+Resuming requires the operator to explicitly reopen and enable the intended
+job and workers and to replace any cancelled coordination requests.
+
 If it is not on the board, the team does not know it. Do not leave plans, status, findings or
 open questions only in chat, agent memory, scratch files or a separate notes folder. Write them
 here, and link to the board from anywhere else. When research or building produces something the

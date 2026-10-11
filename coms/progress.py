@@ -16,6 +16,9 @@ class Recorder:
         self.last_flush = 0
         self.event_time = api.now()
         conn = db.connect()
+        from . import team
+        if ticket_id is not None and team.is_stopped(conn, ticket_id):
+            self.state, self.phase, self.summary = 'cancelled', 'cancelled', 'Team stopped; work is on hold'
         conn.execute('INSERT OR REPLACE INTO agent_runtime(key,agent_slug,ticket_id,run_id,backend,state,phase,summary,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
                      (key, agent_slug, ticket_id, run_id, backend, self.state, self.phase, self.summary, self.event_time, self.event_time))
         api.log_activity(conn, self.actor, 'runner.start', self.ref, self.summary)
@@ -34,7 +37,7 @@ class Recorder:
             else:
                 conn.execute('UPDATE agent_messages SET body=body||?,updated_at=? WHERE id=?', (self.buffer, self.event_time, self.message_row))
             self.buffer = ''
-        conn.execute('UPDATE agent_runtime SET state=?,phase=?,summary=?,preview=?,response_chars=?,thinking_updates=?,tool_calls=?,updated_at=? WHERE key=?',
+        conn.execute("UPDATE agent_runtime SET state=?,phase=?,summary=?,preview=?,response_chars=?,thinking_updates=?,tool_calls=?,updated_at=? WHERE key=? AND state!='cancelled'",
                      (self.state, self.phase, self.summary, self.preview[-2000:], self.response_chars, self.thinking_updates, self.tool_calls, self.event_time, self.key))
         api.touch_agent(conn, self.actor)
         conn.commit()
@@ -88,6 +91,10 @@ class Recorder:
             self.flush()
 
     def finish(self, state='completed', summary='Agent finished'):
+        row = db.connect().execute('SELECT state FROM agent_runtime WHERE key=?', (self.key,)).fetchone()
+        if row and row['state'] == 'cancelled':
+            self.state = 'cancelled'
+            return
         self.state = state
         self.set(state, summary)
         conn = db.connect()
@@ -174,7 +181,7 @@ def activity(conn):
     active_tickets = set()
     for row in runtime:
         tid = row['ticket_id']
-        if tid not in tickets or tickets[tid]['status'] in ('done', 'wontfix'): continue
+        if tid not in tickets or tickets[tid]['status'] in ('done', 'wontfix') or (tickets[tid]['status']=='blocked' and not tickets[tid]['ready_for_execution']): continue
         if row['state'] in ('running', 'waiting'):
             count(tid, 'active_count' if row['state'] == 'running' else 'waiting_count')
             active_tickets.add(tid)
