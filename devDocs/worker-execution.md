@@ -20,6 +20,27 @@ replaces the collaboration evidence records made with `source_fetch`.
 Shared board procedures load through MCP `skill_get`, not the backend's native
 skill catalog. Failed tool arguments must be corrected or reported as blockers.
 
+### OpenCode local model metadata
+
+Before starting an OpenCode ACP session, `coms/runner.py` reads the configured
+OpenAI-compatible `/v1/models` catalog. The server's advertised `id` is the
+provider model key and the display name is only presentation. For each entry,
+the runner registers a valid live context limit (`meta.n_ctx`, or a supported
+context-length field) in OpenCode's `limit.context`. For llama.cpp entries where
+the model catalog does not include a live context, it reads
+`/props?model=<id>` and uses `default_generation_settings.n_ctx`. It never uses
+`meta.n_ctx_train` as the active context because that is the model's training
+limit, not necessarily the server's configured window.
+
+The live catalog is authoritative: stale configured model IDs do not get added
+alongside IDs the server actually advertises. The model ID override is used
+when the API cannot provide a catalog; in that case Swarm Agent leaves context
+unset rather than guessing from training metadata. Known contexts are written
+to OpenCode with an output cap of 32,000 tokens, reduced to the full context if
+the context is smaller. A stale saved OpenCode selection falls back to the
+configured live catalog default; other ACP backends keep their normal
+selection validation.
+
 Availability is distinct from model behavior: this configuration supplies the
 tools but cannot guarantee correct calls, useful progress or job completion.
 External services and local inference can still fail. Existing per-turn limits
@@ -68,7 +89,8 @@ agents from reading. Ticket timestamps did not demonstrate useful delivery.
 ## Implementation and verification
 
 `coms/runner.py` owns native-tool configuration, turn prompts, workspace selection
-and deadlines. `coms/team.py` owns delegation, compact room indexes and file
+and deadlines, including OpenCode's exact local model IDs and runtime context
+limits. `coms/team.py` owns delegation, compact room indexes and file
 source recording. `coms/mcp.py` exposes the new source and pagination contracts.
 `tests/test_worker_execution.py` covers enabled tools, delegation, isolated file
 evidence, workspace boundaries, exact-revision review, large room/message
@@ -93,3 +115,9 @@ reliability for the earlier 12-worker audit, which remains on hold.
 Validation on 11 October 2026: 49 focused checks passed with one platform skip.
 The full suite ran 243 checks: 237 passed, two skipped and the same four existing
 thinking-transcript cases failed. Those failures reproduced before this change.
+
+OpenCode model-metadata validation on 11 October 2026: 23 focused worker tests
+ran with one platform skip. A later privacy and regression cleanup kept ACP
+thought chunks out of public transcripts and corrected browser checks to match
+the live UI and SSE fallback. The latest full suite passes all 253 Python tests
+(two platform skips) and all 31 browser tests.

@@ -39,24 +39,12 @@ def message_dict(row):
 
 
 def conversation_messages(conn, sid):
-    """Expose older thought chunks that were stored as diagnostic events."""
+    """Return public transcript entries, keeping ACP thought chunks private."""
     result = []
-    rows = conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND "
-                        "(kind!='log' OR body LIKE '%\"agent_thought_chunk\"%') ORDER BY id", (sid,))
+    rows = conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? "
+                        "AND kind NOT IN ('log','thinking') ORDER BY id", (sid,))
     for row in rows:
         entry = message_dict(row)
-        if entry['kind'] == 'log':
-            try: event = json.loads(entry['body'])
-            except (TypeError, ValueError): continue
-            if not isinstance(event, dict) or event.get('sessionUpdate') != 'agent_thought_chunk': continue
-            content = event.get('content')
-            if not isinstance(content, dict) or content.get('type') != 'text' or not isinstance(content.get('text'), str): continue
-            entry.update(kind='thinking', role='assistant', body=content['text'], data={'legacy': True})
-            if result and result[-1]['kind'] == 'thinking' and result[-1]['data'].get('legacy') and result[-1]['turn_id'] == entry['turn_id']:
-                result[-1]['body'] += entry['body']
-                result[-1]['version'] += entry['version']
-                result[-1]['updated_at'] = entry['updated_at']
-                continue
         result.append(entry)
     return result
 
@@ -168,8 +156,10 @@ class Transcript:
             if self.finished: return
             with db.connect() as conn:
                 kind = event.get('sessionUpdate')
-                if kind in ('agent_message_chunk', 'agent_thought_chunk'):
-                    message_kind = 'thinking' if kind == 'agent_thought_chunk' else 'text'
+                if kind == 'agent_thought_chunk':
+                    self._log(conn,event)
+                elif kind == 'agent_message_chunk':
+                    message_kind = 'text'
                     content = event.get('content')
                     if not isinstance(content,dict): return
                     body = content.get('text') if content.get('type') == 'text' else None

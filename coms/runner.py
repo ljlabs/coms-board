@@ -11,6 +11,7 @@ from .orchestrator_transcript import Transcript, begin_turn, conversation_messag
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
 OPENCODE_LOCAL_PROVIDER_ID = 'coms-local'
+DEFAULT_OPENCODE_OUTPUT_TOKENS = 32000
 OPENCODE_REQUIRED_PERMISSIONS = {
     name: 'allow' for name in ('read', 'grep', 'glob', 'bash', 'edit', 'webfetch', 'websearch')
 }
@@ -82,25 +83,105 @@ def normalize_opencode_api_base_url(value):
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, '', ''))
 
 
-def _opencode_model_ids(base_url, api_key):
-    request = urllib.request.Request(base_url.rstrip('/') + '/models', headers={'Accept': 'application/json'})
+def _opencode_api_json(url, api_key):
+    request = urllib.request.Request(url, headers={'Accept': 'application/json'})
     if api_key:
         request.add_header('Authorization', 'Bearer ' + api_key)
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
-            payload = json.loads(response.read().decode('utf-8'))
+            return json.loads(response.read().decode('utf-8'))
     except (OSError, TimeoutError, ValueError, urllib.error.URLError):
-        return []
+        return None
+
+
+def _positive_token_limit(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        limit = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return limit if limit > 0 else None
+
+
+def _opencode_runtime_context(entry):
+    """Read a live context limit, never the model's training-only context."""
+    meta = entry.get('meta') if isinstance(entry, dict) else None
+    for source in (meta, entry):
+        if not isinstance(source, dict):
+            continue
+        for key in ('n_ctx', 'context_length', 'context_window', 'max_context_length'):
+            limit = _positive_token_limit(source.get(key))
+            if limit is not None:
+                return limit
+    return None
+
+
+def _opencode_model_catalog(payload):
     entries = payload.get('data', payload.get('models', [])) if isinstance(payload, dict) else []
     models = []
     for entry in entries if isinstance(entries, list) else []:
         if isinstance(entry, dict):
             model_id = entry.get('id') or entry.get('name')
+            display_name = entry.get('name')
+            meta = entry.get('meta')
+            owned_by = str(entry.get('owned_by', '')).lower()
+            is_llamacpp = 'llama' in owned_by or (isinstance(meta, dict) and ('n_ctx' in meta or 'n_ctx_train' in meta))
+            context = _opencode_runtime_context(entry)
         else:
             model_id = entry if isinstance(entry, str) else ''
-        if model_id and model_id not in models:
-            models.append(str(model_id))
+            display_name = ''
+            is_llamacpp = False
+            context = None
+        if not model_id:
+            continue
+        model_id = str(model_id).strip()
+        if not model_id:
+            continue
+        record = {
+            'id': model_id,
+            'name': str(display_name).strip() if isinstance(display_name, str) and display_name.strip() else model_id,
+            'context': context,
+            '_llamacpp': is_llamacpp,
+        }
+        existing = next((model for model in models if model['id'] == model_id), None)
+        if existing is None:
+            models.append(record)
+        else:
+            if existing['context'] is None and context is not None:
+                existing['context'] = context
+            if existing['name'] == existing['id'] and record['name'] != record['id']:
+                existing['name'] = record['name']
+            existing['_llamacpp'] = existing['_llamacpp'] or is_llamacpp
     return models
+
+
+def _opencode_props_context(base_url, api_key, model_id):
+    """Fallback to llama.cpp's live properties when /v1/models lacks n_ctx."""
+    parts = urllib.parse.urlsplit(base_url.rstrip('/'))
+    path = parts.path[:-3] if parts.path.endswith('/v1') else parts.path
+    props_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, path.rstrip('/') + '/props', '', ''))
+    props_url += '?' + urllib.parse.urlencode({'model': model_id})
+    payload = _opencode_api_json(props_url, api_key)
+    if not isinstance(payload, dict):
+        return None
+    settings = payload.get('default_generation_settings')
+    if isinstance(settings, dict):
+        context = _positive_token_limit(settings.get('n_ctx'))
+        if context is not None:
+            return context
+    return _positive_token_limit(payload.get('n_ctx'))
+
+
+def _opencode_models(base_url, api_key):
+    payload = _opencode_api_json(base_url.rstrip('/') + '/models', api_key)
+    models = _opencode_model_catalog(payload)
+    for model in models:
+        if model['context'] is None and model['_llamacpp']:
+            model['context'] = _opencode_props_context(base_url, api_key, model['id'])
+    return [{key: value for key, value in model.items() if not key.startswith('_')} for model in models]
 
 
 def backend_environment(name, settings, values=None):
@@ -109,17 +190,22 @@ def backend_environment(name, settings, values=None):
         return env
     base_url = normalize_opencode_api_base_url(settings.get('opencode_api_base_url', DEFAULT_OPENCODE_API_BASE_URL))
     api_key = settings.get('opencode_api_key', '')
-    model_ids = _opencode_model_ids(base_url, api_key)
+    discovered_models = _opencode_models(base_url, api_key)
     model_hint = str(settings.get('opencode_api_model', '')).strip()
     selected = str(settings.get('model_opencode', '')).strip()
     prefix = OPENCODE_LOCAL_PROVIDER_ID + '/'
     if model_hint.startswith(prefix): model_hint = model_hint[len(prefix):]
     if selected.startswith(prefix): selected = selected[len(prefix):]
     elif '/' in selected: selected = ''
-    if model_hint and model_hint not in model_ids:
-        model_ids.insert(0, model_hint)
-    if selected and selected not in model_ids:
-        model_ids.insert(0, selected)
+    if discovered_models:
+        models = discovered_models
+    else:
+        # Keep manually configured IDs as a startup/offline fallback only. A
+        # live API catalog is authoritative for both model IDs and context.
+        models = []
+        for model_id in (selected, model_hint):
+            if model_id and not any(model['id'] == model_id for model in models):
+                models.append({'id': model_id, 'name': model_id, 'context': None})
     config = {
         '$schema': 'https://opencode.ai/config.json',
         # Inline configuration overrides inherited project/global defaults.
@@ -136,11 +222,23 @@ def backend_environment(name, settings, values=None):
                     'baseURL': base_url,
                     'apiKey': '{env:COMS_OPENCODE_API_KEY}',
                 },
-                'models': {model_id: {'name': model_id} for model_id in model_ids},
+                'models': {
+                    model['id']: {
+                        'name': model['name'],
+                        **({'limit': {
+                            'context': model['context'],
+                            'output': min(DEFAULT_OPENCODE_OUTPUT_TOKENS, model['context']),
+                        }} if model['context'] is not None else {}),
+                    }
+                    for model in models
+                },
             },
         },
     }
-    default_model = selected if selected in model_ids else (model_ids[0] if model_ids else '')
+    model_ids = [model['id'] for model in models]
+    default_model = next((model_id for model_id in (selected, model_hint) if model_id in model_ids), '')
+    if not default_model and model_ids:
+        default_model = model_ids[0]
     if default_model:
         config['model'] = OPENCODE_LOCAL_PROVIDER_ID + '/' + default_model
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, separators=(',', ':'))
@@ -349,6 +447,11 @@ class Runner:
         options=next((o for o in conn.config_options if o.get('id')=='model'),{})
         allowed={x.get('value') for x in options.get('options') or []}
         if chosen not in allowed:
+            if backend == 'opencode' and conn.current_model() in allowed:
+                # The live /models catalog can advertise a new ID that differs
+                # from a saved hint. backend_environment has already selected
+                # the API's real ID as OpenCode's default in that case.
+                return
             raise RuntimeError(f'Selected model {chosen!r} is not offered by the {backend} ACP session; refresh models in Runner settings and choose an available model.')
         conn.set_config_option(options.get('id','model'),chosen)
     def discover_models(self,backend):

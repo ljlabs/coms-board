@@ -47,7 +47,7 @@ class WorkerExecutionTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_local_provider_gets_search_and_required_native_tools_despite_legacy_flags(self):
-        with patch('coms.runner._opencode_model_ids', return_value=['model']):
+        with patch('coms.runner._opencode_models', return_value=[{'id': 'model', 'name': 'model', 'context': None}]):
             env = backend_environment('opencode', {}, {'COMS_BOARD_ONLY': '1', 'OPENCODE_ENABLE_EXA': '0'})
         config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
         self.assertEqual(env['OPENCODE_ENABLE_EXA'], '1')
@@ -60,9 +60,99 @@ class WorkerExecutionTests(unittest.TestCase):
         self.assertNotIn('doom_loop', config['permission'])
         self.assertNotIn('tools', config)
 
+    def test_local_provider_registers_advertised_model_id_and_runtime_context(self):
+        catalog = [{'id': 'models/live-model.gguf', 'name': 'live-model.gguf', 'context': 76800}]
+        settings = {
+            'opencode_api_base_url': 'http://localhost:11434/v1',
+            'opencode_api_model': 'configured-model.gguf',
+            'model_opencode': 'coms-local/configured-model.gguf',
+        }
+        with patch('coms.runner._opencode_models', return_value=catalog):
+            env = backend_environment('opencode', settings)
+
+        config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
+        models = config['provider']['coms-local']['models']
+        self.assertEqual(list(models), ['models/live-model.gguf'])
+        self.assertEqual(models['models/live-model.gguf']['limit']['context'], 76800)
+        self.assertEqual(config['model'], 'coms-local/models/live-model.gguf')
+
+    def test_local_provider_selects_matching_advertised_id_and_keeps_each_context(self):
+        catalog = [
+            {'id': 'first-model', 'name': 'First model', 'context': 32768},
+            {'id': 'second-model', 'name': 'Second model', 'context': 76800},
+        ]
+        settings = {'model_opencode': 'coms-local/second-model'}
+        with patch('coms.runner._opencode_models', return_value=catalog):
+            env = backend_environment('opencode', settings)
+
+        config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
+        models = config['provider']['coms-local']['models']
+        self.assertEqual(config['model'], 'coms-local/second-model')
+        self.assertEqual(models['first-model']['limit']['context'], 32768)
+        self.assertEqual(models['second-model']['limit']['context'], 76800)
+
+    def test_local_provider_uses_configured_model_only_when_api_discovery_is_empty(self):
+        settings = {'opencode_api_model': 'fallback-model.gguf', 'model_opencode': 'coms-local/fallback-model.gguf'}
+        with patch('coms.runner._opencode_models', return_value=[]):
+            env = backend_environment('opencode', settings)
+
+        config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
+        self.assertEqual(config['model'], 'coms-local/fallback-model.gguf')
+        self.assertIn('fallback-model.gguf', config['provider']['coms-local']['models'])
+
+    def test_llamacpp_context_uses_runtime_metadata_not_training_context(self):
+        payload = {'data': [{
+            'id': 'actual-id', 'owned_by': 'llamacpp',
+            'meta': {'n_ctx': 76800, 'n_ctx_train': 131072},
+        }]}
+        with patch('coms.runner._opencode_api_json', return_value=payload):
+            from coms.runner import _opencode_models
+            models = _opencode_models('http://localhost:11434/v1', '')
+
+        self.assertEqual(models, [{'id': 'actual-id', 'name': 'actual-id', 'context': 76800}])
+
+    def test_llamacpp_props_supplies_active_context_when_models_only_has_training_limit(self):
+        payload = {'data': [{
+            'id': 'actual-id', 'owned_by': 'llamacpp', 'meta': {'n_ctx_train': 131072},
+        }]}
+        props = {'default_generation_settings': {'n_ctx': 76800}}
+        with patch('coms.runner._opencode_api_json', side_effect=[payload, props]) as get_json:
+            from coms.runner import _opencode_models
+            models = _opencode_models('http://localhost:11434/v1', '')
+
+        self.assertEqual(models[0]['context'], 76800)
+        self.assertTrue(get_json.call_args_list[1].args[0].endswith('/props?model=actual-id'))
+
+    def test_training_context_is_not_used_when_runtime_context_is_unavailable(self):
+        payload = {'data': [{
+            'id': 'actual-id', 'owned_by': 'llamacpp', 'meta': {'n_ctx_train': 131072},
+        }]}
+        with patch('coms.runner._opencode_api_json', side_effect=[payload, {'default_generation_settings': {'n_ctx': 0}}]):
+            from coms.runner import _opencode_models
+            models = _opencode_models('http://localhost:11434/v1', '')
+
+        self.assertIsNone(models[0]['context'])
+
+    def test_stale_opencode_model_selection_uses_the_live_provider_default(self):
+        connection = Mock()
+        connection.config_options = [{'id': 'model', 'options': [{'value': 'coms-local/live-id'}]}]
+        connection.current_model.return_value = 'coms-local/live-id'
+
+        Runner._apply_model(connection, 'opencode', {'model_opencode': 'coms-local/stale-id'})
+
+        connection.set_config_option.assert_not_called()
+
+    def test_stale_non_opencode_model_selection_still_errors(self):
+        connection = Mock()
+        connection.config_options = [{'id': 'model', 'options': [{'value': 'codex/live-id'}]}]
+        connection.current_model.return_value = 'codex/live-id'
+
+        with self.assertRaisesRegex(RuntimeError, 'not offered by the codex ACP session'):
+            Runner._apply_model(connection, 'codex', {'model_codex': 'codex/stale-id'})
+
     def test_all_connection_roles_keep_native_tool_configuration(self):
         for mode in ({}, {'dispatch_only': True}, {'monitor_only': True}, {'collaboration_message_id': 1}):
-            with self.subTest(mode=mode), patch('coms.runner.AcpConnection', return_value=Mock(session_id='fake')) as backend, patch('coms.runner.threading.Timer'), patch('coms.runner._opencode_model_ids', return_value=['model']), patch.object(self.runner, '_apply_model'):
+            with self.subTest(mode=mode), patch('coms.runner.AcpConnection', return_value=Mock(session_id='fake')) as backend, patch('coms.runner.threading.Timer'), patch('coms.runner._opencode_models', return_value=[{'id': 'model', 'name': 'model', 'context': None}]), patch.object(self.runner, '_apply_model'):
                 self.runner._conn(self.worker['id'], 'opencode', str(self.workspace), **mode)
                 env = backend.call_args.kwargs['env']
                 self.assertNotIn('COMS_BOARD_ONLY', env)
@@ -72,7 +162,7 @@ class WorkerExecutionTests(unittest.TestCase):
     def test_orchestrator_gets_the_same_required_tool_environment(self):
         settings = self.runner.settings()
         settings['opencode_command'] = 'unused-acp-command'
-        with patch('coms.runner.AcpConnection', return_value=Mock(session_id='fake')) as backend, patch('coms.runner._opencode_model_ids', return_value=['model']), patch.object(self.runner, '_apply_model'):
+        with patch('coms.runner.AcpConnection', return_value=Mock(session_id='fake')) as backend, patch('coms.runner._opencode_models', return_value=[{'id': 'model', 'name': 'model', 'context': None}]), patch.object(self.runner, '_apply_model'):
             self.runner._orchestrator_connection('opencode', str(self.workspace), settings)
         env = backend.call_args.kwargs['env']
         self.assertEqual(env['OPENCODE_ENABLE_EXA'], '1')
@@ -80,7 +170,7 @@ class WorkerExecutionTests(unittest.TestCase):
 
     def test_other_backends_do_not_receive_opencode_tool_overrides(self):
         for backend in ('codex', 'claude'):
-            with self.subTest(backend=backend), patch('coms.runner._opencode_model_ids') as discovery:
+            with self.subTest(backend=backend), patch('coms.runner._opencode_models') as discovery:
                 self.assertEqual(backend_environment(backend, {}, {'COMS_AGENT': 'Tess'}), {'COMS_AGENT': 'Tess'})
                 discovery.assert_not_called()
 

@@ -90,10 +90,12 @@ after(async () => {
 });
 
 async function pageFor(route, run, options = {}) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, ...options });
+  const { beforeGoto, ...pageOptions } = options;
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, ...pageOptions });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
+    if (beforeGoto) await beforeGoto(page);
     await page.goto(base + '/#' + route);
     await page.waitForFunction(() => !document.querySelector('#app').hasAttribute('aria-busy'));
     await run(page);
@@ -471,7 +473,7 @@ test('streaming chat preserves reading position and existing message nodes', asy
     await page.waitForTimeout(1800);
     const gap = await page.locator('#chat-messages').evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
     assert.ok(gap < 2, 'Chat follows new output when at bottom');
-  });
+  }, { beforeGoto:page=>page.route('**/api/runner/sessions/browser-chat/events',route=>route.abort()) });
 });
 
 test('same-route chat refresh disposes its old poller', async () => {
@@ -480,7 +482,7 @@ test('same-route chat refresh disposes its old poller', async () => {
       await page.locator('#new-project').click();
       await page.locator('#project-name').fill('Regression ' + i);
       await page.evaluate(() => document.querySelector('#save-project').click());
-      await page.waitForFunction(() => !document.querySelector('#app').hasAttribute('aria-busy') && document.querySelector('#project-create').classList.contains('hidden'));
+      await page.waitForFunction(() => !document.querySelector('#app').hasAttribute('aria-busy') && !document.querySelector('#project-create').open);
     }
     let polls = 0;
     page.on('request', req => { if (req.url().endsWith('/api/runner/sessions/browser-chat')) polls++; });
@@ -494,7 +496,7 @@ test('same-route chat refresh disposes its old poller', async () => {
   });
 });
 
-test('completed tools use compact rows with keyboard expansion and a copyable shell panel', async () => {
+test('completed tools use compact rows with keyboard expansion and copyable output', async () => {
   await pageFor('/orchestrator?session=browser-tools', async page => {
     const tool=page.locator('.chat-tool'),call=tool.locator('.chat-tool-call');
     assert.equal(await call.evaluate(el=>el.open),false);
@@ -504,17 +506,17 @@ test('completed tools use compact rows with keyboard expansion and a copyable sh
     await summary.focus();
     await page.keyboard.press('Enter');
     assert.equal(await call.evaluate(el=>el.open),true);
-    assert.equal(await tool.locator('.chat-tool-panel-label').textContent(),'Shell');
-    assert.equal(await tool.locator('.chat-tool-command').textContent(),'$ ls');
-    assert.equal(await tool.locator('.chat-tool-output pre').textContent(),'src\n');
+    assert.match(await tool.locator('.chat-tool-context').textContent(),/^Shell/);
+    assert.equal(await tool.locator('.chat-tool-payload > pre').textContent(),'src\n');
     assert.equal(await tool.locator('.chat-tool-status').textContent(),'Success');
-    assert.equal(await tool.locator('.chat-tool-input').evaluate(el=>el.open),false);
-    assert.ok(!(await tool.innerText()).includes('Workspace:'),'Metadata is secondary');
+    assert.match(await tool.locator('.chat-tool-workspace').textContent(),/Workspace:/);
     await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin:base});
-    await tool.getByRole('button',{name:'Copy command and output',exact:true}).click();
-    assert.equal((await page.evaluate(()=>navigator.clipboard.readText())).replace(/\r\n/g,'\n'),'$ ls\nsrc\n');
-    await tool.locator('.chat-tool-input > summary').click();
-    assert.match(await tool.locator('.chat-tool-workspace').innerText(),/Workspace:/);
+    await tool.getByRole('button',{name:'Copy tool data',exact:true}).click();
+    assert.equal((await page.evaluate(()=>navigator.clipboard.readText())).replace(/\r\n/g,'\n'),'src\n');
+    await tool.locator('[data-tool-view="input"]').click();
+    const input=await tool.locator('.chat-tool-fields').innerText();
+    assert.match(input,/command[\s\S]*ls/);
+    assert.match(input,/workdir[\s\S]*workspace/);
     await summary.focus();await page.keyboard.press('Enter');
     assert.equal(await call.evaluate(el=>el.open),false);
   });
@@ -544,10 +546,10 @@ test('tool rows remain in order and status-only updates preserve node identity a
     assert.match(await tool.innerText(), /Exit code: 1/);
     assert.equal(await page.locator('.chat-error').count(), 1);
     assert.match(await page.locator('#chat-workspace').innerText(), /workspace/);
-  });
+  }, { beforeGoto:page=>page.route('**/api/runner/sessions/browser-tools/events',route=>route.abort()) });
 });
 
-test('running tools start expanded and keep a manual collapse during polling', async () => {
+test('running tools stay compact and preserve manual expansion during polling', async () => {
   await pageFor('/orchestrator?session=browser-tools', async page => {
     await page.route('**/api/runner/sessions/browser-tools',async route=>{
       const response=await route.fetch(),detail=await response.json();
@@ -559,13 +561,14 @@ test('running tools start expanded and keep a manual collapse during polling', a
     await page.reload();
     const call=page.locator('.chat-tool-call');
     await call.waitFor();
-    assert.equal(await call.evaluate(el=>el.open),true);
-    assert.equal(await page.locator('.chat-tool-title').textContent(),'Running ls');
-    assert.equal(await page.locator('.chat-tool-output pre').textContent(),'Waiting for output…');
-    await call.locator(':scope > summary').click();
-    await page.waitForTimeout(1600);
     assert.equal(await call.evaluate(el=>el.open),false);
-  });
+    assert.equal(await page.locator('.chat-tool-title').textContent(),'Running ls');
+    assert.equal(await page.locator('.chat-tool-payload > pre').textContent(),'Waiting for output…');
+    await call.locator(':scope > summary').click();
+    assert.equal(await call.evaluate(el=>el.open),true);
+    await page.waitForTimeout(1600);
+    assert.equal(await call.evaluate(el=>el.open),true);
+  }, { beforeGoto:page=>page.route('**/api/runner/sessions/browser-tools/events',route=>route.abort()) });
 });
 
 test('real ACP send creates separate assistant and tool bubbles and survives reload', async () => {
@@ -599,30 +602,30 @@ test('empty and large tool output stays readable on mobile and selection survive
       tool.version+=mode==='empty'?1:mode==='large'?2:3;
       await route.fulfill({response,json:detail});
     });
-    const output=page.locator('.chat-tool-output');
+    const output=page.locator('.chat-tool-payload > pre');
     await page.locator('.chat-tool-call').evaluate(el=>{el.open=true;});
-    await page.waitForFunction(()=>document.querySelector('.chat-tool-output pre')?.textContent==='No output.');
+    await page.waitForFunction(()=>document.querySelector('.chat-tool-payload > pre')?.textContent==='No output.');
     mode='large';
-    await page.waitForFunction(()=>!document.querySelector('.chat-tool-output button').hidden);
-    await output.locator('button').click();
-    assert.equal((await output.locator('pre').textContent()).length,28000);
+    await page.waitForFunction(()=>!document.querySelector('.chat-tool-more').hidden);
+    await page.locator('.chat-tool-more').click();
+    assert.equal((await output.textContent()).length,28000);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-    await output.locator('pre').evaluate(el=>{const selection=getSelection(),range=document.createRange();range.selectNodeContents(el);selection.removeAllRanges();selection.addRange(range);});
+    await output.evaluate(el=>{const selection=getSelection(),range=document.createRange();range.selectNodeContents(el);selection.removeAllRanges();selection.addRange(range);});
     mode='changed';
     await page.waitForTimeout(1800);
-    assert.equal((await output.locator('pre').textContent()).length,28000);
+    assert.equal((await output.textContent()).length,28000);
     await page.evaluate(()=>getSelection().removeAllRanges());
-    await page.waitForFunction(()=>document.querySelector('.chat-tool-output pre')?.textContent==='Changed output');
-  },{viewport:{width:390,height:844}});
+    await page.waitForFunction(()=>document.querySelector('.chat-tool-payload > pre')?.textContent==='Changed output');
+  },{viewport:{width:390,height:844},beforeGoto:page=>page.route('**/api/runner/sessions/browser-tools/events',route=>route.abort())});
 });
 
 test('recorded Codex formatted_output renders as command output without a missing-terminal warning', async () => {
   await pageFor('/orchestrator?session=browser-codex', async page => {
-    const output=page.locator('.chat-tool-output');
+    const output=page.locator('.chat-tool-payload > pre');
     await page.locator('.chat-tool-call').evaluate(el=>{el.open=true;});
-    assert.match(await output.locator('pre').first().textContent(),/README\.txt/);
-    assert.ok(!(await output.innerText()).includes('formatted_output'));
-    assert.ok(!(await output.innerText()).includes('output unavailable'));
+    assert.match(await output.textContent(),/README\.txt/);
+    assert.ok(!(await page.locator('.chat-tool-panel').innerText()).includes('formatted_output'));
+    assert.ok(!(await page.locator('.chat-tool-panel').innerText()).includes('output unavailable'));
     assert.equal(await page.locator('.chat-message.assistant').count(),2);
   });
 });

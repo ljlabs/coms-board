@@ -108,14 +108,10 @@ the existing content version. New entries respect the 1 MiB file, 8 MiB skill,
 - Headless browser tests exercise file creation, rename, folder and root
   drops, persistence after reload, and unsaved draft retention. They use the
   real HTTP routes and never open a visible web preview.
-- Current Windows checks: the focused Python suite ran 47 tests successfully
-  (one platform skip), and all four Skills browser tests passed. The full Python
-  suite ran 199 tests with four existing transcript failures and two skips;
-  those four failures reproduce on the unchanged commit. The full browser suite
-  ran 24 tests with seven chat/tool failures, outside the Skills paths. The
-  baseline comparison reproduced five before it was stopped at the operator's
-  request to leave further UI testing to them. Detailed results are recorded
-  in the commit description.
+- Earlier Windows checks passed the focused Skills Python and browser cases but
+  recorded failures in unrelated transcript and chat checks. The latest full
+  checkout run passes all 253 Python tests (two platform skips) and all 31
+  browser tests, including the built-in skill read-only controls.
 
 ## Maintenance notes
 

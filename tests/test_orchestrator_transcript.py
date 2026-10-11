@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from tests import *  # noqa: F401,F403
 from coms import db
-from coms.orchestrator_transcript import Transcript, begin_turn, history_before, message_dict, recover_turns
+from coms.orchestrator_transcript import Transcript, begin_turn, conversation_messages, history_before, message_dict, recover_turns
 
 
 class TestTranscript(unittest.TestCase):
@@ -99,6 +99,13 @@ class TestTranscript(unittest.TestCase):
         self.transcript.apply({'sessionUpdate':'agent_message_chunk','content':None})
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM orchestrator_messages WHERE kind='log'").fetchone()[0], 3)
+        self.assertEqual([message['body'] for message in conversation_messages(self.conn,'chat')], ['List the workspace.'])
+        thought = self.conn.execute("SELECT body FROM orchestrator_messages WHERE kind='log' AND body LIKE '%agent_thought_chunk%'").fetchone()
+        self.assertIn('private', thought['body'])
+
+    def test_legacy_thinking_entries_are_not_exposed_as_chat_messages(self):
+        self.conn.execute("INSERT INTO orchestrator_messages(session_id,turn_id,role,kind,body,created_at,updated_at) VALUES('chat',?,'assistant','thinking','legacy private thought','now','now')",(self.turn['id'],))
+        self.assertEqual([message['kind'] for message in conversation_messages(self.conn,'chat')], ['text'])
 
     def test_permission_metadata_merges_with_the_reported_tool(self):
         self.transcript.permission({'toolCall':{'toolCallId':'ls','title':'Run ls','rawInput':{'command':'ls'}}}, 'allow-once')

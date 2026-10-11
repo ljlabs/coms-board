@@ -60,6 +60,12 @@ The container connects to llama.cpp at
 Windows host. Keep llama.cpp listening on the host as configured; do not
 publish the Swarm Agent port on a LAN interface. For another local model or
 server port, set `COMS_LLAMACPP_MODEL` and `COMS_LLAMACPP_BASE_URL` in `.env`.
+At session startup, Swarm Agent reads llama.cpp's advertised model ID and live
+context window and passes both into OpenCode's provider configuration. When
+llama.cpp omits the live context from `/v1/models`, the runner reads it from
+`/props`; it does not confuse the model's training context with the active
+server window. The configured model ID is a fallback when the API cannot list
+models.
 To watch agent activity or logs, use the team room in the browser or run
 `docker compose logs -f board` from PowerShell.
 
@@ -330,8 +336,9 @@ depends on the research and peer critique.
 Live progress refreshes every two seconds on Agents, tickets, Runner, Debug,
 and Activity. It shows the registered agent, current phase, latest response,
 tool count, and time since the last model event. Thinking updates provide a
-heartbeat without exposing private reasoning. Debug returns the newest stored
-messages and coalesces streamed text. Automatic reviews have a three-minute
+heartbeat without exposing private reasoning. ACP thought chunks are kept in
+opt-in Debug logs and excluded from chat messages and replay. Debug returns the
+newest stored messages and coalesces streamed text. Automatic reviews have a three-minute
 total limit; a timeout stays visible and leaves the ticket in review.
 
 Orchestrator responses appear as an ordered conversation: assistant commentary,
@@ -353,10 +360,10 @@ their original message boundaries and tool details cannot be reconstructed.
 Assistant responses and tool updates stream through a same-origin server-sent
 event feed while the backend responds. Reconnecting restores the canonical
 stored conversation; polling remains available if streaming is disconnected.
-Backend thinking traces appear under **Thinking**, collapsed initially, and stay
-separate from the assistant's answer. Expand a section to read its trace while
-it arrives. Traces are shown only when the selected backend supplies them;
-older thought chunks stored in diagnostic logs also appear in these sections.
+ACP thought chunks are private diagnostics and are not rendered in chat or
+included in replay. They can be inspected only through the opt-in **Debug
+logs** response; backends may still report non-content thinking progress for
+the activity indicator.
 
 The supplied `animations/chat-loading-neobrutalist.json` plays at the bottom right above the
 composer while the current chat is sending, thinking, or responding. The player
@@ -415,6 +422,11 @@ model inference can remain local. Search needs outbound network access and no
 separate API key. Tools being available does not guarantee the model uses them
 correctly or completes a complex job. See
 [worker tools and evidence](devDocs/worker-execution.md).
+
+For local OpenAI-compatible models, OpenCode receives the exact ID returned by
+`/v1/models` and the active context window reported by the API. This lets its
+context management use the server's configured limit (for example, a roughly
+75,000-token llama.cpp window) instead of an unrelated training-context value.
 
 Each ticket's **Agent runner chat** uses the orchestrator chat component to show
 Markdown replies, expandable tool calls, review decisions, and follow-up replies.

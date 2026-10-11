@@ -31,8 +31,10 @@ and diagnostics; later entries are excluded and the source is unchanged.
   Edited and forked chats clear ACP identities. Ticket edits close their old
   connection and clear saved session IDs, then run a follow-up without creating
   another execution. Fresh sessions receive all retained public conversation,
-  including tool results, without the former history length limits. Diagnostics
-  and private thinking are stored in forks but excluded from public replay.
+  including tool results, without the former history length limits. ACP thought
+  chunks are stored as opt-in diagnostic logs and excluded from transcript
+  responses and public replay. Legacy `thinking` rows are also suppressed from
+  public chat responses; forks retain the original stored rows.
 - HTTP: `PATCH /api/runner/sessions/<sid>/messages/<mid>` and
   `PATCH /api/tickets/<tid>/runner/messages/<mid>` accept `{body: string}` and
   return the normal accepted-response payload.
@@ -51,16 +53,11 @@ fork/sidebar behavior, failed saves, busy controls, and ticket-only editing.
 Interactive review is left to the user as requested; no browser tools are used.
 
 On 2026-10-11, all 16 new backend checks and four new browser checks passed.
-The isolated feature snapshot's full Python suite ran 215 checks: 209 passed,
-two skipped, and four older thinking-transcript assertions failed. Each failure
-also reproduced on unchanged HEAD. The full browser suite passed 20 of 28;
-the same eight older polling/tool-panel/skill-control failures reproduced on
-the unchanged 24-test baseline (16 passed). No new failure appeared. JavaScript
-syntax and Git whitespace checks passed. Concurrent activity-indicator changes
-in the shared checkout were excluded from this comparison and feature commit.
-After the concurrent change was committed, all eight selected shared-checkout
-chat regressions passed, including edit/fork, ticket follow-ups, Stop, send/reload,
-and mobile layout.
+The initial full-checkout runs exposed four transcript and nine browser
+regressions. The transcript now keeps ACP thoughts in opt-in logs, and browser
+checks follow the current SSE, dialog, and tool-panel contracts. Latest full
+verification passed: 253 Python tests with two platform skips, and all 31
+browser tests. JavaScript syntax and Git whitespace checks also pass.
 
 ## Maintenance notes
 

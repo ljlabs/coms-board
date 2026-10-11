@@ -52,6 +52,9 @@ persisted visibly and the slot is released.
   transcript assertions, and the broad browser run had seven failures in older
   polling/dialog/tool expectations. All eleven failures reproduced on unchanged
   HEAD `e20a8ca`. Tests use temporary databases and a fake ACP process.
+- The latest full checkout run passes all 253 Python tests (two platform skips)
+  and all 31 browser tests, including ticket polling, drafts, and shared chat
+  rendering.
 
 ## Maintenance notes
 

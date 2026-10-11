@@ -91,9 +91,11 @@ slot if children finish between scheduling and starting the monitor. Existing `a
 cycle handling, permissions, idempotence, HTTP/MCP access, run/delivery/review
 cancellation, startup and cleanup races, ancestor holds and restart persistence.
 The focused recovery/tool/activity run passed 52 checks with one platform skip.
-The full Python run exercised 241 tests: 235 passed, two were skipped, and four
-thinking-transcript assertions failed. All four reproduce on untouched HEAD
-`173d9d9`. There are no dashboard changes in this fix.
+An earlier full-suite snapshot had four thinking-transcript failures and nine
+browser failures. ACP thought chunks now stay in opt-in diagnostics, legacy
+thought rows are hidden from public chat responses, and browser coverage follows
+the current UI and SSE fallback behavior. The latest full checkout run passes
+all 253 Python tests (two platform skips) and all 31 browser tests.
 
 On 11 October 2026, the live audit job #10 and its twelve worker tickets were
 backed up and held. Its waiting runs and pending deliveries were cancelled.
@@ -104,13 +106,8 @@ and no other running jobs before deployment.
   transcript and worker preservation, timer scoping, EOF cleanup, model
   discovery, dead-connection recovery, stale/failed lead wakeups, full-capacity
   monitor scheduling, and scoped MCP tools.
-- The UTF-8 Python suite runs 172 tests with four existing thinking-transcript assertion
-  failures and one skip, reproduced on unchanged HEAD (152 tests).
-- Browser suite: 22 tests, 15 passed and 7 failed. The unchanged 21-test baseline
-  has the same seven polling/tool-rendering failures. Focused Stop, Send and
-  Heartbeat-stage browser checks pass (3/3).
-- JavaScript syntax and Git whitespace checks pass. Docker image builds
-  successfully. Applying the updated image requires a server restart.
+- JavaScript syntax and Git whitespace checks pass. The current test run used
+  isolated temporary databases; it did not change the running Docker service.
 
 ## Investigation evidence
 
