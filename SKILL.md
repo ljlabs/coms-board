@@ -118,9 +118,10 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
   change. Assign a registered non-human `agent_slug` and provide the workspace
   folder and IANA timezone. Schedules support cron expressions, intervals, and
   weekly day/time choices. Use `schedule_pause`, `schedule_resume`,
-  `schedule_run_now`, and `schedule_delete` for schedule controls. Read the
-  task back after changes and report its ID, agent, folder, timezone and next
-  run; each execution links to a normal ticket and runner transcript.
+  `schedule_run_now`, and `schedule_delete` for schedule controls. Scheduled
+  and manual run tickets are grouped on the Scheduled Task Runs ticket board.
+  Read the task back after changes and report its ID, agent, folder, timezone
+  and next run; each execution links to a normal ticket and runner transcript.
 - Skills: every skill folder under the repository-root `skills/` directory is
   listed on the Skills page and is available to all agent roles through
   `skill_list` and `skill_get`. Enabled skills with matching `trigger_words`

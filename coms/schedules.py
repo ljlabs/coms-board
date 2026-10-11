@@ -14,6 +14,8 @@ from .workspace import DEFAULT_WORKSPACE, workspace_path
 SCHEDULE_TYPES = ("cron", "interval", "weekly")
 INTERVALS = {"minutes": 60, "hours": 3600, "days": 86400}
 RUN_STATUSES = ("queued", "running", "waiting", "completed", "failed", "cancelled")
+SCHEDULE_BOARD_NAME = "Scheduled Task Runs"
+SCHEDULE_BOARD_SETTING = "scheduled_task_ticket_board_id"
 
 
 def _utc(value: datetime | None = None) -> datetime:
@@ -252,6 +254,38 @@ def _decode(row: sqlite3.Row | dict) -> dict:
     return task
 
 
+def _schedule_board_id(conn: sqlite3.Connection, actor: str) -> int:
+    """Return the stable board for scheduled execution tickets, creating it if needed."""
+    setting = conn.execute("SELECT value FROM runner_settings WHERE key=?",
+                           (SCHEDULE_BOARD_SETTING,)).fetchone()
+    board = None
+    if setting:
+        try:
+            board_id = int(setting[0])
+            if board_id > 0:
+                board = conn.execute("SELECT id FROM ticket_boards WHERE id=?", (board_id,)).fetchone()
+        except (TypeError, ValueError):
+            pass
+    if board is None:
+        board = conn.execute("SELECT id FROM ticket_boards WHERE name=?", (SCHEDULE_BOARD_NAME,)).fetchone()
+    if board is None:
+        ts = api.now()
+        created = conn.execute(
+            "INSERT OR IGNORE INTO ticket_boards(name,description,created_at,updated_at) VALUES(?,?,?,?)",
+            (SCHEDULE_BOARD_NAME, "Tickets for scheduled task executions, including manual runs.", ts, ts))
+        board = conn.execute("SELECT id FROM ticket_boards WHERE name=?", (SCHEDULE_BOARD_NAME,)).fetchone()
+        if not board:
+            raise RuntimeError("could not create the scheduled task ticket board")
+        if created.rowcount:
+            api.log_activity(conn, actor or "scheduler", "board.create", f"board:{board[0]}",
+                             f"created ticket board “{SCHEDULE_BOARD_NAME}”")
+    board_id = int(board[0])
+    if not setting or str(setting[0]) != str(board_id):
+        conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)",
+                     (SCHEDULE_BOARD_SETTING, str(board_id)))
+    return board_id
+
+
 def list_tasks(conn, *, include_deleted: bool = False) -> list[dict]:
     where = "" if include_deleted else "WHERE s.status!='deleted'"
     rows = conn.execute(f"""SELECT s.*,
@@ -278,6 +312,7 @@ def create_task(conn, data: dict, actor: str) -> dict:
     valid = _validate_task(conn, data)
     ts = api.now()
     next_at = _stamp(next_run(valid["schedule_type"], valid["schedule_config"], valid["timezone"]))
+    _schedule_board_id(conn, actor)
     cur = conn.execute("""INSERT INTO scheduled_tasks(name,prompt,schedule_type,schedule_config_json,timezone,
         agent_slug,workspace,status,next_run_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,'active',?,?,?)""",
@@ -340,12 +375,13 @@ def _new_ticket(conn, task: dict, actor: str, scheduled_for: str, *, manual: boo
     body = task["prompt"]
     if not body.strip():
         raise ValueError("scheduled task prompt is empty")
+    board_id = _schedule_board_id(conn, actor)
     ts = api.now()
     cur = conn.execute("""INSERT INTO tickets(title,body,type,status,priority,department,assignee,requester,
         tags,due_at,parent_id,board_id,ready_for_execution,agent_template_id,created_at,updated_at,
         recommended_workers,collaboration_required,workspace)
-        VALUES(?,?, 'task','open','p2','',?,?, 'scheduled',NULL,NULL,1,1,NULL,?,?,NULL,0,?)""",
-        (title, body, task["agent_slug"], actor or "scheduler", ts, ts, task["workspace"]))
+        VALUES(?,?, 'task','open','p2','',?,?, 'scheduled',NULL,NULL,?,1,NULL,?,?,NULL,0,?)""",
+        (title, body, task["agent_slug"], actor or "scheduler", board_id, ts, ts, task["workspace"]))
     ticket_id = cur.lastrowid
     ticket = api._one(conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)))
     api._index_ticket(conn, ticket)

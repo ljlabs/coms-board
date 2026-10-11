@@ -7,10 +7,15 @@ agent. Each task stores its timezone and existing workspace folder, and offers
 cron, interval, or weekly day/time recurrence. Pause, resume, run now, edit,
 delete, and execution history are available from the dashboard and agent tools.
 
-Every firing creates a ready task ticket assigned to the configured agent. The
-normal runner processes it, so ticket results, comments, and transcripts remain
-the durable execution record. Missed firings coalesce to one queued run after a
-server restart; the next recurrence is calculated from the current time.
+Every firing creates a ready task ticket assigned to the configured agent on
+the **Scheduled Task Runs** ticket board. Manual “Run now” executions use the
+same board. The board ID is stored in `runner_settings`, so later runs reuse it
+even if the board is renamed; if the board is deleted, the next run ticket
+creation recreates it. Existing run tickets stay on their current board. The
+normal runner processes each ticket, so results, comments, and transcripts
+remain the durable execution record. Missed firings coalesce to one queued run
+after a server restart; the next recurrence is calculated from the current
+time.
 
 ## Implementation path
 
@@ -19,7 +24,9 @@ server restart; the next recurrence is calculated from the current time.
   operations in `coms/schedules.py`; due dispatch and ticket execution in
   `coms/runner.py`.
 - Data or state changes: `scheduled_tasks` stores definitions and the next run;
-  `scheduled_task_runs` stores each firing and ticket link. `tickets.workspace`
+  `scheduled_task_runs` stores each firing and ticket link. The board ID is
+  persisted under the `scheduled_task_ticket_board_id` key in `runner_settings`.
+  `tickets.workspace`
   selects a task-specific agent directory; an empty value preserves the global
   runner workspace for existing tickets. `coms/db.py` migrates existing ticket
   databases.

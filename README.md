@@ -248,10 +248,12 @@ request changes. A later edit invalidates that approval.
 Open **Schedule** to create recurring prompts for any registered non-human
 agent. Use the interval and weekly controls for common schedules, or enter a
 five-field cron expression. Each task saves its timezone and working folder;
-when it fires, the scheduler creates a ready ticket assigned to that agent and
-the existing runner executes it in that folder. The task page shows the next
-run and execution history, with links to each ticket transcript. Pause, resume,
-run now and delete controls are available in the dashboard.
+when it fires, the scheduler creates a ready ticket assigned to that agent on
+the **Scheduled Task Runs** board, and the existing runner executes it in that
+folder. Manual **Run now** tickets use the same board. Find it from the ticket
+board selector. The task page shows the next run and execution history, with
+links to each ticket transcript. Pause, resume, run now and delete controls are
+available in the dashboard.
 
 The lead's first turn exposes delegation tools only. `team_delegate` reuses a
 suitable specialist or registers a named teammate and creates a ready child
@@ -328,7 +330,8 @@ Agents can manage recurring jobs with `schedule_list`, `schedule_get`,
 `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_resume`,
 `schedule_run_now` and `schedule_delete`. The HTTP API is rooted at
 `/api/scheduled-tasks`; run history is available at
-`/api/scheduled-tasks/{id}/runs`.
+`/api/scheduled-tasks/{id}/runs`. Tickets created by scheduled runs and manual
+`schedule_run_now` calls appear on the **Scheduled Task Runs** ticket board.
 Execution cannot advance to automatic review until `ticket_result` succeeds
 through the tools for that run. Review sessions receive only read tools.
 Tickets that reach review are automatically assessed by the orchestrator. It
