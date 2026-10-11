@@ -140,6 +140,7 @@
 
   function timeline(box, h) {
     const nodes=new Map(), logs=new Map();
+    let editing=null;
     const diagnostics=document.createElement('details');diagnostics.className='chat-logs';
     diagnostics.innerHTML='<summary>Debug logs</summary><div class="chat-log-list"></div>';
     diagnostics.hidden=true;box.append(diagnostics);
@@ -199,10 +200,67 @@
           };
         }
       }
+      if (h.editMessage && m.kind==='text' && m.role==='user') {
+        const button=actionButton(node,'edit','Edit message','<path d="m4 13 9-9 3 3-9 9-4 1zM12 5l3 3"/>');
+        button.onclick=()=>openEditor(node);
+      }
+      if (h.forkMessage && ((m.kind==='text' && m.role==='assistant') || (m.kind==='error' && m.role==='system'))) {
+        const button=actionButton(node,'fork','Fork chat','<path d="M6 16V4m0 6h5a3 3 0 0 0 3-3V4"/><circle cx="6" cy="3" r="2"/><circle cx="14" cy="3" r="2"/><circle cx="6" cy="17" r="2"/>');
+        button.onclick=async()=>{
+          try {await h.forkMessage(node._message);} catch (error) {h.fail(error);}
+        };
+      }
       update(node,m);return node;
     }
 
+    function actionButton(node,kind,label,icon) {
+      let actions=node.querySelector('.chat-message-actions');
+      if (!actions) {actions=document.createElement('div');actions.className='chat-message-actions';node.append(actions);}
+      const button=document.createElement('button');button.type='button';button.className=`chat-message-${kind} chat-message-action`;
+      button.title=label;button.setAttribute('aria-label',label);button.innerHTML=`<svg viewBox="0 0 20 20" aria-hidden="true">${icon}</svg>`;
+      actions.append(button);return button;
+    }
+
+    function closeEditor(node) {
+      node.querySelector('.chat-edit-form')?.remove();node.classList.remove('is-editing');
+      if (editing===node) editing=null;
+      node.querySelector('.chat-message-edit')?.focus();
+    }
+
+    function openEditor(node) {
+      if (editing===node) {node.querySelector('textarea').focus();return;}
+      if (editing) closeEditor(editing);
+      editing=node;node.classList.add('is-editing');
+      const form=document.createElement('form');form.className='chat-edit-form';
+      form.innerHTML='<textarea rows="4" aria-label="Edit message" required></textarea><small>Saving removes later messages and regenerates the reply.</small><p class="chat-edit-error" role="alert" hidden></p><div class="chat-edit-actions"><button type="button" class="btn sm" aria-label="Cancel edit">Cancel</button><button type="submit" class="btn sm primary">Save and regenerate</button></div>';
+      node.querySelector('.chat-bubble').append(form);
+      const input=form.querySelector('textarea'),save=form.querySelector('[type="submit"]'),cancel=form.querySelector('[type="button"]'),errorNode=form.querySelector('.chat-edit-error');
+      input.value=node._message.body || '';input.focus();
+      const validate=()=>{save.disabled=!input.value.trim() || Boolean(h.actionsBusy?.()) || form._saving;};
+      input.oninput=validate;form._validate=validate;
+      cancel.onclick=()=>{if (!form._saving) closeEditor(node);};
+      input.onkeydown=event=>{if (event.key==='Escape' && !form._saving) {event.preventDefault();closeEditor(node);}};
+      form.onsubmit=async event=>{
+        event.preventDefault();if (!input.value.trim() || form._saving || h.actionsBusy?.()) return;
+        form._saving=true;input.disabled=true;cancel.disabled=true;errorNode.hidden=true;validate();
+        try {await h.editMessage(node._message,input.value.trim());closeEditor(node);}
+        catch (error) {setText(errorNode,error.message || 'Could not edit this message.');errorNode.hidden=false;}
+        finally {form._saving=false;input.disabled=false;cancel.disabled=false;validate();}
+      };
+      validate();h.onScroll?.();
+    }
+
+    function updateActions(node,m) {
+      node._message=m;
+      const edit=node.querySelector('.chat-message-edit'),fork=node.querySelector('.chat-message-fork');
+      const unsettled=['streaming','pending','in_progress'].includes(m.state);
+      if (edit) edit.disabled=Boolean(h.actionsBusy?.() || unsettled);
+      if (fork) fork.disabled=Boolean(h.forkBusy?.() || unsettled || editing?.querySelector('.chat-edit-form')?._saving);
+      node.querySelector('.chat-edit-form')?._validate?.();
+    }
+
     function update(node,m) {
+      updateActions(node,m);
       const data=m.data || {};
       const signature=JSON.stringify([m.version,m.body,m.state,data]);
       if (node._signature===signature || h.hasSelection(node)) return;
@@ -259,7 +317,7 @@
         if (cursor!==node) box.insertBefore(node,cursor || diagnostics);
         cursor=node.nextElementSibling;
       }
-      for (const [id,node] of nodes) if (!present.has(id)) {node.remove();nodes.delete(id);}
+      for (const [id,node] of nodes) if (!present.has(id)) {if (editing===node) editing=null;node.remove();nodes.delete(id);}
       diagnostics.hidden=!(detail.log_count || detail.logs?.length);
       setText(diagnostics.querySelector('summary'),`Debug logs (${detail.log_count || detail.logs?.length || 0})`);
       for (const m of detail.logs || []) {
@@ -289,7 +347,7 @@
     if (!ticketMode && !activeId) {activeId=(await api('POST','/api/runner/sessions',{title:'New chat'})).id;sessions=await GET('/api/runner/sessions');}
     const path=ticketMode?`/api/tickets/${h.ticketId}/runner`:`/api/runner/sessions/${encodeURIComponent(activeId)}`;
     let detail=h.detail || await GET(path);
-    let sending=false, stopRequested=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
+    let sending=false, actionPending=false, stopRequested=false, loadedLogs=false, requestSerial=0,streamHealthy=false,streamSource=null,renderFrame=null;
     const expandedGroups=new Set([detail.project_id?`project:${detail.project_id}`:'root']);
     let pickerTarget=null,pickerData=null,folderRequestSerial=0,folderAction=null,folderSaving=false,projectWorkspace='',creatingProject=false;
     const sessionLink=s=>`<div class="chat-session-row"><a class="chat-session${s.id===activeId?' active':''}" href="#/orchestrator?session=${encodeURIComponent(s.id)}">${esc(s.title)}<small>${ago(s.updated_at)}</small></a>${s.working?'<span class="activity-spinner" role="status" aria-label="Agent work in progress" title="Agent work in progress"></span>':''}<button class="chat-delete" type="button" data-delete-chat="${esc(s.id)}" aria-label="Delete chat ${esc(s.title)}" title="Delete chat">×</button></div>`;
@@ -355,7 +413,26 @@
       if (group.open) expandedGroups.add(group.dataset.groupKey);else expandedGroups.delete(group.dataset.groupKey);
     },true);
     const onScroll=()=>{$('#chat-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<24;};
-    const transcript=timeline(box,{...h,onScroll,emptyText:ticketMode?'Execution responses and follow-up replies appear here.':undefined});
+    const actionsBusy=()=>Boolean(sending || actionPending || detail.busy || detail.active_turn_id || detail.runner_busy || detail.chat_available===false);
+    async function editMessage(message,body) {
+      if (actionsBusy()) throw new Error('Wait for the current response to finish before editing.');
+      sending=true;applyDetail();
+      try {
+        await api('PATCH',path+`/messages/${encodeURIComponent(message.id)}`,{body});
+        try {await fetchDetail();} catch (error) {connectionError(error);}
+      } finally {sending=false;if (box.isConnected) applyDetail();}
+    }
+    async function forkMessage(message) {
+      if (sending || actionPending || detail.busy || detail.active_turn_id) throw new Error('Wait for this chat to finish responding before forking.');
+      actionPending=true;applyDetail();
+      try {
+        const fork=await api('POST',path+`/messages/${encodeURIComponent(message.id)}/fork`,{});
+        if (box.isConnected) location.hash=`#/orchestrator?session=${encodeURIComponent(fork.id)}`;
+      } finally {actionPending=false;if (box.isConnected) applyDetail();}
+    }
+    const transcript=timeline(box,{...h,onScroll,editMessage,actionsBusy,
+      forkMessage:ticketMode?null:forkMessage,forkBusy:()=>Boolean(sending || actionPending || detail.busy || detail.active_turn_id),
+      emptyText:ticketMode?'Execution responses and follow-up replies appear here.':undefined});
     box.addEventListener('scroll',onScroll);
     $('#chat-latest').onclick=()=>{box.scrollTop=box.scrollHeight;onScroll();};
 
@@ -370,7 +447,7 @@
       status.className=`chat-status badge ${detail.busy || detail.working || otherBusy?'in_progress':detail.state==='failed'||detail.state==='interrupted'?'blocked':'open'}`;
       const sessionBusy=Boolean(detail.busy || detail.active_turn_id);
       const send=$('#chat-send');
-      send.disabled=Boolean(detail.runner_busy || sessionBusy || sending || detail.chat_available===false);
+      send.disabled=Boolean(detail.runner_busy || sessionBusy || sending || actionPending || detail.chat_available===false);
       const stop=$('#chat-stop');
       if (stop) {
         if (!sessionBusy) stopRequested=false;
@@ -566,7 +643,7 @@
     } // Project and folder controls belong to the orchestrator page.
     $('#chat-form').onsubmit=async event=>{
       event.preventDefault();const input=$('#chat-input'),body=input.value.trim();
-      if (!body || sending || detail.busy || detail.runner_busy || detail.chat_available===false) return;
+      if (!body || actionsBusy()) return;
       sending=true;applyDetail();
       try {
         const result=await api('POST',path+(ticketMode?'':'/messages'),{body});

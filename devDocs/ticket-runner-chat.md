@@ -7,6 +7,12 @@ It uses the same transcript renderer, Markdown, tool panels, copy actions,
 composer, activity status, selection protection, and scroll handling as the
 orchestrator page. Ticket conversations poll persisted records; orchestrator
 conversations retain their existing streaming transport and project controls.
+User messages also expose Edit message with Save and regenerate. Editing keeps
+the selected message ID, drops later transcript entries, closes the old ticket
+connection, and clears saved session IDs before replying from retained public
+history. Execution/review records and board/tool side effects remain intact;
+regeneration is a conversation follow-up. Fork controls belong only to the
+orchestrator page. See [chat message actions](chat-message-actions.md).
 
 Execution responses, review decisions, and follow-ups are shown in chronological
 order. Message IDs remain stable across polls and reloads. Raw diagnostics are

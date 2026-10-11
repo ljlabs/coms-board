@@ -170,6 +170,18 @@ maximum parallel agent count, choose a model advertised by that backend, and
 create agent templates. The selected model is applied to new orchestrator and
 ticket sessions.
 
+Use **Edit message** beside a message you sent to revise an old prompt. **Save
+and regenerate** replaces that message, removes later chat entries, and asks the
+agent to respond using the retained conversation. Cancel keeps the original
+message. Editing is available in orchestrator and ticket chats while idle; it
+does not undo tool actions, board changes, or ticket execution.
+
+On **Orchestrator**, use **Fork chat** beside an agent response or terminal
+response error. A new sidebar chat named `Fork of: {original chat name}` opens
+in the same project with the full transcript through that entry, including tool
+results. The source chat stays intact. The fork uses a fresh agent session when
+you continue. See [chat message actions](devDocs/chat-message-actions.md).
+
 While an Orchestrator response is running, use **Stop** to cancel that turn
 and send a new direction in the same chat. The canceled turn is recorded and
 the composer draft is preserved. This does not stop child workers already

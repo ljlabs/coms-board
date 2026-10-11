@@ -55,6 +55,10 @@ for event in json.loads(Path(__file__).with_name('codex_acp_workspace.json').rea
     codex_transcript.apply(event)
 codex_transcript.finish('end_turn')
 # Real HTTP send/reload regressions use a deterministic ACP subprocess.
+edit_ticket = api.create_ticket(conn, 'Chat edit fixture', 'Test message regeneration.', 'admin', assignee='orchestrator')
+conn.execute("INSERT INTO agent_runs(ticket_id,backend,session_id,status,stage,agent_slug) VALUES(?,'codex','edit-fixture','completed','execute','orchestrator')", (edit_ticket['id'],))
+conn.execute("INSERT INTO agent_messages(ticket_id,role,kind,body,created_at) VALUES(?,'assistant','acp-response','Original execution result',?)", (edit_ticket['id'],api.now()))
+conn.commit()
 import os
 os.environ['COMS_FAKE_MODE'] = 'chat-tools'
 class FixtureHandler(Handler):

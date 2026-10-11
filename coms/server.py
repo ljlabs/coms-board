@@ -718,6 +718,28 @@ def r_orchestrator_messages(conn, m, mm, q, b, actor):
         except ValueError as e: raise api.BadRequest(str(e))
 
 
+def r_orchestrator_message(conn, m, mm, q, b, actor):
+    if m == "PATCH":
+        from .runner import RUNNER
+        try: return RUNNER.edit_orchestrator_message(mm.group(1),int(mm.group(2)),b.get('body',''))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_orchestrator_fork(conn, m, mm, q, b, actor):
+    if m == "POST":
+        from .runner import RUNNER
+        try: return RUNNER.fork_orchestrator_session(mm.group(1),int(mm.group(2)))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
+def r_runner_ticket_message(conn, m, mm, q, b, actor):
+    if m == "PATCH":
+        from .runner import RUNNER
+        tid=int(mm.group(1)); api.get_ticket(conn,tid)
+        try: return RUNNER.edit_ticket_message(tid,int(mm.group(2)),b.get('body',''))
+        except ValueError as e: raise api.BadRequest(str(e))
+
+
 def r_ticket_tree(conn, m, mm, q, b, actor):
     return api.ticket_tree(conn, int(mm.group(1))) if m == "GET" else None
 
@@ -816,6 +838,8 @@ ROUTES = [
     (r"/api/runner/sessions", r_orchestrator_sessions),
     (r"/api/runner/sessions/([^/]+)/stop", r_orchestrator_stop),
     (r"/api/runner/sessions/([^/]+)/messages", r_orchestrator_messages),
+    (r"/api/runner/sessions/([^/]+)/messages/(\d+)/fork", r_orchestrator_fork),
+    (r"/api/runner/sessions/([^/]+)/messages/(\d+)", r_orchestrator_message),
     (r"/api/runner/sessions/([^/]+)", r_orchestrator_session),
     (r"/api/runner/orchestrator", r_orchestrator),
     (r"/api/runner/settings", r_runner_settings),
@@ -825,6 +849,7 @@ ROUTES = [
     (r"/api/scheduled-tasks/(\d+)", r_scheduled_task),
     (r"/api/scheduled-tasks", r_scheduled_tasks),
     (r"/api/tickets/(\d+)/runner", r_runner_ticket),
+    (r"/api/tickets/(\d+)/runner/messages/(\d+)", r_runner_ticket_message),
     (r"/api/tickets/(\d+)/retry", r_ticket_retry),
     (r"/api/overview", r_overview),
     (r"/api/search", r_search),

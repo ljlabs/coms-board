@@ -100,6 +100,113 @@ async function pageFor(route, run, options = {}) {
   } finally { await page.close(); }
 }
 
+async function actionChat(page) {
+  return page.evaluate(async () => {
+    const source=await fetch('/api/runner/sessions/browser-tools').then(r=>r.json());
+    const last=source.messages.at(-1);
+    return fetch(`/api/runner/sessions/browser-tools/messages/${last.id}/fork`, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
+  });
+}
+
+test('chat edits cancel safely and regenerate an old prompt through reload', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    const chat=await actionChat(page);
+    await page.goto(base+'/#/orchestrator?session='+chat.id);
+    await page.waitForFunction(()=>document.querySelector('#chat-title')?.textContent==='Fork of: Tool conversation');
+    await page.waitForSelector('.chat-message-edit');
+    await page.locator('#chat-input').fill('Unsent composer draft');
+    const first=page.locator('.chat-message.user').first();
+    const id=await first.getAttribute('data-message-id');
+    await first.getByRole('button',{name:'Edit message',exact:true}).click();
+    await first.getByRole('textbox',{name:'Edit message',exact:true}).fill('Canceled edit');
+    await first.getByRole('button',{name:'Cancel edit'}).click();
+    assert.match(await first.locator('.chat-text').textContent(),/List files/);
+    await first.getByRole('button',{name:'Edit message',exact:true}).click();
+    const editor=first.getByRole('textbox',{name:'Edit message',exact:true});
+    await editor.fill('Edited prompt');
+    await page.waitForTimeout(1600);
+    assert.equal(await editor.inputValue(),'Edited prompt','Polling preserves the edit draft');
+    await first.getByRole('button',{name:'Save and regenerate'}).click();
+    await page.waitForFunction(() => !document.querySelector('.chat-edit-form') && document.querySelector('#chat-status').textContent==='ready');
+    assert.equal(await page.locator('.chat-message.user').count(),1);
+    assert.equal(await page.locator('.chat-message.user').getAttribute('data-message-id'),id);
+    assert.equal(await page.locator('#chat-input').inputValue(),'Unsent composer draft');
+    assert.equal(await page.locator('.chat-text').filter({hasText:'The listing is ready.'}).count(),0);
+    await page.reload();
+    await page.waitForSelector('.chat-message.user');
+    assert.equal(await page.locator('.chat-message.user .chat-text').textContent(),'Edited prompt');
+    assert.ok(await page.locator('.chat-message.assistant').count()>0);
+  });
+});
+
+test('orchestrator forks only answers and terminal errors at the exact selected boundary', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    const original=await page.evaluate(()=>fetch('/api/runner/sessions/browser-tools').then(r=>r.json()));
+    assert.equal(await page.locator('.chat-message.user .chat-message-fork').count(),0);
+    assert.equal(await page.locator('.chat-tool .chat-message-fork').count(),0);
+    assert.equal(await page.locator('.chat-thinking .chat-message-fork').count(),0);
+    const answer=page.locator('.chat-message.assistant').filter({hasText:'The listing is ready.'});
+    const id=Number(await answer.getAttribute('data-message-id'));
+    await answer.getByRole('button',{name:'Fork chat'}).click();
+    await page.waitForFunction(()=>document.querySelector('#chat-title').textContent==='Fork of: Tool conversation');
+    assert.equal(await page.locator('.chat-session.active').textContent().then(s=>s.startsWith('Fork of: Tool conversation')),true);
+    const fork=await page.evaluate(()=>fetch('/api/runner/sessions/'+new URLSearchParams(location.hash.split('?')[1]).get('session')).then(r=>r.json()));
+    assert.deepEqual(fork.messages.map(m=>[m.role,m.kind,m.body,m.data]),original.messages.filter(m=>m.id<=id).map(m=>[m.role,m.kind,m.body,m.data]));
+    assert.equal(fork.acp_session_id,'');
+    assert.deepEqual(await page.evaluate(()=>fetch('/api/runner/sessions/browser-tools').then(r=>r.json())).then(d=>d.messages),original.messages);
+    await page.goto(base+'/#/orchestrator?session=browser-tools');
+    await page.waitForSelector('.chat-error .chat-message-fork');
+    await page.locator('.chat-error').getByRole('button',{name:'Fork chat'}).click();
+    await page.waitForFunction(()=>document.querySelector('#chat-title').textContent==='Fork of: Tool conversation');
+    assert.match(await page.locator('.chat-error .chat-text').textContent(),/Backend disconnected/);
+  });
+});
+
+test('failed edit retains its draft and busy chats disable editing and forks', async () => {
+  await pageFor('/orchestrator?session=browser-tools', async page => {
+    const chat=await actionChat(page);
+    await page.goto(base+'/#/orchestrator?session='+chat.id);
+    await page.waitForFunction(()=>document.querySelector('#chat-title')?.textContent==='Fork of: Tool conversation');
+    await page.waitForSelector('.chat-message-edit');
+    const first=page.locator('.chat-message.user').first();
+    await first.getByRole('button',{name:'Edit message',exact:true}).click();
+    await first.getByRole('textbox',{name:'Edit message',exact:true}).fill('Keep failed edit');
+    await page.route(`**/api/runner/sessions/${chat.id}/messages/*`,route=>route.request().method()==='PATCH'?route.fulfill({status:400,json:{error:'Backend busy'}}):route.continue());
+    await first.getByRole('button',{name:'Save and regenerate'}).click();
+    await page.waitForSelector('.chat-edit-error:not([hidden])');
+    assert.equal(await first.getByRole('textbox',{name:'Edit message',exact:true}).inputValue(),'Keep failed edit');
+    await first.getByRole('button',{name:'Cancel edit'}).click();
+    await page.evaluate(()=>fetch('/api/runner/sessions/'+new URLSearchParams(location.hash.split('?')[1]).get('session')+'/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:'Slow streaming response'})}));
+    // The deterministic backend finishes quickly; inject busy state via its real stream snapshot.
+    await page.evaluate(() => {
+      const source=window.EventSource;
+      window.EventSource=class { constructor(){this.handlers={};setTimeout(()=>fetch('/api/runner/sessions/browser-tools').then(r=>r.json()).then(d=>this.handlers.snapshot?.({data:JSON.stringify({...d,busy:true,runner_busy:true})})),0);} addEventListener(n,f){this.handlers[n]=f;} close(){} };
+      location.hash='#/orchestrator?session=browser-tools';
+      window._originalEventSource=source;
+    });
+    await page.waitForFunction(()=>document.querySelector('#chat-title')?.textContent==='Tool conversation' && document.querySelector('#chat-status')?.textContent==='working' && document.querySelector('.chat-message-edit')?.disabled);
+    assert.equal(await page.locator('.chat-message-fork:enabled').count(),0);
+  });
+});
+
+test('ticket chat exposes reusable editing without fork controls', async () => {
+  await pageFor('/tickets/2', async page => {
+    assert.equal(await page.locator('#runner-chat .chat-message-fork').count(),0);
+    const count=await page.locator('#runner-chat .chat-message.user').count();
+    await page.locator('#chat-input').fill('Ticket question to revise');
+    await page.locator('#chat-send').click();
+    await page.waitForFunction(()=>document.querySelector('#chat-status').textContent!=='working' && [...document.querySelectorAll('.chat-message.user .chat-text')].some(n=>n.textContent==='Ticket question to revise'));
+    const first=page.locator('#runner-chat .chat-message.user').last();
+    await first.getByRole('button',{name:'Edit message',exact:true}).click();
+    await first.getByRole('textbox',{name:'Edit message',exact:true}).fill('Updated ticket question');
+    await first.getByRole('button',{name:'Save and regenerate'}).click();
+    await page.waitForFunction(()=>!document.querySelector('.chat-edit-form') && document.querySelector('#chat-status').textContent!=='working');
+    assert.equal(await page.locator('#runner-chat .chat-message.user').count(),count+1);
+    assert.equal(await page.locator('#runner-chat .chat-message.user .chat-text').last().textContent(),'Updated ticket question');
+    assert.equal(await page.locator('#runner-chat .chat-message-fork').count(),0);
+  });
+});
+
 test('Agents discovers registered teammates and polls visible progress', async () => {
   await pageFor('/agents', async page => {
     const saved = await page.evaluate(() => fetch('/api/agents', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slug:'browser-expert',name:'Browser expert',role:'expert',description:'Evidence research'})}).then(r=>r.json()));

@@ -21,6 +21,8 @@ adds durable behavior that needs its own design note.
   contracts.
 - [Ticket runner chat](ticket-runner-chat.md): shared conversation rendering,
   stage labels, and follow-ups after a restart.
+- [Chat message actions](chat-message-actions.md): shared message editing and
+  regeneration, and isolated orchestrator conversation forks.
 - [Orchestrator stop and recovery](orchestrator-resilience.md): canceling an
   active response, recovering idle ACP sessions, and heartbeat runs for waiting
   team leads.

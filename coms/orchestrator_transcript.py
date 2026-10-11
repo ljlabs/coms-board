@@ -71,14 +71,26 @@ def _insert(conn, sid, turn_id, role, kind, body='', *, data=None,
          acp_message_id,tool_call_id,ts,ts)).lastrowid
 
 
-def begin_turn(sid, text, backend, model, workspace):
+def begin_turn(sid, text, backend, model, workspace, *, replace_user_id=None):
     conn = db.connect()
     turn_id = uuid.uuid4().hex
     ts = now()
     with conn:
         if not conn.execute('SELECT 1 FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone():
             raise ValueError('session not found')
-        user_id = _insert(conn,sid,turn_id,'user','text',text)
+        if replace_user_id is None:
+            user_id = _insert(conn,sid,turn_id,'user','text',text)
+        else:
+            row = conn.execute("SELECT * FROM orchestrator_messages WHERE session_id=? AND id=? AND role='user' AND kind='text'",
+                               (sid, replace_user_id)).fetchone()
+            if not row: raise ValueError('Only your text messages in this chat can be edited.')
+            conn.execute('DELETE FROM orchestrator_turns WHERE session_id=? AND (user_message_id>=? OR id=?)',
+                         (sid, row['id'], row['turn_id']))
+            conn.execute('DELETE FROM orchestrator_messages WHERE session_id=? AND id>?', (sid,row['id']))
+            conn.execute("UPDATE orchestrator_messages SET body=?,turn_id=?,metadata_json='{}',acp_message_id=NULL,state='completed',updated_at=?,version=version+1 WHERE id=?",
+                         (text,turn_id,ts,row['id']))
+            conn.execute("UPDATE orchestrator_sessions SET acp_session_id='' WHERE id=?", (sid,))
+            user_id = row['id']
         conn.execute('INSERT INTO orchestrator_turns(id,session_id,user_message_id,backend,model,workspace,started_at) '
                      'VALUES(?,?,?,?,?,?,?)',(turn_id,sid,user_id,backend,model,workspace,ts))
         conn.execute("UPDATE orchestrator_sessions SET title=CASE WHEN title='New chat' THEN ? ELSE title END,updated_at=? WHERE id=?",
@@ -257,20 +269,58 @@ class Transcript:
             publish_change()
 
 
+def fork_conversation(conn, sid, message_id):
+    """Copy an immutable prefix; ACP sessions and all local IDs are independent."""
+    with conn:
+        source = conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?', (sid,)).fetchone()
+        if not source: raise ValueError('session not found')
+        target = conn.execute('SELECT * FROM orchestrator_messages WHERE session_id=? AND id=?', (sid,message_id)).fetchone()
+        if not target: raise ValueError('message not found in this chat')
+        if not ((target['role']=='assistant' and target['kind']=='text') or
+                (target['role']=='system' and target['kind']=='error')):
+            raise ValueError('Fork at an agent response or a terminal response error.')
+        if target['state'] in ('streaming','pending','in_progress') or conn.execute(
+                "SELECT 1 FROM orchestrator_turns WHERE session_id=? AND status='running'", (sid,)).fetchone():
+            raise ValueError('Wait for this chat to finish responding before forking it.')
+        new_sid = uuid.uuid4().hex
+        ts = now()
+        conn.execute('INSERT INTO orchestrator_sessions(id,title,project_id,backend,workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+                     (new_sid,'Fork of: '+source['title'],source['project_id'],source['backend'],source['workspace'],ts,ts))
+        rows = conn.execute('SELECT * FROM orchestrator_messages WHERE session_id=? AND id<=? ORDER BY id', (sid,message_id)).fetchall()
+        turn_ids = {row['turn_id']:uuid.uuid4().hex for row in rows if row['turn_id']}
+        message_ids = {}
+        for row in rows:
+            message_ids[row['id']] = conn.execute(
+                'INSERT INTO orchestrator_messages(session_id,turn_id,role,kind,body,metadata_json,state,acp_message_id,tool_call_id,created_at,updated_at,version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                (new_sid,turn_ids.get(row['turn_id']),row['role'],row['kind'],row['body'],row['metadata_json'],
+                 row['state'],None,row['tool_call_id'],row['created_at'],row['updated_at'],row['version'])).lastrowid
+        for old_id, new_id in turn_ids.items():
+            turn = conn.execute('SELECT * FROM orchestrator_turns WHERE session_id=? AND id=?', (sid,old_id)).fetchone()
+            if not turn: continue
+            cut = conn.execute('SELECT 1 FROM orchestrator_messages WHERE session_id=? AND turn_id=? AND id>?', (sid,old_id,message_id)).fetchone()
+            conn.execute('INSERT INTO orchestrator_turns(id,session_id,user_message_id,backend,model,workspace,status,stop_reason,error,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                         (new_id,new_sid,message_ids.get(turn['user_message_id']),turn['backend'],turn['model'],turn['workspace'],
+                          'completed' if cut else turn['status'],'fork' if cut else turn['stop_reason'],'' if cut else turn['error'],
+                          turn['started_at'],ts if cut else turn['finished_at']))
+    publish_change()
+    return dict(conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?', (new_sid,)).fetchone())
+
+
 def history_before(sid, user_message_id):
     lines = []
     for row in db.connect().execute('SELECT * FROM orchestrator_messages WHERE session_id=? AND id<? ORDER BY id',(sid,user_message_id)):
         entry = message_dict(row)
         if entry['kind']=='text' and entry['role'] in ('user','assistant'):
             if entry['body']: lines.append(('User: ' if entry['role']=='user' else 'Orchestrator: ') + entry['body'])
+            if entry['data'].get('blocks'): lines.append('Message content: ' + json.dumps(entry['data']['blocks'],ensure_ascii=False))
         elif entry['kind']=='tool_call':
             payload = json.dumps(entry['data'],ensure_ascii=False)
-            if len(payload)>4000: payload = payload[:4000] + ' [tool output truncated]'
             lines.append('Tool: ' + payload)
+        elif entry['kind']=='plan':
+            lines.append('Plan: ' + json.dumps(entry['data'],ensure_ascii=False))
         elif entry['kind']=='error':
             lines.append('Turn status: ' + entry['body'])
-    text = '\n\n'.join(lines)
-    return text if len(text)<=64000 else '[Earlier conversation truncated]\n' + text[-64000:]
+    return '\n\n'.join(lines)
 
 
 def recover_turns(conn):

@@ -576,6 +576,17 @@ col.w70 { width: 70px; } col.w120 { width: 120px; } col.w170 { width: 170px; }
 .chat-message-copy svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 .chat-message-copy:hover,.chat-message-copy.is-copied{border-color:var(--ink);background:var(--yellow);color:var(--ink);box-shadow:2px 2px 0 var(--ink)}
 .chat-message-copy:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.chat-message-action{display:grid;place-items:center;width:28px;height:28px;padding:4px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer}
+.chat-message-action svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.chat-message-action:hover:enabled{border-color:var(--ink);background:var(--yellow);color:var(--ink);box-shadow:2px 2px 0 var(--ink)}
+.chat-message-action:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.chat-message-action:disabled{opacity:.4;cursor:default}
+.chat-message.is-editing>.chat-bubble>.chat-text,.chat-message.is-editing>.chat-bubble>.chat-content-blocks{display:none}
+.chat-edit-form{display:flex;flex-direction:column;gap:.5rem}
+.chat-edit-form textarea{width:100%;min-height:6rem;resize:vertical;font:inherit;box-sizing:border-box}
+.chat-edit-form small{color:var(--muted)}
+.chat-edit-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.5rem}
+.chat-edit-error{color:var(--red);margin:0}
 .chat-copy-feedback{font:.68rem var(--mono);color:var(--muted)}
 @media(max-width:700px){.chat-bubble{padding:.7rem}}
 

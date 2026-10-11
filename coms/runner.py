@@ -6,7 +6,7 @@ from pathlib import Path
 from . import api, db, progress, team, schedules
 from .acp import AcpConnection, AcpError
 from .workspace import DEFAULT_WORKSPACE, workspace_directory_browser, workspace_folder_change, workspace_folder_target, workspace_path
-from .orchestrator_transcript import Transcript, begin_turn, conversation_messages, history_before, message_dict, publish_change, recover_turns
+from .orchestrator_transcript import Transcript, begin_turn, conversation_messages, fork_conversation, history_before, message_dict, publish_change, recover_turns
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OPENCODE_API_BASE_URL = 'http://localhost:11434/v1'
@@ -801,9 +801,15 @@ class Runner:
                 c.close()
             with self.lock: self.active.pop(tid,None)
             self.recorders.pop(rid, None)
-    def chat(self,tid,text):
+    def edit_ticket_message(self,tid,message_id,text):
+        return self.chat(tid,text,edit_message_id=message_id)
+    def chat(self,tid,text,*,edit_message_id=None):
+        if not isinstance(text,str): raise ValueError('message must be text')
+        text=text.strip()
         if not text.strip(): raise ValueError('message required')
         with self.lock:
+            conn=db.connect()
+            api.get_ticket(conn,tid)
             c=self.conns.get(tid)
             if c and not c.alive:
                 self.conns.pop(tid,None); c=None
@@ -813,9 +819,24 @@ class Runner:
             if self._active_slots()>=maximum: raise ValueError('All configured backend agent slots are in use.')
             if not c and not db.connect().execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage='execute'", (tid,)).fetchone():
                 raise ValueError('No completed agent session for this ticket. Mark it ready to start the runner.')
+            if edit_message_id is not None:
+                row=conn.execute("SELECT id FROM agent_messages WHERE ticket_id=? AND id=? AND role='user' AND kind='text'", (tid,edit_message_id)).fetchone()
+                if not row: raise ValueError('Only your text messages in this chat can be edited.')
+                # A fresh connection must replay retained history, never the old ACP session.
+                if not conn.execute("SELECT 1 FROM agent_runs WHERE ticket_id=? AND status='completed' AND stage='execute'", (tid,)).fetchone():
+                    raise ValueError('No completed execution is available for regenerating this reply.')
+                ticket=api.get_ticket(conn,tid)
+                workspace_path({'workspace':ticket.get('workspace') or self.settings().get('workspace',str(DEFAULT_WORKSPACE))})
+                with conn:
+                    conn.execute('DELETE FROM agent_messages WHERE ticket_id=? AND id>?', (tid,row['id']))
+                    conn.execute('UPDATE agent_messages SET body=?,updated_at=? WHERE id=?', (text,now(),row['id']))
+                    conn.execute("UPDATE agent_runs SET session_id='' WHERE ticket_id=?", (tid,))
+                self.conns.pop(tid,None)
+                if c: c.close()
+                c=None
             self.active[tid]=True
         try:
-            self._message(tid,None,'user','text',text)
+            if edit_message_id is None: self._message(tid,None,'user','text',text)
             threading.Thread(target=self._worker,args=(tid,self._prompt,c,tid,text),daemon=True).start()
         except Exception:
             with self.lock: self.active.pop(tid,None)
@@ -836,9 +857,13 @@ class Runner:
                 db.connect().execute('UPDATE agent_runs SET session_id=? WHERE id=?', (c.session_id, run['id']))
                 db.connect().commit()
                 if not c.ticket_restored:
-                    history = [dict(row) for row in db.connect().execute("SELECT role,body FROM agent_messages WHERE ticket_id=? AND (role='user' OR kind='acp-response') ORDER BY id DESC LIMIT 20", (tid,))]
+                    from .ticket_chat import conversation
+                    messages = conversation(db.connect(),tid,self)['messages']
+                    current_user = max((message['id'] for message in messages if message['role']=='user'),default=0)
+                    history = [{key:message[key] for key in ('role','kind','body','data')}
+                               for message in messages if message['id']<current_user]
                     text = ('Continue this ticket conversation. The execution has already finished; answer the user without rerunning it.\n'
-                            + json.dumps({'ticket': ticket, 'recent_conversation': list(reversed(history))}, ensure_ascii=False)
+                            + json.dumps({'ticket': ticket, 'recent_conversation': history}, ensure_ascii=False)
                             + '\nUser follow-up: ' + text)
             c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
             c.prompt(skill_context + text,timeout=3600)
@@ -1044,6 +1069,13 @@ class Runner:
         if project_id is not None and not conn.execute('SELECT 1 FROM orchestrator_projects WHERE id=?',(project_id,)).fetchone(): raise ValueError('project not found')
         conn.execute('INSERT INTO orchestrator_sessions(id,title,project_id,created_at,updated_at) VALUES(?,?,?,?,?)',(sid,title.strip() or 'New chat',project_id,ts,ts)); conn.commit()
         return dict(conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone())
+    def fork_orchestrator_session(self,sid,message_id):
+        with self.lock:
+            if self.orchestrator_busy and self.orchestrator_session==sid:
+                raise ValueError('Wait for this chat to finish responding before forking it.')
+            return fork_conversation(db.connect(),sid,message_id)
+    def edit_orchestrator_message(self,sid,message_id,text):
+        return self.orchestrate(text,sid,edit_message_id=message_id)
     def orchestrator_detail(self,sid,*,include_logs=False):
         conn=db.connect(); row=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
         if not row: return None
@@ -1153,7 +1185,7 @@ class Runner:
             if self.orchestrator_conn: self.orchestrator_conn.close()
             self.orchestrator_conn=None; self.orchestrator_conn_key=None
         self._warm_orchestrator()
-    def orchestrate(self, text, sid='default'):
+    def orchestrate(self, text, sid='default', *, edit_message_id=None):
         if not isinstance(text,str): raise ValueError('message must be text')
         text=text.strip()
         if not text: raise ValueError('message required')
@@ -1161,9 +1193,12 @@ class Runner:
             if self.orchestrator_busy: raise ValueError('The orchestrator is still responding; wait for its reply.')
             conn=db.connect(); session=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
             if not session: raise ValueError('session not found')
+            if conn.execute("SELECT 1 FROM orchestrator_turns WHERE session_id=? AND status='running'", (sid,)).fetchone():
+                raise ValueError('This chat has an unfinished response; wait for it to finish.')
             settings=self.settings(); backend=settings.get('active_backend','opencode')
             cwd=self._orchestrator_workspace(dict(session),settings,conn)
-            turn,user=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd)
+            turn,user=begin_turn(sid,text,backend,settings.get('model_'+backend) or 'ACP default',cwd,replace_user_id=edit_message_id)
+            session=conn.execute('SELECT * FROM orchestrator_sessions WHERE id=?',(sid,)).fetchone()
             self.orchestrator_busy=True; self.orchestrator_session=sid
             stop_event=threading.Event()
             self.orchestrator_stop_event=stop_event; self.orchestrator_stop_turn_id=turn['id']
