@@ -573,7 +573,12 @@ class Runner:
                         threading.Thread(target=self._worker,args=(row['id'],self._work,dict(row)),daemon=True).start()
                     slots=maximum-self._active_slots()
                     if slots>0:
-                        review_rows=conn.execute("""SELECT t.*,a.role AS agent_role,
+                        # Exclude held ancestry before LIMIT so it cannot spend
+                        # attempts or hide unrelated eligible reviews.
+                        review_rows=conn.execute("""WITH RECURSIVE held(id) AS (
+                            SELECT id FROM tickets WHERE ready_for_execution=0 AND status IN ('blocked','wontfix')
+                            UNION SELECT t.id FROM tickets t JOIN held h ON t.parent_id=h.id OR t.source_ticket_id=h.id)
+                            SELECT t.*,a.role AS agent_role,
                             coalesce((SELECT id FROM agent_runs ar WHERE ar.ticket_id=t.id AND ar.status='completed' AND ar.stage!='collaborate' ORDER BY ar.id DESC LIMIT 1),0) AS review_run_id,
                             tr.id AS prior_review_id,tr.status AS prior_review_status,
                             tr.attempt_count AS prior_review_attempt_count,
@@ -582,13 +587,14 @@ class Runner:
                             LEFT JOIN ticket_reviews tr ON tr.ticket_id=t.id
                               AND tr.source_run_id=coalesce((SELECT id FROM agent_runs ar2 WHERE ar2.ticket_id=t.id AND ar2.status='completed' AND ar2.stage!='collaborate' ORDER BY ar2.id DESC LIMIT 1),0)
                               AND tr.ticket_version=t.updated_at
-                            WHERE t.status='review' AND t.assignee NOT LIKE 'human%'
+                            WHERE t.status='review' AND t.id NOT IN (SELECT id FROM held) AND t.assignee NOT LIKE 'human%'
                               AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%'
-                              AND (tr.id IS NULL OR (tr.status='failed' AND tr.attempt_count<?
+                              AND (tr.id IS NULL OR (tr.status='queued' AND tr.attempt_count=0) OR (tr.status='failed' AND tr.attempt_count<?
                                 AND (tr.finished_at='' OR julianday(tr.finished_at)+(? * (1 << max(0,tr.attempt_count-1))) / 86400.0 <= julianday(?))))
                             ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.updated_at LIMIT ?""",
                             (MAX_REVIEW_ATTEMPTS,REVIEW_RETRY_BASE_SECONDS,now(),slots)).fetchall()
                         for row in review_rows:
+                            if team.is_stopped(conn, row['id']): continue
                             if row['prior_review_status']=='failed' and not _review_retry_due(row['prior_review_attempt_count'],row['prior_review_finished_at']): continue
                             if row['id'] in self.active: continue
                             lead_slug = api.orchestrator_agent(conn)['slug']
@@ -597,7 +603,7 @@ class Runner:
                             if not api.children_resolved(conn, row['id']): continue
                             key='review:'+str(row['id']); review_key=row['review_run_id']
                             prior=conn.execute('SELECT id,status,attempt_count,ticket_version FROM ticket_reviews WHERE ticket_id=? AND source_run_id=?',(row['id'],review_key)).fetchone()
-                            if prior and prior['status'] in ('queued','running'): continue
+                            if prior and (prior['status']=='running' or (prior['status']=='queued' and prior['attempt_count']!=0)): continue
                             if prior:
                                 review_id=prior['id']
                                 attempt_count=1 if prior['ticket_version']!=row['updated_at'] else int(prior['attempt_count'] or 0)+1

@@ -63,6 +63,14 @@ ready. Successful result delivery takes precedence over the dispatch child-wait
 branch. Legacy waiting runs with a recorded result revalidate and enter review
 without replay; superseded evidence resumes synthesis for correction. Final
 review continues to require resolved children.
+Final-review scheduling excludes held parent/provenance ancestry before the
+candidate limit and rechecks it before queuing or incrementing attempts, so held
+reviews cannot hide eligible work. A parent hold preserves child review budgets;
+existing exhausted reviews can be restored through the explicit final-review
+retry operation.
+An explicit retry stores `queued` with zero attempts. The scheduler dispatches
+that state as attempt one, while ordinary queued/running attempts remain reserved
+against duplicate dispatch. It does not run execution again.
 
 ## Scheduling, context and budgets
 
@@ -135,6 +143,10 @@ turns created three sets of the same destinations despite successful results.
 Cases cover legacy parent waiting/synthesis, delivery before waiting, stored
 result recovery, terminal publication, child gates, MCP/API team shape, structured
 staffing including orphan bypass, bounded follow-ups and model cancellation/errors.
+Scheduler ticks verify held parents do not queue child final reviews or consume
+their attempts, while unrelated eligible reviews still run at capacity one.
+The real retry API plus a scheduler tick verifies an exhausted final review is
+dispatched after an explicit retry instead of remaining queued indefinitely.
 
 The 12 October job #1 audit found duplicate staffing scopes, an unassigned draft
 dependency, stale accepted/pending revisions, no delivered result across dozens
@@ -144,8 +156,8 @@ the board. Native extractions filled the 128 MiB Docker tmpfs; early review
 timeouts predated exhaustion. The operator stopped the job durably and will
 resubmit after deployment; its records are preserved.
 
-Validation on 12 October 2026: the full Python suite ran 316 tests successfully
-with two platform skips, including fourteen completion/replay regression cases.
+Validation on 12 October 2026: the full Python suite ran 319 tests successfully
+with two platform skips, including seventeen completion/replay/hold regression cases.
 The earlier collaboration/lifecycle run passed 102 checks with one skip.
 Compose configuration and staged whitespace checks passed.
 Windows regression runs used `PYTHONUTF8=1` and normal temporary-directory access

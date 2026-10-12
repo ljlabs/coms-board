@@ -190,6 +190,53 @@ class ParentCompletionTests(unittest.TestCase):
                                          'status': 'completed'}}})
             fake.cancel.assert_called_once()
 
+    def test_held_parent_does_not_consume_child_final_review_attempts(self):
+        parent = self.parent()
+        child = self.child(parent)
+        api.update_ticket(self.conn, child['id'], 'admin', status='review', result='Original findings')
+        api.update_ticket(self.conn, parent['id'], 'admin', status='blocked', ready_for_execution=False)
+        with patch.object(self.runner.stopping, 'wait', side_effect=[False, True]), \
+                patch.object(self.runner, '_restart_orchestrator_if_needed'), \
+                patch('coms.runner.threading.Thread') as thread:
+            self.runner._loop()
+        thread.assert_not_called()
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM ticket_reviews').fetchone()[0], 0)
+
+    def test_held_reviews_do_not_hide_eligible_work_at_capacity_one(self):
+        parent = self.parent()
+        child = self.child(parent)
+        api.update_ticket(self.conn, child['id'], 'admin', status='review', result='Held findings')
+        api.update_ticket(self.conn, parent['id'], 'admin', status='blocked', ready_for_execution=False)
+        eligible = self.parent()
+        api.update_ticket(self.conn, eligible['id'], 'admin', status='review', result='Ready findings')
+        self.conn.execute("INSERT OR REPLACE INTO runner_settings VALUES('parallel_agents','1')")
+        self.conn.commit()
+        with patch.object(self.runner.stopping, 'wait', side_effect=[False, True]), \
+                patch.object(self.runner, '_restart_orchestrator_if_needed'), \
+                patch('coms.runner.threading.Thread') as thread:
+            self.runner._loop()
+        self.assertEqual(thread.call_count, 1)
+        self.assertEqual(thread.call_args.kwargs['args'][0], 'review:' + str(eligible['id']))
+        self.assertEqual(self.conn.execute('SELECT ticket_id FROM ticket_reviews').fetchone()[0], eligible['id'])
+
+    def test_explicit_final_review_retry_is_actually_dispatched(self):
+        ticket = self.parent()
+        rid = self.waiting(ticket)
+        self.conn.execute("UPDATE agent_runs SET status='completed' WHERE id=?", (rid,))
+        self.conn.commit()
+        ticket = api.update_ticket(self.conn, ticket['id'], 'admin', status='review', result='Delivered findings')
+        review_id = self.conn.execute("INSERT INTO ticket_reviews(ticket_id,source_run_id,backend,status,ticket_version,attempt_count,created_at,finished_at) VALUES(?,?,'codex','failed',?,3,?,?)",
+                                      (ticket['id'], rid, ticket['updated_at'], api.now(), api.now())).lastrowid
+        self.conn.commit()
+        api.retry_ticket(self.conn, ticket['id'], 'admin')
+        with patch.object(self.runner.stopping, 'wait', side_effect=[False, True]), \
+                patch.object(self.runner, '_restart_orchestrator_if_needed'), \
+                patch('coms.runner.threading.Thread') as thread:
+            self.runner._loop()
+        self.assertEqual(thread.call_count, 1)
+        self.assertEqual(thread.call_args.kwargs['args'][0], 'review:' + str(ticket['id']))
+        self.assertEqual(self.conn.execute('SELECT attempt_count FROM ticket_reviews WHERE id=?', (review_id,)).fetchone()[0], 1)
+
     def test_completed_scope_needs_an_explicit_bounded_followup(self):
         parent = self.parent('job')
         assigned = team.delegate(self.conn, parent['id'], 'orchestrator', 'Destination specialist',
