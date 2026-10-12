@@ -315,6 +315,9 @@ request changes. A later edit invalidates that approval.
 Agents now save reusable questions on the **Questions** page, link them to the
 ticket, and notify the team with the question ID/link. Responders save sourced
 answers there before replying in chat, so future tasks can reuse the findings.
+The agent tool requires `team_send(question_id=...)` referencing a question
+linked to the originating ticket. Questions address real gaps and are optional;
+agents perform their own assigned research. Coordination uses `team_note`.
 Workers normally request the registered orchestrator to review their finished
 wiki page; the lead's synthesis needs another teammate. Peer reviews receive
 priority and one reserved response slot, even when worker slots are full. An
@@ -333,19 +336,25 @@ board selector. The task page shows the next run and execution history, with
 links to each ticket transcript. Pause, resume, run now and delete controls are
 available in the dashboard.
 
-The lead's first turn exposes delegation tools only. `team_delegate` reuses a
+Main chat creates the ready root job and ends; the runner owns staffing in a
+separate turn exposing delegation tools only. `team_delegate` reuses a
 suitable specialist or registers a named teammate and creates a ready child
 task with the job's workspace, source URLs and collaboration requirements;
 pass `type=research` for public-source research. Workers start after staffing
 finishes, so they can see the complete team roster. Every agent retains native
 tools for workspace inspection, commands and assigned work; the runner never
 disables tool support by role or ticket type. Board deliverables use MCP tools.
-Specialists cannot overwrite another teammate's wiki page. Execution turns
+An identity cannot receive two active child assignments for the same job.
+An active ticket owns its artifact even if another ticket uses the same agent.
+Pages stay unchanged during review and after approval; manual edits cancel
+obsolete pending reviews. Equivalent review requests reuse their existing
+attempts. Each revision allows two reviewers and each ticket/page allows six
+requests across revisions. Execution turns
 have a 15-minute hard deadline, including continuously streaming backends;
 failed turns release their connection and use the existing bounded retries.
 
-New jobs require collaboration. Research delivery requires an answered
-teammate question, an attached evidence page with current peer approval, and
+New jobs require collaboration. Research delivery requires
+an attached evidence page with current peer approval, and
 a citation to content recorded through `source_fetch` (public HTTPS) or
 `source_read_file` (workspace text). File records include numbered lines, a
 SHA256 hash and retrieval time; cite the returned URL and source ID. Reviewers
@@ -353,9 +362,26 @@ inspect either kind with `source_get` and can use native tools to check current
 workspace files. `team_read` returns a bounded index; `message_id` and `offset`
 read long messages, and `source_after_id` pages the source index. The lead must
 wait for child reviews, write and attach a
-fresh synthesis, obtain its peer approval, and ensure the team published a new
-shared procedure. These checks verify recorded actions; factual quality still
+fresh synthesis and obtain its peer approval. After acceptance, agents call
+`ticket_result` and end; a question or new shared procedure is optional.
+These checks verify recorded actions; factual quality still
 depends on the research and peer critique.
+
+Jobs hold visibly after 30 minutes without new evidence, an accepted review or
+a delivered result, or after one hour total. Repeated sources, chatter, wiki
+edits and retries do not extend these budgets. Resume explicitly or resubmit
+after correcting the reported blocker. An unassigned, unready child causes a
+visible hold. Configure `COMS_TEAM_NO_PROGRESS_SECONDS` and
+`COMS_TEAM_LIFETIME_SECONDS` in the environment or Docker `.env` (minimum 60
+seconds). OpenCode inference turns share a queue controlled by
+`COMS_MODEL_PARALLEL_TURNS` (default 2); reviews have priority over waiting workers
+and monitors. Review prompts contain the assigned page's criteria and cited
+source index; full evidence is read through tools.
+
+ACP subprocesses use private temporary directories, removed after process exit.
+Startup and the runner reject execution below 16 MiB of free temporary space.
+Recreating the Docker service clears old `/tmp` files and preserves both named
+volumes; updating does not require deleting the board database.
 
 Live progress refreshes every two seconds on Agents, tickets, Runner, Debug,
 and Activity. It shows the registered agent, current phase, latest response,

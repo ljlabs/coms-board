@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -127,6 +128,7 @@ class AcpConnection:
         self._last_rx = time.monotonic()      # activity clock: last inbound frame
         self._reader: Optional[threading.Thread] = None
         self._stderrer: Optional[threading.Thread] = None
+        self._temporary_directory: Optional[str] = None
 
     # ----------------------------------------------------------- lifecycle
     @property
@@ -139,15 +141,24 @@ class AcpConnection:
         self.log(f"spawn: {' '.join([self.binary] + self.command_args)} (cwd={self.cwd})")
         with self._lifecycle_lock:
             if self._closed.is_set(): raise AcpError("connection closed")
-            self.proc = subprocess.Popen(
-                [self.binary] + self.command_args,
-                cwd=self.cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={**os.environ, **self.extra_env},
-                bufsize=0,
-            )
+            temp_root = self.extra_env.get('COMS_ACP_TEMP_ROOT') or tempfile.gettempdir()
+            if shutil.disk_usage(temp_root).free < 16 * 1024 * 1024:
+                raise AcpError('Insufficient temporary space for ACP startup (need 16 MiB free)')
+            self._temporary_directory = tempfile.mkdtemp(prefix='coms-acp-', dir=temp_root)
+            private_env = {key: self._temporary_directory for key in ('TMPDIR', 'TMP', 'TEMP')}
+            try:
+                self.proc = subprocess.Popen(
+                    [self.binary] + self.command_args,
+                    cwd=self.cwd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env={**os.environ, **self.extra_env, **private_env},
+                    bufsize=0,
+                )
+            except Exception:
+                self._cleanup_temporary_directory()
+                raise
             self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                             name=f"acp-read-{os.getpid()}")
             self._reader.start()
@@ -211,6 +222,17 @@ class AcpConnection:
         for p in pend:
             p.error = "connection closed"
             p.event.set()
+        with self._lifecycle_lock:
+            if not proc or proc.poll() is not None:
+                self._cleanup_temporary_directory()
+
+    def _cleanup_temporary_directory(self):
+        # Only this connection's uniquely created directory; never scan/delete
+        # arbitrary /tmp files or files still used by a live process.
+        if self._temporary_directory:
+            shutil.rmtree(self._temporary_directory, ignore_errors=True)
+            if not os.path.exists(self._temporary_directory):
+                self._temporary_directory = None
 
     # ------------------------------------------------------------ transport
     def _write(self, msg: Dict[str, Any]) -> None:

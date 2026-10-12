@@ -10,14 +10,17 @@ pauses the worker. A `team_note` invites team insights with the question ID and
 `#/questions/<id>` link. Responders save findings, citations and limitations with
 `questions_answer` before `team_reply` releases the sender. Older chat-only
 requests remain valid; resumed askers preserve useful findings on the Questions
-page. This routing is prompt guidance, not a new mandatory delivery gate or
-automatic conversion of existing conversations.
+page. New agent notifications require a linked `question_id` and originating
+ticket; structured replies require a saved board answer. Questions are optional
+and address real gaps. Legacy messages are retained. See
+[bounded team execution](bounded-team-execution.md) for guards and budgets.
 
 Collaboration response tools expose `questions_list`, `questions_get` and
 `questions_answer`. Writes require an assigned message addressed to the actor,
 a question linked to the same job or one of its child tickets, and an active
 job. A peer's ticket link qualifies. Questions remain board-wide records; no
-schema or HTTP/CLI contract changes are needed. Response turns cannot create
+schema change to Questions is needed. Team messages add nullable question/ticket
+fields, and HTTP team sends accept these optional fields. Response turns cannot create
 questions, edit wiki pages, delegate or deliver ticket results. Existing
 monitor/dispatch tool restrictions remain in force.
 
@@ -25,8 +28,9 @@ Workers normally select the registered orchestrator as their wiki reviewer;
 explicit specialist reviewers remain supported. Leads select another qualified
 teammate for their own synthesis. Authors finish and link the page before
 requesting review, keep it unchanged while waiting, and deliver with
-`ticket_result` only after the required reply and accepted current-revision
-review. Reviewers inspect `wiki_get` and cited `source_get` evidence and record
+`ticket_result` immediately after accepted current-revision review and any
+real pending question is resolved. Questions and skills are optional.
+Reviewers inspect `wiki_get` and cited `source_get` evidence and record
 `team_review` with concrete findings. Existing revision, evidence, authorship
 and self-review checks remain unchanged. Honest access limitations do not
 justify invented verification or unsupported completion claims.
@@ -41,17 +45,21 @@ or main chat because it uses an isolated ACP connection and scoped tools.
 Ordinary orchestrator replies retain the busy-session guards.
 
 Response prompts carry common collaboration rules, registered identity and
-specialty instructions, workspace, shared/triggered skills and compact team
-context. Orchestrator responses also receive the same role prompt as the main
-chat. Review turns include the author's full ticket description and acceptance
-criteria. This is board/role context, not replay of another chat's transcript.
+specialty instructions, workspace and shared skill index. Ordinary replies also
+receive triggered skills and compact team context; review packets omit these
+and include only assigned criteria/cited-source metadata. Orchestrator responses
+receive the same role prompt as main chat. `ticket_get` supplies criteria beyond
+the 4,000-character review preview. This is role context without chat replay.
 The response contract overrides general role instructions and confines the turn
 to answering or deciding the assigned review.
 
 Response prompts retain their 180-second timeout and three-attempt retry limit
 with backoff. These bounds do not guarantee an immediate or successful backend
 decision. Failed attempts remain visible; after exhaustion, authors may notify
-the lead and request another qualified reviewer, or record a concrete blocker.
+the lead and request one qualified alternate, or record a concrete blocker.
+Equivalent requests reuse attempt counts; each revision allows two reviewers,
+with six requests per ticket/page across revisions. Manual artifact revisions
+cancel obsolete pending reviews without ACP work.
 Stops and server recovery preserve durable cancellation/resumption rules.
 
 ## Implementation path
@@ -63,14 +71,16 @@ Stops and server recovery preserve durable cancellation/resumption rules.
   releases it on every outcome. `_reply_team` uses a separate session, includes
   the reviewed assignment, and records/retries actual tool decisions.
 - `coms/team.py`: delegation and resumed context teach durable question routing.
-  Existing `ticket_links` identify job questions; review/delivery gates remain.
+  `ticket_links` identify job questions; delivery needs actual current-revision
+  wiki/evidence approval but no compulsory question or new skill.
 - `coms/mcp.py`: tool descriptions match the workflow, and collaboration answer
   writes are scoped to questions linked to the message's active job.
 - Built-in `team-orchestration`, `swarmboard` and `source-backed-research` skills,
   root `SKILL.md` and `README.md` carry the same workflow. Skill folders remain
   the source of truth; editing a database skill copy is insufficient.
 - Dashboard, HTTP and CLI use existing Q&A, ticket-link and review operations.
-  No UI, migration or new tool arguments are introduced.
+  UI is unchanged. Team-message migrations and required agent `question_id`
+  arguments are documented in bounded team execution.
 
 ## Verification
 

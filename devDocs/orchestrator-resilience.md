@@ -54,8 +54,8 @@ heartbeat. Only one monitor runs at a time; normal worker slot limits stay in
 effect. A successful `team_read` is required before the monitor can
 finish; that result includes child tickets, live progress, and compact recent
 tool history so the lead can identify stalled work or repeated read loops. The
-lead can guide existing workers with `team_send` or `team_note`, and answer
-existing questions with `team_reply`, scoped to the
+lead can guide existing workers with `team_note`, and answer
+addressed Questions records with `questions_answer` before `team_reply`, scoped to the
 assigned job. The `--monitor` MCP surface permits reads and those scoped
 coordination actions, but blocks authorship, redelegation, and result delivery.
 The lead returns to waiting after monitoring while child work is still
@@ -92,7 +92,23 @@ and ordinary replies retain busy guards. Response prompts keep their existing
 - Interfaces affected (dashboard, HTTP API, CLI, agent tools, configuration):
   dashboard composer Stop control; `POST /api/runner/sessions/<sid>/stop`;
   monitor-specific MCP tools add child/progress/history context through
-  `team_read` and scope `team_send`/`team_note`/`team_reply` to the assigned job.
+  `team_read` and scope notes/Questions answers/replies to the assigned job.
+
+Team convergence checks run every 15 seconds before scheduling/recovery. The
+durable `team_progress` table supports a 30-minute no-progress hold and one-hour
+lifetime hold, with environment overrides. Distinct successful source URLs,
+accepted revisions and delivered results advance progress; chatter and retries
+do not. Unassigned, unready children and low temporary space also hold jobs
+visibly. Holds use recursive stop and remain disabled across restarts. Main chat
+creates only the root job; runner dispatch owns staffing to avoid duplication.
+
+OpenCode inference uses a bounded priority queue shared by chat, workers,
+responses and final reviews. ACP children extract into private temporary
+directories; `close` removes only its owned directory after exit. Startup rejects
+less than 16 MiB free, and idle orchestrator recovery avoids respawning under low
+space. These controls complement per-turn watchdogs. See
+[bounded team execution](bounded-team-execution.md) for migrations, review
+budgets, artifact freeze and configuration defaults.
 
 ## Verification
 

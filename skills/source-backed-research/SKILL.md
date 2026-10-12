@@ -24,7 +24,8 @@ Distinguish evidence, inference, and claims that could not be verified. When a s
 
 ## Deliver collaborative research
 
-Post reusable research questions on the Questions page before asking teammates
+Do your assigned research yourself. Questions are optional and address a real
+unresolved gap. Post reusable research questions on the Questions page before asking teammates
 for insights. Search first, create or reuse a standalone question, and link it
 to your ticket. Notify the team with its ID/link, then send a targeted request
 when a particular specialist's answer is needed. Save source-backed answers
@@ -37,7 +38,11 @@ Workers normally request the registered orchestrator as reviewer; the lead's
 synthesis needs an independent teammate. Reviewers promptly inspect `wiki_get`
 and cited `source_get` evidence, then record `team_review` with concrete reasons.
 Keep the reviewed page unchanged until the decision arrives and request a
-fresh review after any revision. Explicit access limitations are acceptable;
+fresh review only after addressing concrete requested changes. After acceptance,
+call ticket_result immediately and end; do not add research or edit the approved
+page. Use team_send(question_id=the linked question ID) for targeted questions.
+Exhausted reviews permit one alternate, within the shared review budget.
+Explicit access limitations are acceptable;
 invented verification and unsupported completion claims are not.
 
 Shared skills are verified procedures, not unverified research findings. Never claim a backtest or other analysis was performed unless it was actually executed. Skill files are read through the Swarm Agent `skill_get` tool rather than a backend's native skill loader.

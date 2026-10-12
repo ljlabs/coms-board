@@ -61,8 +61,10 @@ also erases board and agent state.
 Availability is distinct from model behavior: this configuration supplies the
 tools but cannot guarantee correct calls, useful progress or job completion.
 External services and local inference can still fail. Existing per-turn limits
-and durable team stopping remain in effect; there is no job-wide no-progress
-cutoff. See [OpenCode's tool docs](https://opencode.ai/docs/tools/#websearch)
+and durable team stopping remain in effect. Agent jobs now have persisted
+30-minute no-progress and one-hour lifetime budgets, with environment overrides.
+See [bounded team execution](bounded-team-execution.md) and
+[OpenCode's tool docs](https://opencode.ai/docs/tools/#websearch)
 and [permission docs](https://opencode.ai/docs/permissions/).
 
 `team_delegate` defaults to `task`, accepts explicit `type=research`, and copies
@@ -79,7 +81,10 @@ the Questions page before `team_reply`. Peer reviews have scheduling priority
 and one reserved response slot. Isolated orchestrator review sessions receive
 the main chat's role guidance and the reviewed assignment, even while the chat
 is busy. See [team collaboration](team-collaboration.md) for scope and lifecycle
-contracts; evidence/revision delivery gates remain unchanged.
+contracts. Questions and skills are optional; accepted current-revision evidence
+and actual wiki delivery remain required. Assigned artifacts stay frozen during
+review and after approval. Review packets contain focused criteria/cited sources
+and the shared skill index; triggered procedures load on demand.
 
 `source_read_file` reads UTF-8 text within the assigned ticket workspace (or job
 workspace for unassigned team members). It rejects escaping absolute/relative
@@ -91,17 +96,25 @@ artifact. These records reuse `research_sources` and `source_reads`, so delivery
 and current-revision review require the same recorded evidence inspection as
 web sources. No database migration or weakened review gate is needed.
 
-MCP `team_read` and injected team context use a bounded index, at most 31,900
+MCP `team_read` uses a bounded index, at most 31,900
 encoded bytes, with counts, recent message previews, pending/failed requests,
 source metadata, progress and review summaries. A specific `message_id` returns
 that job's message in bounded pages using `offset`/`next_offset`. Sources page
 with `source_after_id`/`next_source_after_id`; `source_get` returns full snapshots.
 The dashboard's full `team.room` response retains its existing shape.
+Injected team context uses a separate roughly 10,000-byte index. Final-review
+transcripts omit repeated prompts and use bounded previews with `ticket_get`
+for full criteria, results and links.
 
 Execution and synthesis prompts have an explicit 900-second total timeout.
 Continuous streaming cannot extend it. Monitor and response turns retain their
 180-second limits. Failed workers close their connections and release slots;
 existing bounded retry and pending-reply recovery rules apply.
+OpenCode prompt turns share a priority queue, default capacity two. Reviews
+precede queued workers/monitors. Queue wait and prompt deadlines are separate;
+the durable budget bounds the entire job. ACP children use private temporary
+directories cleaned after process exit; startup rejects less than 16 MiB free.
+Docker recreation clears old tmpfs leakage without erasing volumes.
 
 ## Investigation evidence
 

@@ -165,11 +165,13 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
 
 ## Working with other agents
 
+Do your assigned work yourself. Questions are optional and only for real gaps.
 For reusable collaboration questions, use `board_search`/`questions_get` first,
 then `questions_ask` when no existing record covers the need. Give standalone
 context and the ticket it unblocks. Use `ticket_link` to attach the question
 before posting its ID and `#/questions/<id>` link in `team_note`, then ask a
-relevant teammate to contribute with `team_send`. Sending the targeted request
+relevant teammate to contribute with `team_send(question_id=the ID)`. The tool
+validates the question is linked to the originating ticket. Sending the targeted request
 pauses your turn. Save useful answers, citations and limitations with
 `questions_answer` before `team_reply` releases the sender. Collaboration
 response turns can answer questions linked to their job or its child tickets,
@@ -184,12 +186,23 @@ decision. Reviewers inspect `wiki_get` and cited `source_get` evidence, challeng
 unsupported claims and record `team_review` with concrete reasons. A chat
 acknowledgment is insufficient. The runner prioritizes reviews with one reserved
 response slot, and orchestrator reviews use isolated role/assignment context
-even while the main chat is busy. After the required reply and accepted review,
-call `ticket_result`, verify success and end the worker turn. Wait without
+even while the main chat is busy. Review only the assigned artifact and its
+cited evidence. As soon as the page is accepted and no real question is pending,
+call `ticket_result`, verify success and end the worker turn. No question or new
+skill is required to finish. Wait without
 `ticket_result` while a response is pending. Keep the page unchanged after
-approval; further edits need another review. Inspect failed delivery attempts;
-after bounded retries are exhausted, notify the lead and request an alternate
-qualified reviewer or record a concrete blocker.
+approval; address concrete changes_requested findings before another review.
+Equivalent requests reuse their attempt budget. After exhaustion, notify the
+lead and request one qualified alternate or record a blocker. Limits are two
+reviewers per revision and six requests per ticket/page across revisions.
+
+Main chat creates only the ready root job and ends. The runner's staffing turn
+delegates children once per specialty; reuse active scopes and let workers
+finish. The lead owns the final synthesis. Use separate pages for different
+active tickets, including tickets using the same identity. Jobs hold after
+30 minutes without meaningful progress or one hour total; chatter and retries
+cannot extend those budgets. Let the operator decide whether to resume or
+resubmit held work.
 
 In the Orchestrator chat, the human operator can stop an active response and
 steer the same conversation; the canceled turn stays in the transcript and the
@@ -198,8 +211,8 @@ not to independent child workers. A job lead with unfinished children remains
 waiting after a failed turn. After five idle minutes, the runner may issue a
 180-second monitor turn in a separate supervision slot. `team_read` supplies child tickets, live progress, and
 compact recent tool history; the monitor must successfully call it. Its
-`--monitor` tool surface allows reads plus `team_send`, `team_note`, and replies
-to existing questions with `team_reply`, scoped to
+`--monitor` tool surface allows reads plus `team_note`, and answers
+to addressed Questions records with `questions_answer` before `team_reply`, scoped to
 the assigned job. It cannot author deliverables, redelegate, or deliver ticket
 results. See
 `devDocs/orchestrator-resilience.md` for the lifecycle contract.

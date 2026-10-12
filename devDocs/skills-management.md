@@ -43,6 +43,11 @@ current user text, assignment title/body, or teammate message; generated indices
 and restored history never activate new loads. Resumed ACP sessions can retain
 previously supplied context; disabling a skill prevents future injection.
 Injected instructions remain subject to the turn's role and tool permissions.
+Peer response and final-review packets use focused criteria/evidence instead of
+injecting complete triggered skills. Peer responses retain the enabled skill
+index and can load relevant procedures with `skill_get`; ordinary worker/chat
+and question-response trigger behavior remains unchanged. New skill publication
+is optional and never a completion quota.
 
 The file panel lists empty directories as well as files. Select a folder,
 then use **File** or **Folder** to create an entry inside it. **Rename** keeps

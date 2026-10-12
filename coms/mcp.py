@@ -42,7 +42,7 @@ TOOLS = [
     tool("ticket_link", "Attach a wiki page, question, ticket or URL to a ticket.",
          {"id": I, "kind": {"type": "string", "enum": ["wiki", "question", "ticket", "url"]},
           "ref": S, "note": S}, ["id", "kind", "ref"], True),
-    tool("ticket_result", "Deliver a completed ticket with board IDs/links and verification. For collaboration-required jobs, call only after the teammate has answered and the current wiki revision has an accepted peer review; finish a waiting turn without this tool.",
+    tool("ticket_result", "Deliver your assigned scope with board links and verification once its cited current wiki revision has accepted peer review. Questions are optional. After acceptance, deliver immediately and end; finish a pending-review turn without this tool.",
          {"id": I, "result": S}, ["id", "result"], True),
     tool("questions_list", "List questions."),
     tool("questions_get", "Read a question and its answers.", {"id": I}, ["id"]),
@@ -89,7 +89,7 @@ TOOLS = [
     tool("team_delegate", "Delegate one specialty to a named teammate. Creates a ready child task with inherited workspace and collaboration requirements. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
     tool("team_stop", "Stop a job and all descendant workers durably. Disables execution, retries, queued replies and heartbeats; preserves tickets and results. Use when asked to stop or kill a team. Only the operator, orchestrator or job lead may call this. STOP notes and process kills alone do not stop queued work.", {'job_id': I}, ['job_id'], True),
     tool("team_read", "Read a bounded job index with recent messages, pending requests, progress, reviews and sources. Use message_id for a full message (offset pages long bodies), source_after_id for more sources, and source_get/wiki_get for evidence. Act on the assignment instead of repeatedly polling unchanged output.", {"job_id": I, "after_id": I, "message_id": I, "offset": I, "source_after_id": I}, ['job_id']),
-    tool("team_send", "Notify one teammate to answer a substantive question already posted on the Questions page and linked to your ticket; include its ID/link. The runner wakes the recipient and pauses your turn. Use team_note for general insights or coordination that needs no targeted reply.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
+    tool("team_send", "Ask for an actual evidence gap on your linked Questions record, using question_id. Include its link in body. The runner pauses your turn. Reuse answers; perform your own research instead of handing off your scope. Use team_note for coordination.", {"job_id": I, "to": S, "body": S, "question_id": I, "ticket_id": I}, ['job_id', 'to', 'body', 'question_id'], True),
     tool("team_note", "Post a useful update or staffing decision to the shared job conversation; does not demand replies.", {"job_id": I, "body": S}, ['job_id', 'body'], True),
     tool("team_reply", "Answer a question addressed to you; records a visible reply and releases the waiting sender.", {"message_id": I, "body": S}, ['message_id', 'body'], True),
     tool("team_request_review", "After your final wiki edit, request review of that exact revision. Workers normally select the registered orchestrator from team_roster; the lead's own page needs an independent specialist. The runner pauses your turn; keep the page unchanged until the decision. Revise rejected work or deliver accepted work with ticket_result.", {"job_id": I, "ticket_id": I, "artifact_slug": S, "reviewer": S}, ['job_id', 'ticket_id', 'artifact_slug', 'reviewer'], True),
@@ -101,7 +101,7 @@ TOOLS = [
 
 COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'questions_list', 'questions_get', 'questions_answer', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch', 'source_read_file'}
 DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_file_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
-MONITOR_TOOLS = {'ticket_get', 'agents_list', 'team_roster', 'team_read', 'team_send', 'team_note', 'team_reply', 'wiki_get', 'source_get'}
+MONITOR_TOOLS = {'ticket_get', 'agents_list', 'team_roster', 'team_read', 'team_note', 'team_reply', 'questions_get', 'questions_answer', 'wiki_get', 'source_get'}
 
 
 def validate(spec, arguments):
@@ -143,13 +143,15 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     if collaboration and name == 'questions_answer':
         if not response_to:
             raise ValueError('Answer questions only from an assigned response turn')
-        message = conn.execute('SELECT job_id FROM team_messages WHERE id=? AND recipient=?',
+        message = conn.execute('SELECT job_id,question_id FROM team_messages WHERE id=? AND recipient=?',
                                (int(response_to), actor)).fetchone()
         linked = conn.execute("SELECT l.ticket_id FROM ticket_links l WHERE l.kind='question' AND l.ref=?",
                               (str(args['id']),)).fetchall()
         if not message or not any((team.job_for_ticket(conn, row['ticket_id']) or {}).get('id') == message['job_id']
                                   for row in linked):
             raise ValueError('Answer only questions linked to the job assigned to this response turn')
+        if message['question_id'] is not None and message['question_id'] != args['id']:
+            raise ValueError('Answer the Questions record assigned to this response turn')
         team.require_running(conn, message['job_id'])
     if assigned and name != 'team_stop' and not spec['annotations']['readOnlyHint']:
         team.require_running(conn, int(assigned))
@@ -157,6 +159,10 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
         message=conn.execute('SELECT job_id FROM team_messages WHERE id=?',(args['message_id'],)).fetchone()
         if not message or message['job_id']!=int(assigned):
             raise ValueError('Reply only within the job assigned to this heartbeat')
+    if monitor_only and name == 'questions_answer':
+        request = conn.execute("SELECT 1 FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.recipient=? AND m.question_id=? AND d.status IN ('pending','responding')", (int(assigned), actor, args['id'])).fetchone()
+        if not request:
+            raise ValueError('Answer only a Questions record addressed to you in this heartbeat job')
     if name == "board_search": result = api.search_all(conn, args["query"])
     elif name == "wiki_list": result = api.list_wiki(conn)
     elif name == "wiki_get":
@@ -172,10 +178,15 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
                 if page and page['author'] != actor:
                     raise api.BadRequest('This page belongs to another teammate. Publish your own uniquely named evidence page and reference their page instead of overwriting it.')
         result = api.save_wiki(conn, args["slug"], args.get("title", ""), args["body"], actor,
-                               tags=args.get("tags"), folder=args.get("folder"), append=name == "wiki_append")
+                               tags=args.get("tags"), folder=args.get("folder"), append=name == "wiki_append",
+                               ticket_id=int(assigned) if assigned else None)
     elif name == "ticket_list": result = api.list_tickets(conn, include_closed=True)
     elif name == "ticket_get": result = api.get_ticket(conn, args["id"])
     elif name == "ticket_create":
+        if args.get('parent_id'):
+            parent = team.job_for_ticket(conn, args['parent_id'])
+            if parent and parent.get('collaboration_required') and parent['assignee'] == actor and not assigned:
+                raise ValueError('The runner owns team staffing; create only the job in chat and let its dispatch turn delegate')
         # The shared orchestrator ACP/MCP process serves successive chats. Resolve
         # its current durable turn here instead of freezing a session in its env.
         source_session = None
@@ -239,13 +250,20 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
         else: result = schedules.delete_task(conn, args['id'], actor)
     elif name == 'team_roster': result = team.roster(conn, args['job_id'])
     elif name == 'team_delegate':
+        if not assigned:
+            raise ValueError('The runner owns team staffing; team_delegate requires an assigned job turn')
         if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
         result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'], type_=args.get('type', 'task'))
     elif name == 'team_stop':
         if assigned and int(assigned) != args['job_id']: raise ValueError('Stop your assigned job only')
         result = team.stop(conn, args['job_id'], actor)
     elif name == 'team_read': result = team.read_room(conn, args['job_id'], args.get('after_id', 0), message_id=args.get('message_id'), offset=args.get('offset', 0), source_after_id=args.get('source_after_id', 0))
-    elif name == 'team_send': result = team.send(conn, args['job_id'], actor, args['to'], args['body'])
+    elif name == 'team_send':
+        origin = int(assigned) if assigned else args.get('ticket_id')
+        if assigned and args.get('ticket_id', origin) != origin:
+            raise ValueError('Notify from your assigned ticket only')
+        result = team.send(conn, args['job_id'], actor, args['to'], args['body'],
+                           question_id=args['question_id'], ticket_id=origin)
     elif name == 'team_note': result = team.send(conn, args['job_id'], actor, '*', args['body'], kind='note')
     elif name == 'team_reply': result = team.reply(conn, args['message_id'], actor, args['body'])
     elif name == 'team_request_review':

@@ -29,7 +29,9 @@ adds durable behavior that needs its own design note.
 - [Worker tools and evidence](worker-execution.md): native tool access,
   workspace source snapshots, bounded team reads and execution deadlines.
 - [Durable team collaboration](team-collaboration.md): shared question/answer
-  routing, prompt context, and prioritized isolated peer reviews.
+  routing, staffing ownership, bounded completion and prioritized isolated peer reviews.
+- [Bounded team execution](bounded-team-execution.md): single staffing owner,
+  review/progress budgets, artifact ownership and ACP resource cleanup.
 - [Ticket board moves](ticket-board-moves.md): drag-and-drop status changes and
   keyboard/touch controls.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent
@@ -124,6 +126,7 @@ callers to understand the full behavior.
 | Application operations and HTTP API | `coms/api.py`, `coms/server.py`, `tests/test_api.py`, `tests/test_server.py` |
 | Command-line interface | `coms/cli.py`, `tests/test_cli.py` |
 | Agent execution, tools, orchestration, and team collaboration | `coms/runner.py`, `coms/team.py`, `coms/acp.py`, `coms/mcp.py`, related `tests/test_*.py` |
+| Shared inference capacity | `coms/turn_queue.py`, `tests/test_turn_queue.py` |
 | Orchestrator transcripts and live progress | `coms/orchestrator_transcript.py`, `coms/progress.py`, `tests/test_orchestrator_transcript.py` |
 | Shared skill folders | `coms/skill_store.py`, `coms/api.py`, `devDocs/skills-management.md` |
 | Workspace rules and scheduled work | `coms/workspace.py`, `coms/schedules.py`, related tests |

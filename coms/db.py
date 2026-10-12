@@ -9,12 +9,29 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from functools import wraps
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "data" / "coms.db"
 
 _local = threading.local()
+
+
+def serialized_write(operation):
+    """Serialize read/check/write operations, rolling back rejected requests."""
+    @wraps(operation)
+    def run(conn, *args, **kwargs):
+        owned = not conn.in_transaction
+        if owned: conn.execute('BEGIN IMMEDIATE')
+        try:
+            result = operation(conn, *args, **kwargs)
+            if owned and kwargs.get('commit', True): conn.commit()
+            return result
+        except Exception:
+            if owned: conn.rollback()
+            raise
+    return run
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS departments (
@@ -163,6 +180,11 @@ CREATE TABLE IF NOT EXISTS peer_reviews (
   reviewer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested',
   message_id INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_progress (
+  job_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, progressed_at TEXT NOT NULL,
+  evidence_count INTEGER NOT NULL DEFAULT 0, accepted_count INTEGER NOT NULL DEFAULT 0,
+  delivered_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS artifact_reads (
   agent_slug TEXT NOT NULL, run_id INTEGER NOT NULL, artifact_slug TEXT NOT NULL,
@@ -390,6 +412,8 @@ MIGRATIONS = [
     ("tickets", "source_ticket_id", "INTEGER"),
     ("tickets", "source_session_id", "TEXT NOT NULL DEFAULT ''"),
     ("team_deliveries", "attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("team_messages", "ticket_id", "INTEGER"),
+    ("team_messages", "question_id", "INTEGER"),
     ("ticket_comments", "updated_at", "TEXT"),
     ("question_comments", "updated_at", "TEXT"),
     ("orchestrator_messages", "session_id", "TEXT NOT NULL DEFAULT 'default'"),

@@ -17,6 +17,7 @@ for setup, user-facing behavior, configuration, and security limits.
 | `web/` | Browser dashboard. It calls the server API and presents wiki, tickets, Q&A, runner, and orchestrator features. |
 | `coms/runner.py` | Agent queue, ACP sessions, ticket execution and review, orchestrator sessions, retries, and scheduled-task dispatch. |
 | `coms/acp.py` | ACP process connection and protocol handling for configured agent backends. |
+| `coms/turn_queue.py` | Bounded OpenCode inference queue with review priority and cancellation. |
 | `coms/orchestrator_transcript.py` | Stored orchestrator turns, message ordering, and conversation event publication. |
 | `coms/progress.py` | Live agent progress summaries consumed by dashboard views. |
 | `coms/mcp.py` | Newline-delimited MCP tool interface used by ACP agents to read and update board records. |
@@ -55,7 +56,12 @@ transcripts, handles retries, and gates review or completion on required board
 actions. Team replies and reviews can pause and resume work. Shared collaboration
 guidance routes reusable questions/answers to Q&A before team notifications;
 peer reviews receive a reserved response slot and isolated orchestrator role
-context. See [team collaboration](team-collaboration.md). Scheduled prompts
+context. Main chat creates the root job; runner dispatch owns staffing.
+Structured question notifications require a linked question and originating
+ticket; artifacts have ticket ownership and bounded revision reviews.
+Persisted team progress/lifetime budgets hold nonconverging jobs. ACP processes
+own temporary directories cleaned after exit. See
+[team collaboration](team-collaboration.md). Scheduled prompts
 are dispatched as tickets for the runner to execute.
 
 Changes to agent behavior may cross several boundaries: tool schema and

@@ -665,19 +665,29 @@ def _index_wiki(conn, page: dict) -> None:
     )
 
 
+@db.serialized_write
 def save_wiki(conn, slug: str | None, title: str, body: str, author: str,
               tags=None, department: str | None = None, append: bool = False,
-              folder: str | None = None) -> dict:
+              folder: str | None = None, ticket_id: int | None = None) -> dict:
     """Create or update a page. `folder` (slash path) files it; None leaves the
     existing folder untouched on update and means unfiled on create."""
     if not title and not slug:
         raise BadRequest("title or slug required")
     slug = slug or slugify(title)
+    if ticket_id is not None:
+        from . import team
+        team.require_running(conn, ticket_id)
     nf = norm_folder(folder) if folder is not None else None
     ex = _one(conn.execute("SELECT * FROM wiki_pages WHERE slug=?", (slug,)))
     ts = now()
     if ex:
         new_body = (ex["body"].rstrip("\n") + "\n\n" + body) if append else body
+        if (title or ex['title'], new_body, _tags(tags) if tags is not None else ex['tags'],
+                department if department is not None else ex['department'], nf if nf is not None else ex.get('folder', '')) == (
+                ex['title'], ex['body'], ex['tags'], ex['department'], ex.get('folder', '')):
+            return get_wiki(conn, slug)
+        from . import team
+        team.validate_artifact_write(conn, slug, author, ticket_id)
         conn.execute(
             "INSERT INTO wiki_revisions(page_id, title, body, tags, author, created_at) "
             "VALUES (?,?,?,?,?,?)",
@@ -699,6 +709,8 @@ def save_wiki(conn, slug: str | None, title: str, body: str, author: str,
         )
         kind = "wiki.create"
     page = _one(conn.execute("SELECT * FROM wiki_pages WHERE slug=?", (slug,)))
+    from . import team
+    team.retire_obsolete_reviews(conn)
     _index_wiki(conn, page)
     log_activity(conn, author, kind, f"wiki:{slug}", f"{kind.split('.')[1]}d wiki page “{page['title']}”")
     touch_agent(conn, author)
@@ -706,6 +718,7 @@ def save_wiki(conn, slug: str | None, title: str, body: str, author: str,
     return get_wiki(conn, slug)
 
 
+@db.serialized_write
 def move_wiki(conn, slug: str, folder: str | None, actor: str) -> dict:
     """Re-file a page into `folder` ('' or None = unfiled). The slug — and so every
     [[wikilink]], backlink and FTS entry — is unchanged; only the location moves."""
@@ -720,16 +733,21 @@ def move_wiki(conn, slug: str, folder: str | None, actor: str) -> dict:
         log_activity(conn, actor, "wiki.move", f"wiki:{slug}",
                      f"moved wiki page “{p['title']}” {old or '(unfiled)'} → {nf or '(unfiled)'}")
         touch_agent(conn, actor)
+        from . import team
+        team.retire_obsolete_reviews(conn)
         conn.commit()
     return get_wiki(conn, slug)
 
 
+@db.serialized_write
 def delete_wiki(conn, slug: str, actor: str) -> None:
     p = _one(conn.execute("SELECT * FROM wiki_pages WHERE slug=?", (slug,)))
     if not p:
         raise NotFound(f"wiki page {slug!r} not found")
     conn.execute("DELETE FROM wiki_revisions WHERE page_id=?", (p["id"],))
     conn.execute("DELETE FROM wiki_pages WHERE id=?", (p["id"],))
+    from . import team
+    team.retire_obsolete_reviews(conn)
     if db.fts4_available(conn, "wiki_fts"):
         conn.execute("DELETE FROM wiki_fts WHERE slug=?", (slug,))
     log_activity(conn, actor, "wiki.delete", f"wiki:{slug}", f"deleted wiki page “{p['title']}”")
@@ -1177,6 +1195,9 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
     data["updated_at"] = ts
     sets = ", ".join(f"{k}=?" for k in data)
     conn.execute(f"UPDATE tickets SET {sets} WHERE id=?", (*data.values(), tid))
+    if t['type'] == 'job' and not t['ready_for_execution'] and data.get('ready_for_execution'):
+        from . import team
+        team.reset_progress(conn, tid)
     t = _one(conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)))
     _index_ticket(conn, t)
     touch_agent(conn, actor)

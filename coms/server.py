@@ -486,7 +486,7 @@ def r_team(conn, m, mm, q, b, actor):
     job_id = int(mm.group(1))
     if m == 'GET': return team.room(conn, job_id)
     if m == 'POST':
-        return team.send(conn, job_id, actor, b.get('to', '*'), b.get('body', ''), kind='note' if b.get('to', '*') == '*' else 'question')
+        return team.send(conn, job_id, actor, b.get('to', '*'), b.get('body', ''), kind='note' if b.get('to', '*') == '*' else 'question', question_id=b.get('question_id'), ticket_id=b.get('ticket_id'))
 
 
 def r_team_stop(conn, m, mm, q, b, actor):

@@ -55,3 +55,11 @@ turn restrictions. `BASE_AGENT_SYSTEM_PROMPT` extends it for execution;
 context. Keep delegation instructions in `coms/team.py`, MCP descriptions and
 the built-in workflow skills aligned. See [team collaboration](team-collaboration.md)
 for the tool scopes and scheduling contract.
+
+The shared prompt requires agents to do their own scope, save/link real Questions
+records before notifications, freeze reviewed pages and deliver immediately
+after acceptance. Questions and new skills are optional. Chat creates the root
+job; only runner dispatch staffs it. Review response packets include the assigned
+criteria/cited-source index and shared skill index, without injecting full
+triggered skills or unrelated room context. Changes to these contracts also
+require matching domain guards and lifecycle tests.

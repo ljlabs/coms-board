@@ -4,13 +4,15 @@ import hashlib
 import json
 import re
 import socket
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
-from . import api
+from . import api, db
 
 
 def job_for_ticket(conn, tid):
@@ -50,7 +52,7 @@ def require_running(conn, tid):
         raise api.BadRequest(f'Ticket #{tid} belongs to a stopped team; resume it explicitly before executing')
 
 
-def stop(conn, job_id, actor):
+def stop(conn, job_id, actor, *, reason=None):
     """Hold a whole team atomically; killing a process alone is retryable."""
     job = api.get_ticket(conn, job_id)
     role = conn.execute('SELECT role FROM agents WHERE slug=?', (actor,)).fetchone()
@@ -65,7 +67,7 @@ def stop(conn, job_id, actor):
             SELECT t.id FROM tickets t JOIN work w ON t.parent_id=w.id OR t.source_ticket_id=w.id)
             SELECT id FROM work ORDER BY id""", (job_id,))]
         marks = ','.join('?' for _ in ids)
-        stamp, reason = api.now(), 'Team stopped by the operator; resume work explicitly'
+        stamp, reason = api.now(), reason or 'Team stopped by the operator; resume work explicitly'
         conn.execute(f"UPDATE tickets SET ready_for_execution=0,agent_retry_requested=0,status=CASE WHEN status IN ('done','wontfix') THEN status ELSE 'blocked' END,updated_at=? WHERE id IN ({marks})", [stamp] + ids)
         conn.execute(f"UPDATE agent_runs SET status='cancelled',finished_at=?,error=? WHERE ticket_id IN ({marks}) AND status IN ('queued','running','waiting')", [stamp, reason] + ids)
         conn.execute(f"UPDATE agent_runtime SET state='cancelled',phase='cancelled',summary=?,updated_at=?,finished_at=? WHERE ticket_id IN ({marks}) AND state IN ('running','waiting')", [reason, stamp, stamp] + ids)
@@ -83,6 +85,79 @@ def stop(conn, job_id, actor):
     return {'job_id': int(job_id), 'stopped': True, 'ticket_ids': ids}
 
 
+def hold(conn, job_id, reason):
+    result = stop(conn, job_id, api.ADMIN_ACTOR, reason=reason)
+    api.comment_ticket(conn, job_id, 'runner', reason + '; resume explicitly or resubmit the job.')
+    return result
+
+
+def reset_progress(conn, job_id):
+    stamp = api.now()
+    conn.execute('INSERT OR REPLACE INTO team_progress(job_id,started_at,progressed_at) VALUES(?,?,?)',
+                 (job_id, stamp, stamp))
+
+
+def check_progress(conn, *, at=None):
+    """Durable budgets use evidence/decisions/results, never chatter or retries."""
+    at = at or datetime.now(timezone.utc)
+    stamp = at.isoformat()
+    def limit(name, default):
+        try: return max(60, int(os.environ.get(name, default)))
+        except ValueError: return default
+    idle_limit = limit('COMS_TEAM_NO_PROGRESS_SECONDS', 1800)
+    lifetime = limit('COMS_TEAM_LIFETIME_SECONDS', 3600)
+    held = []
+    for job in conn.execute("SELECT t.* FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.type='job' AND t.collaboration_required=1 AND t.ready_for_execution=1 AND t.status IN ('open','in_progress','review') AND lower(t.assignee) NOT LIKE 'human%' AND lower(t.tags) NOT LIKE '%human%' AND lower(coalesce(a.role,''))!='human'").fetchall():
+        if is_stopped(conn, job['id']): continue
+        counts = (
+            conn.execute("SELECT count(DISTINCT url) FROM research_sources WHERE job_id=? AND status='ok'", (job['id'],)).fetchone()[0],
+            conn.execute("SELECT count(*) FROM (SELECT DISTINCT artifact_slug,artifact_version FROM peer_reviews WHERE job_id=? AND status='accepted')", (job['id'],)).fetchone()[0],
+            conn.execute("WITH RECURSIVE work(id) AS (SELECT id FROM tickets WHERE id=? UNION SELECT t.id FROM tickets t JOIN work w ON t.parent_id=w.id) SELECT count(*) FROM tickets WHERE id IN (SELECT id FROM work) AND trim(result)!=''", (job['id'],)).fetchone()[0])
+        state = conn.execute('SELECT * FROM team_progress WHERE job_id=?', (job['id'],)).fetchone()
+        if not state:
+            conn.execute('INSERT INTO team_progress VALUES(?,?,?,?,?,?)', (job['id'], job['created_at'], job['created_at'], 0, 0, 0))
+            state = conn.execute('SELECT * FROM team_progress WHERE job_id=?', (job['id'],)).fetchone()
+        previous = (state['evidence_count'], state['accepted_count'], state['delivered_count'])
+        progressed = any(new > old for new, old in zip(counts, previous))
+        progressed_at = stamp if progressed else state['progressed_at']
+        conn.execute('UPDATE team_progress SET progressed_at=?,evidence_count=?,accepted_count=?,delivered_count=? WHERE job_id=?',
+                     (progressed_at, *[max(new, old) for new, old in zip(counts, previous)], job['id']))
+        def age(value):
+            try: return (at - datetime.fromisoformat(value.replace('Z', '+00:00'))).total_seconds()
+            except ValueError: return lifetime
+        reason = ('Team lifetime budget exhausted' if age(state['started_at']) >= lifetime else
+                  'Team made no new evidence, accepted review or delivered result within its progress budget' if age(progressed_at) >= idle_limit else '')
+        if reason:
+            hold(conn, job['id'], reason)
+            held.append(job['id'])
+    conn.commit()
+    return held
+
+
+def retire_obsolete_reviews(conn):
+    stale = conn.execute("SELECT p.id,p.message_id,d.run_id FROM peer_reviews p LEFT JOIN wiki_pages w ON w.slug=p.artifact_slug LEFT JOIN team_deliveries d ON d.message_id=p.message_id WHERE p.status IN ('requested','failed') AND (w.slug IS NULL OR w.updated_at!=p.artifact_version)").fetchall()
+    stamp, reason = api.now(), 'Artifact superseded; request review of its current revision'
+    for row in stale:
+        conn.execute("UPDATE peer_reviews SET status='cancelled',reason=?,updated_at=? WHERE id=?", (reason, stamp, row['id']))
+        conn.execute("UPDATE team_deliveries SET status='cancelled',error=?,updated_at=? WHERE message_id=? AND status NOT IN ('answered','cancelled')", (reason, stamp, row['message_id']))
+        if row['run_id']:
+            conn.execute("UPDATE agent_runs SET status='cancelled',error=?,finished_at=? WHERE id=? AND status IN ('queued','running','waiting')", (reason, stamp, row['run_id']))
+            conn.execute("UPDATE agent_runtime SET state='cancelled',phase='cancelled',summary=?,updated_at=?,finished_at=? WHERE run_id=? AND state IN ('running','waiting')", (reason, stamp, stamp, row['run_id']))
+    return len(stale)
+
+
+def validate_artifact_write(conn, slug, actor, ticket_id):
+    if ticket_id is None or actor == api.ADMIN_ACTOR: return
+    ticket = api.get_ticket(conn, ticket_id)
+    if ticket['assignee'] != actor: raise api.BadRequest('Write artifacts only for your own ticket')
+    owner = conn.execute("SELECT t.id FROM ticket_links l JOIN tickets t ON t.id=l.ticket_id WHERE l.kind='wiki' AND l.ref=? AND t.id!=? AND t.ready_for_execution=1 AND t.status IN ('open','in_progress','review') LIMIT 1", (slug, ticket_id)).fetchone()
+    if owner: raise api.BadRequest(f'Artifact belongs to active ticket #{owner[0]}; use a separate page for your ticket')
+    review = conn.execute("SELECT p.status,d.status AS delivery_status FROM peer_reviews p JOIN wiki_pages w ON w.slug=p.artifact_slug JOIN tickets j ON j.id=p.job_id LEFT JOIN team_deliveries d ON d.message_id=p.message_id WHERE p.artifact_slug=? AND p.artifact_version=w.updated_at AND p.status IN ('requested','failed','accepted') AND j.ready_for_execution=1 AND j.status NOT IN ('done','wontfix','blocked') ORDER BY (p.status='accepted') DESC,p.id DESC LIMIT 1", (slug,)).fetchone()
+    if review and (review['status'] == 'accepted' or review['delivery_status'] in ('pending','responding')):
+        raise api.BadRequest('Keep the reviewed revision unchanged; wait for review or deliver the accepted page with ticket_result')
+
+
+@db.serialized_write
 def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='task'):
     require_running(conn, job_id)
     job = api.get_ticket(conn, job_id)
@@ -92,16 +167,23 @@ def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='tas
         raise api.BadRequest('Provide a distinct personal name, capabilities and an actionable scope')
     if type_ not in ('task', 'research'):
         raise api.BadRequest('Delegate a task or research assignment')
+    if not conn.in_transaction: conn.execute('BEGIN IMMEDIATE')
+    require_running(conn, job_id)
     agent = api.ensure_agent(conn, name, 'expert', capabilities, commit=False)
     if agent['slug'] == actor: raise api.BadRequest('Delegate to a specialist other than yourself')
     # Retrying a dispatched assignment must not create another identical worker.
     existing = conn.execute('SELECT id FROM tickets WHERE parent_id=? AND assignee=? AND title=?', (job_id, agent['slug'], title.strip())).fetchone()
     if existing:
+        conn.commit()
         return {'agent': agent, 'ticket': api.get_ticket(conn, existing['id'])}
+    active = conn.execute("SELECT id FROM tickets WHERE parent_id=? AND assignee=? AND status NOT IN ('done','wontfix') LIMIT 1", (job_id, agent['slug'])).fetchone()
+    if active:
+        conn.rollback()
+        raise api.BadRequest(f'Teammate already owns active ticket #{active[0]}; read and reuse that scope before assigning more work')
     urls = list(dict.fromkeys(re.findall(r'https://[^\s<>]+', job['body'])))
     assignment = (body.strip() + f'\n\nParent job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\n' +
                   ('Starting source URLs:\n' + '\n'.join(urls) + '\n' if urls else '') +
-                  f'\nYour team room belongs to job #{job_id}. Use native tools to inspect the workspace and run requested tests. Record local file evidence with source_read_file, or retrieve relevant public HTTPS evidence with source_fetch. Cite the returned source URLs/IDs and file lines; distinguish evidence, inference and limitations. Read team_roster. Search for a reusable question with board_search; read questions_get or post it with questions_ask. Link the question to your ticket with ticket_link, notify the team with team_note, then ask a relevant teammate to answer it using team_send with the question ID/link and end this turn while waiting. Save answers with questions_answer before team_reply; preserve reusable legacy chat replies on the Questions page on resumption. Publish and link your own evidence page, then request its current-revision review from the registered orchestrator unless your assignment names another qualified reviewer. Wait for the actual team_review decision before ticket_result. Do not invent verification. Share useful methods with the lead; the orchestrator publishes shared skills. The lead owns the combined synthesis.')
+                  f'\nYour team room belongs to job #{job_id}. Do your assigned research yourself using native tools. Record local evidence with source_read_file or public HTTPS evidence with source_fetch, then cite it and report limitations. Questions are optional: only for a real unresolved gap, search board_search/questions_get or create questions_ask, ticket_link it, announce it with team_note, then team_send(question_id=the ID) to a relevant teammate and end this turn while waiting. Save answers with questions_answer before team_reply. Publish and link your own evidence page, finish edits, and request current-revision review from the registered orchestrator unless another qualified reviewer is named. Keep the page unchanged during review. On acceptance, immediately call ticket_result and end. Revise only concrete changes_requested findings; do not restart failed reviews indefinitely. Do not invent verification. Share a reusable method only if one emerged; new skills are optional. The lead owns the combined synthesis.')
     ticket = api.create_ticket(conn, title, assignment, actor, type_=type_, assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True, workspace=job.get('workspace', ''))
     send(conn, job_id, actor, '*', f"{'Reused' if agent['reused'] else 'Registered'} {agent['name']} ({agent['slug']}): {capabilities}. Assigned ticket #{ticket['id']}: {title}.", kind='note')
     return {'agent': agent, 'ticket': ticket}
@@ -171,7 +253,9 @@ def read_room(conn, job_id, after_id=0, *, message_id=None, offset=0, source_aft
     return data
 
 
-def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, commit=True):
+@db.serialized_write
+def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, commit=True,
+         question_id=None, ticket_id=None):
     if kind in ('question', 'review_request'): require_running(conn, job_id)
     member(conn, job_id, sender)
     if not isinstance(body, str) or not body.strip() or len(body) > 16000:
@@ -182,8 +266,19 @@ def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, comm
     if to != '*' and to not in members: raise api.BadRequest('Recipient is not a member of this job')
     if to in members and members[to]['role'] == 'human' and kind in ('question', 'review_request'):
         raise api.BadRequest('Automatic responses require an execution agent')
+    if question_id is not None:
+        if kind != 'question': raise api.BadRequest('Question references belong to question notifications')
+        question = api.get_question(conn, question_id)
+        ticket = api.get_ticket(conn, ticket_id) if ticket_id is not None else None
+        origin = job_for_ticket(conn, ticket_id) if ticket else None
+        if not ticket or ticket['assignee'] != sender or not origin or origin['id'] != int(job_id):
+            raise api.BadRequest('Notify from your own ticket in this job')
+        if not conn.execute("SELECT 1 FROM ticket_links WHERE ticket_id=? AND kind='question' AND ref=?", (ticket_id, str(question['id']))).fetchone():
+            raise api.BadRequest('The Questions record must be linked to your originating ticket before notification')
+        prior = conn.execute("SELECT m.* FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.ticket_id=? AND m.question_id=? AND m.sender=? AND m.recipient=? AND d.status IN ('pending','responding','answered') ORDER BY m.id DESC LIMIT 1", (job_id, ticket_id, question_id, sender, to)).fetchone()
+        if prior: return dict(prior)
     stamp = api.now()
-    mid = conn.execute('INSERT INTO team_messages(job_id,sender,recipient,kind,body,reply_to,created_at) VALUES(?,?,?,?,?,?,?)', (job_id, sender, to, kind, body.strip(), reply_to, stamp)).lastrowid
+    mid = conn.execute('INSERT INTO team_messages(job_id,sender,recipient,kind,body,reply_to,created_at,ticket_id,question_id) VALUES(?,?,?,?,?,?,?,?,?)', (job_id, sender, to, kind, body.strip(), reply_to, stamp, ticket_id, question_id)).lastrowid
     if kind in ('question', 'review_request'):
         conn.execute('INSERT INTO team_deliveries(message_id,recipient,updated_at) VALUES(?,?,?)', (mid, to, stamp))
     api.log_activity(conn, sender, 'team.' + kind, f'ticket:{job_id}', f'{sender} → {to}: {body[:180]}')
@@ -192,11 +287,14 @@ def send(conn, job_id, sender, to, body, *, kind='question', reply_to=None, comm
     return dict(conn.execute('SELECT * FROM team_messages WHERE id=?', (mid,)).fetchone())
 
 
+@db.serialized_write
 def reply(conn, message_id, actor, body, *, commit=True):
     original = conn.execute('SELECT * FROM team_messages WHERE id=?', (message_id,)).fetchone()
     if not original: raise api.NotFound('Team message not found')
     if original['recipient'] != actor: raise api.BadRequest('Only the addressed teammate can reply')
     if original['kind'] == 'review_request': raise api.BadRequest('Use team_review to decide a peer review')
+    if original['question_id'] is not None and not conn.execute('SELECT 1 FROM answers WHERE question_id=? AND author=?', (original['question_id'], actor)).fetchone():
+        raise api.BadRequest('Save your answer on the Questions page with questions_answer before team_reply')
     delivery = conn.execute('SELECT status,response_id FROM team_deliveries WHERE message_id=? AND recipient=?', (message_id, actor)).fetchone()
     if not delivery or delivery['status'] in ('answered', 'cancelled'): raise api.BadRequest('This request already has a response or was cancelled')
     response = send(conn, original['job_id'], actor, original['sender'], body, kind='reply', reply_to=message_id, commit=False)
@@ -205,7 +303,9 @@ def reply(conn, message_id, actor, body, *, commit=True):
     return response
 
 
+@db.serialized_write
 def request_review(conn, job_id, tid, actor, artifact_slug, reviewer):
+    require_running(conn, tid)
     member(conn, job_id, actor)
     ticket = api.get_ticket(conn, tid)
     job = job_for_ticket(conn, tid)
@@ -213,16 +313,28 @@ def request_review(conn, job_id, tid, actor, artifact_slug, reviewer):
         raise api.BadRequest('Review requests must refer to your own ticket in this job')
     artifact = api.get_wiki(conn, artifact_slug)
     if artifact['updated_by'] != actor: raise api.BadRequest('Only the artifact author can request its review')
-    prior = conn.execute("SELECT * FROM peer_reviews WHERE ticket_id=? AND artifact_slug=? AND artifact_version=? AND reviewer=? AND status IN ('requested','accepted') ORDER BY id DESC LIMIT 1", (tid, artifact_slug, artifact['updated_at'], reviewer)).fetchone()
-    if prior: return dict(prior)
+    retire_obsolete_reviews(conn)
+    accepted = conn.execute("SELECT * FROM peer_reviews WHERE ticket_id=? AND artifact_slug=? AND artifact_version=? AND status='accepted' ORDER BY id DESC LIMIT 1", (tid, artifact_slug, artifact['updated_at'])).fetchone()
+    if accepted: return dict(accepted)
+    prior = conn.execute("SELECT p.*,d.status AS delivery_status,d.attempt_count FROM peer_reviews p JOIN team_deliveries d ON d.message_id=p.message_id WHERE p.ticket_id=? AND p.artifact_slug=? AND p.artifact_version=? AND p.reviewer=? AND p.status IN ('requested','accepted','failed') ORDER BY p.id DESC LIMIT 1", (tid, artifact_slug, artifact['updated_at'], reviewer)).fetchone()
+    if prior:
+        if prior['status'] == 'accepted' or prior['delivery_status'] in ('pending','responding'):
+            conn.commit()
+            return dict(prior)
+        raise api.BadRequest('This reviewer exhausted the current revision retry budget; use one qualified alternate or record a blocker')
+    attempts = conn.execute('SELECT count(*) FROM peer_reviews WHERE ticket_id=? AND artifact_slug=? AND artifact_version=?', (tid, artifact_slug, artifact['updated_at'])).fetchone()[0]
+    total = conn.execute('SELECT count(*) FROM peer_reviews WHERE ticket_id=? AND artifact_slug=?', (tid, artifact_slug)).fetchone()[0]
+    if attempts >= 2 or total >= 6:
+        raise api.BadRequest('Artifact review budget exhausted; record a concrete blocker instead of restarting review requests')
     message = send(conn, job_id, actor, reviewer,
-        f'Please peer review [[{artifact_slug}]] for ticket #{tid}. Read the current page with wiki_get and the recorded file or web evidence with source_get. Use native tools or source_read_file to check current workspace files when relevant. Challenge unsupported claims, missing citations and misleading completion claims. Use team_review with accepted or changes_requested and concrete reasons. Explicitly reported source-access limitations are acceptable; invented verification is not.', kind='review_request', commit=False)
+        f'Please peer review [[{artifact_slug}]] for ticket #{tid}. Read the current page with wiki_get and the recorded file or web evidence with source_get. Use native tools or source_read_file to check current workspace files when relevant. Challenge unsupported claims, missing citations and misleading completion claims. Use team_review with accepted or changes_requested and concrete reasons. Explicitly reported source-access limitations are acceptable; invented verification is not.', kind='review_request', commit=False, ticket_id=tid)
     stamp = api.now()
     rid = conn.execute('INSERT INTO peer_reviews(job_id,ticket_id,artifact_slug,artifact_version,author,reviewer,message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)', (job_id, tid, artifact_slug, artifact['updated_at'], actor, reviewer, message['id'], stamp, stamp)).lastrowid
     conn.commit()
     return dict(conn.execute('SELECT * FROM peer_reviews WHERE id=?', (rid,)).fetchone())
 
 
+@db.serialized_write
 def review(conn, review_id, actor, decision, body, run_id):
     if decision not in ('accepted', 'changes_requested'): raise api.BadRequest('Review decision must be accepted or changes_requested')
     if not body.strip(): raise api.BadRequest('Peer reviews need concrete findings')
@@ -235,7 +347,7 @@ def review(conn, review_id, actor, decision, body, run_id):
     if not seen: raise api.BadRequest('Read the current artifact with wiki_get before deciding its review')
     if decision == 'accepted':
         evidence = [dict(row) for row in conn.execute("SELECT s.* FROM source_reads r JOIN research_sources s ON s.id=r.source_id WHERE r.agent_slug=? AND r.run_id=? AND s.job_id=? AND s.status='ok'", (actor, run_id, item['job_id']))]
-        if not any(s['url'] in artifact['body'] or s['final_url'] in artifact['body'] for s in evidence):
+        if not any(s['url'] in artifact['body'] or (s['final_url'] and s['final_url'] in artifact['body']) for s in evidence):
             raise api.BadRequest('Read a successfully retrieved source cited by the artifact with source_get before accepting the review')
     response = send(conn, item['job_id'], actor, item['author'], decision + ': ' + body, kind='peer_review', reply_to=item['message_id'], commit=False)
     conn.execute('UPDATE peer_reviews SET status=?,reason=?,updated_at=? WHERE id=?', (decision, body, api.now(), review_id))
@@ -247,7 +359,7 @@ def review(conn, review_id, actor, decision, body, run_id):
 def pending(conn, tid, actor):
     job = job_for_ticket(conn, tid)
     if not job: return False
-    return bool(conn.execute("SELECT 1 FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.sender=? AND d.status IN ('pending','responding') LIMIT 1", (job['id'], actor)).fetchone())
+    return bool(conn.execute("SELECT 1 FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.sender=? AND (m.ticket_id=? OR m.ticket_id IS NULL) AND d.status IN ('pending','responding') LIMIT 1", (job['id'], actor, tid)).fetchone())
 
 
 def context(conn, tid, actor, *, instructions=True):
@@ -275,8 +387,15 @@ def context(conn, tid, actor, *, instructions=True):
     data['progress']['items']=[{k:item.get(k) for k in ('ticket_id','agent_slug','stage','state','phase','summary','updated_at','idle_seconds')}
                                for item in data['progress']['items'][:24]]
     data['recent_tools']=data['recent_tools'][:12]
+    # Budget the injected index separately from the paginated tool response.
+    buckets = [data[key] for key in ('messages', 'members', 'reviews', 'sources', 'tickets', 'recent_tools', 'pending_requests')]
+    buckets.append(data['progress']['items'])
+    while len(json.dumps(data, ensure_ascii=False).encode('utf-8')) > 10000:
+        bucket = max(buckets, key=lambda items: len(json.dumps(items, ensure_ascii=False)))
+        if not bucket: break
+        bucket.pop(0)
     return ('TEAM CONVERSATION\n' + json.dumps(data, ensure_ascii=False) +
-        ('\nThe conversation, review and source entries above are compact indexes. Read full details with team_read, wiki_get and source_get before relying on them. If you still need a teammate answer, search or publish a substantive question on the Questions page, link it to your assigned ticket, then send its ID/link to the relevant teammate. Save reusable answers with questions_answer. Finish all wiki edits before requesting its current-revision review, normally from the registered orchestrator for worker pages; the lead needs an independent reviewer. After requesting review, do not edit that page until the reviewer replies; the runner ends your turn and resumes it automatically. If a reply or review is pending, finish WITHOUT ticket_result. Once a teammate has answered and the current page has an accepted review, call ticket_result and verify the tool succeeded. Revise rejected work before requesting a fresh review. Share useful methods with the orchestrator; only the human operator and orchestrator can publish them to the shared skills folder. Do not create filler chatter or claim completed review without a decision.\n' if instructions else ''))
+        ('\nThis is a compact index; use team_read, wiki_get and source_get for details needed by your assignment. Questions are optional and must address a real gap. Save/link the Questions record before team_send(question_id=the ID). Save answers with questions_answer before team_reply. Finish your page edits before requesting review, normally from the orchestrator; the lead needs an independent reviewer. Keep the page unchanged while waiting. After acceptance call ticket_result immediately and end; no question or new skill is required. Revise only concrete review findings. A failed review permits one qualified alternate, not endless resubmissions. Use team_note for coordination and blockers.\n' if instructions else ''))
 
 
 def validate_delivery(conn, tid, actor):
@@ -299,13 +418,9 @@ def validate_delivery(conn, tid, actor):
                 validate_delivery(conn, child['id'], child['assignee'])
         latest = conn.execute('SELECT max(updated_at) FROM tickets WHERE parent_id=?', (tid,)).fetchone()[0]
         if latest and not any(p['updated_at'] >= latest for p in pages): raise api.BadRequest('Write a fresh synthesis after the teammate results and reviews')
-        skills = conn.execute("SELECT 1 FROM activity WHERE kind='skill.create' AND created_at>? AND actor IN (SELECT sender FROM team_messages WHERE job_id=?) LIMIT 1", (job['created_at'], job['id'])).fetchone()
-        if not skills: raise api.BadRequest('Publish at least one new shared procedure grounded in the methods this team actually used')
     else:
-        answered = conn.execute("SELECT 1 FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.job_id=? AND m.sender=? AND m.kind='question' AND d.status='answered' LIMIT 1", (job['id'], actor)).fetchone()
-        if not answered: raise api.BadRequest('Ask another teammate a substantive question with team_send and receive a reply before delivery')
         sources = [dict(row) for row in conn.execute("SELECT * FROM research_sources WHERE job_id=? AND reader=? AND status='ok'", (job['id'], actor))]
-        if not any(s['url'] in p['body'] or s['final_url'] in p['body'] for s in sources for p in pages):
+        if not any(s['url'] in p['body'] or (s['final_url'] and s['final_url'] in p['body']) for s in sources for p in pages):
             raise api.BadRequest('Cite at least one source recorded with source_read_file or source_fetch in your linked evidence page')
 
 

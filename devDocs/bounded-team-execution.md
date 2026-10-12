@@ -1,0 +1,124 @@
+# Feature: Bounded team execution
+
+## Behavior and contracts
+
+Main chat creates the ready root job and ends. Runner dispatch is the single
+staffing owner and uses `team_delegate` once per specialty before workers start.
+MCP rejects child staffing/delegation from unassigned chat. Delegation serializes
+its checks and creation: an identical scope returns its prior ticket, and a
+differently titled scope for an agent with an active child is rejected. The lead
+owns synthesis; workers perform their own assignments.
+
+Questions are optional and address actual information gaps. Search/read existing
+Q&A, create or reuse a standalone question, link it to the assigned ticket, and
+announce its ID/link with `team_note` before targeted `team_send`. The agent tool
+requires `question_id`, with optional `ticket_id` for an unassigned caller. The
+shared domain validates existence, ticket ownership, job membership and the link.
+Equivalent pending/responding/answered notifications reuse the message and pause
+only their originating ticket. Coordination uses notes. Structured responders
+save an answer on their assigned Questions record before replying; legacy
+messages remain readable/respondable. HTTP adds optional question/ticket fields;
+CLI Questions/link operations are unchanged.
+
+Each active ticket owns its linked artifact even if another assignment uses the
+same agent. Assigned wiki writes preserve the page while review is pending and
+after acceptance. Identical writes retain its revision. Manual writes, moves or
+deletion retire obsolete requested/failed reviews and cancel delivery/run without
+starting ACP. Historical accepted decisions remain visible with `current=false`.
+Held/completed jobs do not freeze a resubmitted assignment. Page writes, review
+checks/decisions, delegation and notifications serialize through SQLite's write
+lock; rejected operations release their lock.
+
+Workers normally request the orchestrator; leads need an independent reviewer.
+Reviewers read the exact page with `wiki_get` and cited successful evidence with
+`source_get` before `team_review`. Empty redirect URLs cannot qualify uncited
+evidence. Equivalent review requests reuse the message/attempt budget. Each
+revision allows two reviewers (normally one plus an alternate), with six requests
+total per ticket/page across revisions. Each delivery retains its three-attempt
+backoff. Exhaustion requires a blocker instead of repeated fresh requests.
+
+Once the unchanged linked evidence page is accepted and no real request remains
+pending, call `ticket_result`, verify success and end. No answered question or new
+skill is required. Leads still wait for completed child reviews, write a fresh
+synthesis and obtain independent current-revision approval. An unassigned,
+unready unfinished child causes a visible hold before ACP startup.
+
+## Scheduling, context and budgets
+
+Peer responses retain one reserved slot, alongside the heartbeat slot and normal
+worker capacity. Identity/busy guards and isolated orchestrator sessions remain.
+OpenCode prompt turns also share a cancellable inference queue
+(`COMS_MODEL_PARALLEL_TURNS`, default 2, range 1–16). Priority is reviews, then
+chat/replies, workers and monitors. Running turns are not preempted. Queue
+acquisition has its own timeout, separate from the ACP prompt deadline.
+
+Review packets retain orchestrator role guidance where applicable, reviewed
+criteria (4,000 characters with `ticket_get` for full content), cited-source
+metadata and shared skill index. They omit unrelated room history and full
+triggered skills; procedures remain available through `skill_get`. Other turns
+inject a roughly 10,000-byte team index; `team_read` retains its 31,900-byte budget.
+Final review uses bounded discussion/transcript previews and tools for full
+criteria/artifacts, without recursively copying prior prompts. Response/final
+review retains 180-second deadlines; execution/synthesis retains 900 seconds.
+
+The runner checks durable progress and temporary space every 15 seconds before
+dispatch/recovery. `team_progress` stores a fixed start, last progress and high
+water counts of distinct successful source URLs, accepted artifact revisions and
+nonempty results. Chatter, wiki edits, repeated sources and retries do not advance
+them. Active agent jobs hold after 1,800 seconds without progress or 3,600 seconds
+total. Environment/Compose overrides `COMS_TEAM_NO_PROGRESS_SECONDS` and
+`COMS_TEAM_LIFETIME_SECONDS` have a 60-second minimum. Explicitly enabling a held
+job resets the budget; descendants still require explicit reopening/enabling.
+Human-tagged/assigned jobs are excluded.
+
+Holds use recursive team stop, cancel work and add a concrete comment. They
+persist across runner restart. Low temporary space (below 16 MiB) also holds
+agent teams and prevents ACP startup. Each subprocess owns a `coms-acp-*`
+directory with child `TMPDIR`/`TMP`/`TEMP` set to it. Cleanup removes only that
+directory after process exit. Docker recreation clears legacy tmpfs leakage
+while preserving board and agent-state volumes. See
+[orchestrator resilience](orchestrator-resilience.md).
+
+## Implementation and migration
+
+- `coms/runner.py`: shared/role/turn prompts, focused reviews, single dispatch,
+  reserved response slot, inference queue integration and recurring guards.
+- `coms/team.py`: artifact ownership, structured question/review contracts,
+  delivery gates, stale retirement, budget accounting and durable holds.
+- `coms/db.py`: nullable `team_messages.ticket_id` and `question_id` migrations
+  preserve legacy messages. `team_progress` is created for fresh/old databases.
+  The write decorator provides atomic checks/writes with rollback.
+- `coms/api.py`, `coms/mcp.py`, `coms/server.py`: provenance-aware wiki writes,
+  explicit-resume budget reset, required agent question arguments and additive
+  HTTP fields. Monitors permit notes and answers to questions addressed to that
+  lead in its job, but cannot send questions or expand work.
+- `coms/turn_queue.py`, `coms/acp.py`, `compose.yaml`: bounded inference turns,
+  owned temporary directories, low-space checks and environment defaults.
+- Built-in workflow skills, root `SKILL.md` and `README.md` match completion
+  rules. Skill folders remain authoritative; database copies are imported once.
+
+## Verification and investigation
+
+`tests/test_team_convergence.py` covers staffing, structured Q&A and migration,
+artifact freeze/ownership, stale retirement, review budgets across revisions,
+concurrent duplicate requests, optional questions/skills, durable progress holds,
+draft dependencies, low space, focused packets and owned temporary cleanup.
+`tests/test_turn_queue.py` covers review priority and queued cancellation without
+capacity leakage. Existing collaboration, monitor, worker, stop, skill and
+orchestrator regressions preserve tool/evidence/lifecycle contracts. No dashboard
+changes require browser tests.
+
+The 12 October job #1 audit found duplicate staffing scopes, an unassigned draft
+dependency, stale accepted/pending revisions, no delivered result across dozens
+of runs and review retry budgets reset by new requests. Most communication was
+coordination, while a real research question was correctly saved and answered on
+the board. Native extractions filled the 128 MiB Docker tmpfs; early review
+timeouts predated exhaustion. The operator stopped the job durably and will
+resubmit after deployment; its records are preserved.
+
+Validation on 12 October 2026: the full Python suite ran 302 checks successfully
+with two platform skips. The focused collaboration/lifecycle run passed 102
+checks with one skip. Compose configuration and staged whitespace checks passed.
+Windows regression runs used `PYTHONUTF8=1` and normal temporary-directory access
+for existing SQLite fixtures. Unit checks use isolated databases and mock ACP;
+they do not establish the local model's future research quality.

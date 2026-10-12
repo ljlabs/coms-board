@@ -197,7 +197,7 @@ class WorkerExecutionTests(unittest.TestCase):
         self.assertNotIn('Parent research job', result['ticket']['body'])
 
     def test_delegation_can_explicitly_request_web_research(self):
-        with patch.dict(os.environ, {'COMS_AGENT': self.lead}):
+        with patch.dict(os.environ, {'COMS_AGENT': self.lead, 'COMS_TICKET_ID': str(self.job['id'])}):
             result = mcp.call_tool('team_delegate', {'job_id': self.job['id'], 'name': 'Ravi',
                 'capabilities': 'Public docs', 'title': 'Read docs', 'body': 'Inspect public docs', 'type': 'research'})
         self.assertEqual(json.loads(result['content'][0]['text'])['ticket']['type'], 'research')

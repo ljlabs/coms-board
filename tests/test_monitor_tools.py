@@ -44,11 +44,12 @@ class TestMonitorTools(unittest.TestCase):
     def test_tools_list_exposes_team_monitor_tools_but_not_authoring_or_delivery(self):
         response = mcp.dispatch({'id': 1, 'method': 'tools/list'}, monitor_only=True)
         names = {item['name'] for item in response['result']['tools']}
-        self.assertTrue({'team_read', 'team_send', 'team_note', 'team_reply', 'wiki_get', 'source_get'} <= names)
-        self.assertFalse({'team_delegate', 'ticket_create', 'ticket_result', 'wiki_put'} & names)
+        self.assertTrue({'team_read', 'team_note', 'team_reply', 'questions_get', 'questions_answer', 'wiki_get', 'source_get'} <= names)
+        self.assertFalse({'team_send', 'team_delegate', 'ticket_create', 'ticket_result', 'wiki_put'} & names)
 
     def test_monitor_forbidden_calls_are_rejected_by_dispatch_and_direct_call(self):
         forbidden = {
+            'team_send': {'job_id': self.job['id'], 'to': self.child_agent['slug'], 'body': 'More research'},
             'team_delegate': {'job_id': self.job['id'], 'name': 'Another specialist',
                               'capabilities': 'research', 'title': 'More work', 'body': 'Do more'},
             'ticket_create': {'title': 'Unapproved work'},
@@ -100,6 +101,19 @@ class TestMonitorTools(unittest.TestCase):
                 mcp.call_tool('team_reply', {'message_id': foreign_question['id'],
                                              'body': 'I should not answer across jobs.'},
                               monitor_only=True)
+
+    def test_monitor_saves_only_answers_addressed_to_it_in_this_job(self):
+        question = api.ask_question(self.conn, 'Specific gap', 'What is verified?', self.child_agent['slug'])
+        api.link_ticket(self.conn, self.child['id'], 'question', str(question['id']), self.child_agent['slug'])
+        message = team.send(self.conn, self.job['id'], self.child_agent['slug'], self.lead['slug'],
+                            'Please help', question_id=question['id'], ticket_id=self.child['id'])
+        foreign = api.ask_question(self.conn, 'Other question', 'Unrelated', 'admin')
+        with self.monitor_env():
+            with self.assertRaisesRegex(ValueError, 'addressed'):
+                mcp.call_tool('questions_answer', {'id': foreign['id'], 'body': 'Unrelated'}, monitor_only=True)
+            mcp.call_tool('questions_answer', {'id': question['id'], 'body': 'Evidence and limitations'}, monitor_only=True)
+            mcp.call_tool('team_reply', {'message_id': message['id'], 'body': 'Saved on Questions'}, monitor_only=True)
+        self.assertFalse(team.pending(self.conn, self.child['id'], self.child_agent['slug']))
 
     def test_assigned_team_read_returns_child_status_live_progress_and_recent_tools(self):
         child_run = self.conn.execute(
