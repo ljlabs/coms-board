@@ -46,8 +46,8 @@ TOOLS = [
          {"id": I, "result": S}, ["id", "result"], True),
     tool("questions_list", "List questions."),
     tool("questions_get", "Read a question and its answers.", {"id": I}, ["id"]),
-    tool("questions_ask", "Publish an unresolved question to the board.", {"title": S, "body": S}, ["title", "body"], True),
-    tool("questions_answer", "Answer an existing question on the board.", {"id": I, "body": S}, ["id", "body"], True),
+    tool("questions_ask", "After board_search, publish a standalone reusable question with context and evidence needed. Link it to your ticket before notifying teammates with team_note/team_send.", {"title": S, "body": S}, ["title", "body"], True),
+    tool("questions_answer", "Save a useful answer with inspected evidence and limitations on the Questions page before team_reply. Response turns may answer questions linked to their job.", {"id": I, "body": S}, ["id", "body"], True),
     tool("agent_templates", "List available execution templates before creating work."),
     tool("agents_list", "List registered agents and their capabilities. Prefer reusing a suitable teammate."),
     tool("agent_ensure", "Reuse a matching registered agent, or create a named teammate if none fits. An explicit slug selects that identity.",
@@ -89,17 +89,17 @@ TOOLS = [
     tool("team_delegate", "Delegate one specialty to a named teammate. Creates a ready child task with inherited workspace and collaboration requirements. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
     tool("team_stop", "Stop a job and all descendant workers durably. Disables execution, retries, queued replies and heartbeats; preserves tickets and results. Use when asked to stop or kill a team. Only the operator, orchestrator or job lead may call this. STOP notes and process kills alone do not stop queued work.", {'job_id': I}, ['job_id'], True),
     tool("team_read", "Read a bounded job index with recent messages, pending requests, progress, reviews and sources. Use message_id for a full message (offset pages long bodies), source_after_id for more sources, and source_get/wiki_get for evidence. Act on the assignment instead of repeatedly polling unchanged output.", {"job_id": I, "after_id": I, "message_id": I, "offset": I, "source_after_id": I}, ['job_id']),
-    tool("team_send", "Ask one teammate a substantive question. The runner wakes the recipient for a response. Finish your turn if waiting; you resume after replies.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
+    tool("team_send", "Notify one teammate to answer a substantive question already posted on the Questions page and linked to your ticket; include its ID/link. The runner wakes the recipient and pauses your turn. Use team_note for general insights or coordination that needs no targeted reply.", {"job_id": I, "to": S, "body": S}, ['job_id', 'to', 'body'], True),
     tool("team_note", "Post a useful update or staffing decision to the shared job conversation; does not demand replies.", {"job_id": I, "body": S}, ['job_id', 'body'], True),
     tool("team_reply", "Answer a question addressed to you; records a visible reply and releases the waiting sender.", {"message_id": I, "body": S}, ['message_id', 'body'], True),
-    tool("team_request_review", "After your final wiki edit, request another teammate's review of that exact revision. The runner ends your turn while it is pending; do not edit the page until the reviewer responds. Then revise if needed or, after acceptance, call ticket_result.", {"job_id": I, "ticket_id": I, "artifact_slug": S, "reviewer": S}, ['job_id', 'ticket_id', 'artifact_slug', 'reviewer'], True),
+    tool("team_request_review", "After your final wiki edit, request review of that exact revision. Workers normally select the registered orchestrator from team_roster; the lead's own page needs an independent specialist. The runner pauses your turn; keep the page unchanged until the decision. Revise rejected work or deliver accepted work with ticket_result.", {"job_id": I, "ticket_id": I, "artifact_slug": S, "reviewer": S}, ['job_id', 'ticket_id', 'artifact_slug', 'reviewer'], True),
     tool("team_review", "Read the exact requested revision with wiki_get and inspect cited evidence with source_get before deciding. Use this review ID in your assigned response turn; give concrete findings.", {"review_id": I, "decision": {"type": "string", "enum": ['accepted', 'changes_requested']}, "body": S}, ['review_id', 'decision', 'body'], True),
     tool("source_fetch", "Retrieve a public HTTPS source and record its real content/status/access date for peer inspection. Failed URLs are not verified evidence.", {"job_id": I, "url": S}, ['job_id', 'url'], True),
     tool("source_read_file", "Read UTF-8 text within your assigned workspace and record numbered file lines and a SHA256 hash as reviewable evidence. Cite the returned URL/ID in your wiki page. Defaults to at most 200 lines; request an explicit range of at most 200 lines. Native tools remain available for workspace work and tests.", {"job_id": I, "path": S, "start_line": I, "end_line": I}, ['job_id', 'path'], True),
     tool("source_get", "Read the content and retrieval status of a recorded research source.", {"source_id": I}, ['source_id']),
 ]
 
-COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch', 'source_read_file'}
+COLLABORATION_TOOLS = {'board_search', 'wiki_list', 'wiki_get', 'questions_list', 'questions_get', 'questions_answer', 'ticket_list', 'ticket_get', 'agents_list', 'skill_list', 'skill_get', 'skill_file_get', 'schedule_list', 'schedule_get', 'team_roster', 'team_read', 'team_reply', 'team_review', 'source_get', 'source_fetch', 'source_read_file'}
 DISPATCH_TOOLS = {'ticket_get', 'agents_list', 'skill_get', 'skill_file_get', 'skill_list', 'team_delegate', 'team_roster', 'team_note'}
 MONITOR_TOOLS = {'ticket_get', 'agents_list', 'team_roster', 'team_read', 'team_send', 'team_note', 'team_reply', 'wiki_get', 'source_get'}
 
@@ -140,6 +140,17 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     if assigned and name in ("ticket_result", "ticket_comment", "ticket_link") and args["id"] != int(assigned):
         raise ValueError("execution agent may only change its assigned ticket")
     conn = db.connect(readonly=readonly)
+    if collaboration and name == 'questions_answer':
+        if not response_to:
+            raise ValueError('Answer questions only from an assigned response turn')
+        message = conn.execute('SELECT job_id FROM team_messages WHERE id=? AND recipient=?',
+                               (int(response_to), actor)).fetchone()
+        linked = conn.execute("SELECT l.ticket_id FROM ticket_links l WHERE l.kind='question' AND l.ref=?",
+                              (str(args['id']),)).fetchall()
+        if not message or not any((team.job_for_ticket(conn, row['ticket_id']) or {}).get('id') == message['job_id']
+                                  for row in linked):
+            raise ValueError('Answer only questions linked to the job assigned to this response turn')
+        team.require_running(conn, message['job_id'])
     if assigned and name != 'team_stop' and not spec['annotations']['readOnlyHint']:
         team.require_running(conn, int(assigned))
     if monitor_only and name=='team_reply':

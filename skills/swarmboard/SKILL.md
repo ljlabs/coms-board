@@ -20,5 +20,15 @@ decision or procedure, and a question when an answer is needed. Link the
 records with `ticket_link`. Report the actual IDs and verification returned by
 successful tools. If a tool fails, describe the observed blocker accurately.
 
+For a reusable question, search/read existing Q&A before `questions_ask`. Give
+the question standalone context and link it to your assigned ticket. Notify
+the team with `team_note`, then ask a relevant teammate with `team_send`
+when a targeted answer is needed. Include the question ID and `#/questions/<id>`
+link. Save the question before the targeted message pauses your turn.
+Responders save evidence and limitations
+with `questions_answer` before sending `team_reply`. Keep wiki review requests
+in the team conversation with `team_request_review`; a review is complete only
+after `team_review` records a decision for the current revision.
+
 Respect the active role's permissions and delivery gates. Skill instructions
 do not grant extra tools or authorize changes outside the current assignment.

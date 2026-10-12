@@ -28,6 +28,8 @@ adds durable behavior that needs its own design note.
   team leads.
 - [Worker tools and evidence](worker-execution.md): native tool access,
   workspace source snapshots, bounded team reads and execution deadlines.
+- [Durable team collaboration](team-collaboration.md): shared question/answer
+  routing, prompt context, and prioritized isolated peer reviews.
 - [Ticket board moves](ticket-board-moves.md): drag-and-drop status changes and
   keyboard/touch controls.
 - [Shared skills manager](skills-management.md): skill-folder storage and agent

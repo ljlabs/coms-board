@@ -52,7 +52,10 @@ the configured ACP backend. The backend receives board tools through
 `coms/mcp.py`; those tools call shared application and collaboration operations
 to read context and record deliverables. The runner stores progress and
 transcripts, handles retries, and gates review or completion on required board
-actions. Team replies and reviews can pause and resume work. Scheduled prompts
+actions. Team replies and reviews can pause and resume work. Shared collaboration
+guidance routes reusable questions/answers to Q&A before team notifications;
+peer reviews receive a reserved response slot and isolated orchestrator role
+context. See [team collaboration](team-collaboration.md). Scheduled prompts
 are dispatched as tickets for the runner to execute.
 
 Changes to agent behavior may cross several boundaries: tool schema and

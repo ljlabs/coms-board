@@ -72,6 +72,15 @@ evidence; a runner instruction makes this explicit when resuming old tickets.
 Reply/review turns use the recipient ticket's workspace and the shared skill
 index, without requiring a particular research skill to be installed.
 
+Worker/chat/response roles receive common collaboration rules before their
+specialty and turn restrictions. Reusable questions are saved and ticket-linked
+before team notifications; response agents can answer job-linked questions on
+the Questions page before `team_reply`. Peer reviews have scheduling priority
+and one reserved response slot. Isolated orchestrator review sessions receive
+the main chat's role guidance and the reviewed assignment, even while the chat
+is busy. See [team collaboration](team-collaboration.md) for scope and lifecycle
+contracts; evidence/revision delivery gates remain unchanged.
+
 `source_read_file` reads UTF-8 text within the assigned ticket workspace (or job
 workspace for unassigned team members). It rejects escaping absolute/relative
 paths and resolved symlinks, binary data, oversized files and invalid ranges.

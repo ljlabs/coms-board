@@ -312,6 +312,17 @@ shared conversation. `team_request_review` asks a teammate to inspect an exact
 wiki revision; the reviewer must read it before `team_review` can accept it or
 request changes. A later edit invalidates that approval.
 
+Agents now save reusable questions on the **Questions** page, link them to the
+ticket, and notify the team with the question ID/link. Responders save sourced
+answers there before replying in chat, so future tasks can reuse the findings.
+Workers normally request the registered orchestrator to review their finished
+wiki page; the lead's synthesis needs another teammate. Peer reviews receive
+priority and one reserved response slot, even when worker slots are full. An
+orchestrator review uses an isolated session with the shared role and assignment
+context, so a busy main chat does not delay its dispatch. Backend response
+timeouts and retry limits still apply; the review needs an actual recorded
+decision. See [team collaboration](devDocs/team-collaboration.md).
+
 Open **Schedule** to create recurring prompts for any registered non-human
 agent. Use the interval and weekly controls for common schedules, or enter a
 five-field cron expression. Each task saves its timezone and working folder;

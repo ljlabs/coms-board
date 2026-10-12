@@ -266,10 +266,21 @@ def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaborat
              'args': [str(ROOT / 'coms' / 'mcp.py')] + (['--readonly'] if readonly else []) + (['--collaboration'] if collaboration_message_id is not None else []) + (['--dispatch'] if dispatch_only else []) + (['--monitor'] if monitor_only else []),
              'env': [{'name': k, 'value': v} for k, v in env.items()]}]
 
+# These rules apply before role/specialty guidance in worker, chat and response
+# sessions. Team messages notify people; board records preserve their findings.
+SHARED_COLLABORATION_PROMPT = """SHARED COLLABORATION RULES
+The Questions page is the durable record for substantive questions and answers so future tasks can reuse the findings. The team conversation coordinates attention and peer review.
+Before asking for reusable facts, insights, decisions or clarification, use board_search and questions_get to find and read an existing question. Reuse it when it covers the same need; otherwise use questions_ask with a standalone title, relevant context, the ticket it unblocks and the evidence needed. Use ticket_link(kind=question, ref=the question ID) on your assigned ticket before team_send. Notify everyone with team_note including the question ID and #/questions/<id> link when useful, then ask the appropriate teammate with team_send to contribute there. team_send pauses your turn, so save and link the question first. Keep simple scheduling, handoffs and review notices in the team conversation.
+When responding to a linked question, read questions_get and save a useful answer with questions_answer before team_reply. Cite inspected sources, distinguish evidence from inference and state limitations. Reply in the team conversation with the question ID/link and a short summary to release the waiting sender. Reuse existing answers rather than duplicating them. For legacy chat-only questions, deliver team_reply; the resumed asker should preserve reusable findings on the Questions page. A scoped response or monitor turn may only use its available tools and answer questions linked to that job or its child tickets, including a peer's ticket; it must not create new questions or assignments.
+Keep the wiki workflow: finish your page, link it to your ticket, and use team_request_review for that exact revision. Workers should normally choose the registered orchestrator from team_roster as reviewer. The lead's own synthesis needs a different qualified teammate. Review requests are urgent because the author waits for a decision. In an assigned review turn, read wiki_get and cited source_get evidence promptly, then record team_review with accepted or changes_requested and concrete reasons. Check relevant current files when needed, challenge unsupported claims and report source-access limitations honestly. A chat acknowledgment is not a review decision. Do not edit the page while review is pending; revisions after rejection or approval need a fresh review. If a response attempt fails, the runner retries within its bounds; inspect the recorded failure rather than treating it as acceptance or repeatedly requesting duplicates. After retries are exhausted, the author may request a fresh review from another qualified registered teammate and notify the lead, or record a concrete blocker if none is available. Never bypass approval.
+"""
+
 # Shared instructions are deliberately prepended to every execution agent's
 # template and ticket-specific prompt. The board is the durable record; the
 # configured workspace is not monitored for useful deliverables.
 BASE_AGENT_SYSTEM_PROMPT = f"""You are an execution agent working through Swarm Agent. The Swarm Agent database is the system of record. Files you create or change in the workspace are not monitored, indexed, or automatically attached to the ticket, so a file by itself does not count as a delivered result.
+
+{SHARED_COLLABORATION_PROMPT}
 
 Use the attached Swarm Agent MCP tools for ALL board reads and writes. Use board_search before creating knowledge, wiki_put/wiki_append for durable documentation, questions_ask/questions_answer for Q&A, and ticket_link for references. Read relevant enabled skill folders with skill_list and skill_get before acting; every worker and collaboration agent can read every enabled skill in the repository-root skills/ folder. Do not write board deliverables to local markdown files. For a standalone ticket, call ticket_result with the delivered board IDs/links and verification before finishing. For a ticket under a collaboration-required job, follow the team gate: if a teammate reply or peer review is pending, finish the turn WITHOUT ticket_result; after a teammate answers and the current wiki revision receives an accepted peer review, call ticket_result. A tool call only counts if it returned successfully; never claim it happened based on your own response text. If tools are unavailable, report that blocker; do not substitute filesystem output or CLI writes.
 
@@ -286,6 +297,18 @@ Choose the board destination that matches the requested work:
 - Use ticket_comment only for concise, durable updates the requester should see. ACP responses and tool output are private diagnostics; do not post routine progress.
 
 Before finishing, make sure the requested deliverable is actually present in the appropriate board record (wiki page, question/answer, or ticket result/comment) and report its link or identifier. If the request is ambiguous about whether knowledge belongs in the wiki or a question, use the wiki for durable reference material and Q&A for a specific question needing an answer."""
+
+def orchestrator_system_prompt(agent, backend, selected_model):
+    """The same role context is supplied to chat and isolated review sessions."""
+    return (SHARED_COLLABORATION_PROMPT + '\n' +
+            f"You are the Swarm Agent main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
+            "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
+            "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
+            "Use native web search to find current sources and URL fetching to read known URLs (websearch and webfetch in OpenCode). Record public team evidence with source_fetch. Correct failed tool arguments or report a blocker; do not repeat unchanged failed calls. "
+            "Use the attached Swarm Agent MCP tools for all board operations. Read relevant enabled skills with skill_list and skill_get; all agents can read every enabled root skills/ folder entry. Only the human operator and orchestrator can use skill_put to publish or edit a verified procedure; workers should share methods with the orchestrator. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
+            "Choose p0/p1/p2/p3 based on urgency and impact. For requested work, set ready=true on actionable tickets; keep planning drafts, blocked dependencies, holds, required approvals and human assignments unready. "
+            "When asked to stop or kill a team, call team_stop with its job_id and verify stopped=true. Process kills and STOP notes leave work eligible for restart. Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs. "
+            f"You are {agent['name']}, the registered orchestrator agent {agent['slug']}. Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists with distinct personal names. For team work, create a ready job assigned to the orchestrator, with recommended_workers when specified. Direct the user to its team room to watch collaboration. Delegate child tickets and resume for synthesis after worker reviews finish. A completion claim needs a freshly written, linked and peer-reviewed wiki artifact.\n")
 
 def now():
     from .api import now as timestamp
@@ -318,6 +341,7 @@ class Runner:
         self.run_conns = {}  # Includes ACP startup and team-response connections.
         self.recorders = {}
         self.heartbeat_tickets = set()
+        self.peer_review_keys = set()
         self._lease = None
         self.thread = None
         if start: self.start()
@@ -506,6 +530,7 @@ class Runner:
             with self.lock:
                 self.active.pop(key,None)
                 self.heartbeat_tickets.discard(key)
+                self.peer_review_keys.discard(key)
             conn=getattr(db._local,'conn',None)
             if conn: conn.close()
             db._local.__dict__.clear()
@@ -521,7 +546,6 @@ class Runner:
                 with self.lock:
                     conn=db.connect()
                     self._schedule_team_heartbeats(conn)
-                    if self._active_slots()>=maximum: continue
                     self._schedule_team_replies(conn, maximum)
                     if self._active_slots()>=maximum: continue
                     rows=conn.execute("SELECT t.*,a.role AS agent_role FROM tickets t LEFT JOIN agents a ON a.slug=t.assignee WHERE t.ready_for_execution=1 AND t.status IN ('open','in_progress') AND t.assignee NOT LIKE 'human%' AND lower(coalesce(a.role,''))!='human' AND lower(t.tags) NOT LIKE '%human%' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.ticket_id=t.id AND r.status IN ('queued','running','waiting')) AND NOT EXISTS (SELECT 1 FROM agent_runs busy WHERE t.assignee!='' AND busy.agent_slug=t.assignee AND busy.status='running') ORDER BY CASE t.priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,t.created_at LIMIT 100").fetchall()
@@ -678,7 +702,8 @@ class Runner:
         threading.Thread(target=restart,daemon=True,name='coms-orchestrator-health').start()
 
     def _active_slots(self):
-        return sum(key not in self.heartbeat_tickets for key in self.active)
+        return sum(key not in self.heartbeat_tickets and key not in self.peer_review_keys
+                   for key in self.active)
 
     def _schedule_team_heartbeats(self,conn):
         """One bounded supervision slot remains available even if workers are full."""
@@ -718,25 +743,36 @@ class Runner:
         return _agent_retry_due(ticket.get('agent_retry_count', 0), latest['finished_at'])
 
     def _schedule_team_replies(self, conn, maximum):
-        rows = conn.execute("SELECT d.message_id,d.recipient,a.role FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id JOIN agents a ON a.slug=d.recipient JOIN tickets j ON j.id=m.job_id WHERE d.status='pending' AND d.attempt_count<? AND (d.attempt_count=0 OR julianday(d.updated_at)+(? * (1 << max(0,d.attempt_count-1))) / 86400.0 <= julianday(?)) AND j.ready_for_execution=1 AND j.status!='wontfix' AND lower(a.role)!='human' AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.agent_slug=d.recipient AND r.status='running') ORDER BY d.message_id LIMIT 40", (MAX_TEAM_ATTEMPTS, TEAM_RETRY_BASE_SECONDS, now())).fetchall()
+        if self.stopping.is_set(): return
+        rows = conn.execute("SELECT d.message_id,d.recipient,a.role,m.kind FROM team_deliveries d JOIN team_messages m ON m.id=d.message_id JOIN agents a ON a.slug=d.recipient JOIN tickets j ON j.id=m.job_id WHERE d.status='pending' AND d.attempt_count<? AND (d.attempt_count=0 OR julianday(d.updated_at)+(? * (1 << max(0,d.attempt_count-1))) / 86400.0 <= julianday(?)) AND j.ready_for_execution=1 AND j.status!='wontfix' AND lower(a.role)!='human' AND NOT EXISTS(SELECT 1 FROM agent_runs r WHERE r.agent_slug=d.recipient AND r.status='running' AND (r.stage='collaborate' OR lower(a.role)!='orchestrator' OR m.kind!='review_request')) ORDER BY CASE m.kind WHEN 'review_request' THEN 0 ELSE 1 END,d.message_id LIMIT 40", (MAX_TEAM_ATTEMPTS, TEAM_RETRY_BASE_SECONDS, now())).fetchall()
         for row in rows:
-            if self._active_slots() >= maximum: break
+            is_review = row['kind'] == 'review_request'
+            reserved = is_review and not self.peer_review_keys
+            if not reserved and self._active_slots() >= maximum: continue
             key = 'team:' + row['recipient']
             if key in self.active: continue
-            if row['role'] == 'orchestrator' and (self.orchestrator_busy or any(str(k).startswith('review:') for k in self.active)): continue
+            if row['role'].lower() == 'orchestrator' and not is_review and (self.orchestrator_busy or any(str(k).startswith('review:') for k in self.active)): continue
             self.active[key] = True
-            threading.Thread(target=self._worker, args=(key, self._reply_team, row['message_id'], row['recipient']), daemon=True).start()
+            if reserved: self.peer_review_keys.add(key)
+            try:
+                threading.Thread(target=self._worker, args=(key, self._reply_team, row['message_id'], row['recipient']), daemon=True).start()
+            except Exception:
+                self.active.pop(key, None); self.peer_review_keys.discard(key)
+                raise
 
     def _reply_team(self, message_id, recipient):
         conn = db.connect(); settings = self.settings(); backend = settings.get('active_backend', 'opencode')
         c = None; recorder = None; rid = None
         conn.execute('BEGIN IMMEDIATE')
         message = conn.execute("SELECT m.*,d.attempt_count FROM team_messages m JOIN team_deliveries d ON d.message_id=m.id WHERE m.id=? AND d.recipient=? AND d.status='pending' AND d.attempt_count<?", (message_id, recipient, MAX_TEAM_ATTEMPTS)).fetchone()
-        if not message or conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running'", (recipient,)).fetchone():
+        if not message:
             conn.rollback(); return
         if team.is_stopped(conn, message['job_id']):
             conn.rollback(); return
         agent = api.get_agent(conn, recipient)
+        isolated_review = agent['role'].lower() == 'orchestrator' and message['kind'] == 'review_request'
+        if conn.execute("SELECT 1 FROM agent_runs WHERE agent_slug=? AND status='running' AND (stage='collaborate' OR ?=0)", (recipient, isolated_review)).fetchone():
+            conn.rollback(); return
         assigned = conn.execute('SELECT id FROM tickets WHERE assignee=? AND (id=? OR parent_id=?) ORDER BY id LIMIT 1', (recipient, message['job_id'], message['job_id'])).fetchone()
         tid = assigned['id'] if assigned else message['job_id']
         if team.is_stopped(conn, tid):
@@ -752,12 +788,19 @@ class Runner:
             c = self._conn(tid, backend, cwd, rid, actor_override=recipient, collaboration_message_id=message_id)
             conn.execute('UPDATE agent_runs SET session_id=? WHERE id=?', (c.session_id, rid)); conn.commit()
             review = conn.execute('SELECT * FROM peer_reviews WHERE message_id=?', (message_id,)).fetchone()
-            prompt = (f"You are {agent['name']} ({recipient}), role {agent['role']}. Capabilities: {agent['description']}. Instructions: {agent.get('instructions', '')}.\n"
-                      f"TEAM RESPONSE TURN for job #{message['job_id']}. Another teammate needs your response. This is not a new ticket assignment. Do not publish ticket_result, edit artifacts, or send more questions in this turn. Read team_read and the relevant wiki/source records.\n"
+            prompt = (orchestrator_system_prompt(agent, backend, settings.get('model_' + backend) or 'ACP default')
+                      if agent['role'].lower() == 'orchestrator' else SHARED_COLLABORATION_PROMPT)
+            prompt += (f"You are {agent['name']} ({recipient}), role {agent['role']}. Capabilities: {agent['description']}. Instructions: {agent.get('instructions', '')}.\n"
+                      f"CURRENT TURN CONTRACT: TEAM RESPONSE TURN for job #{message['job_id']}. These response restrictions override general role instructions. Another teammate needs your response. This is not a new ticket assignment. Do not publish ticket_result, edit artifacts, create new questions, publish skills or delegate in this turn. Read team_read and the relevant wiki/source/question records.\n"
                       f"Message #{message_id} from {message['sender']} to you:\n{message['body']}\n\n")
             if review:
+                reviewed_ticket = api.get_ticket(conn, review['ticket_id'])
+                prompt += (f"REVIEWED TICKET ASSIGNMENT #{reviewed_ticket['id']}: {reviewed_ticket['title']}\n"
+                           f"Description and acceptance criteria:\n{reviewed_ticket['body']}\n"
+                           f"Recorded result: {reviewed_ticket['result']}\n")
                 prompt += f"Peer review #{review['id']} of [[{review['artifact_slug']}]]: call wiki_get, inspect cited evidence with source_get (use source_read_file or native tools for current workspace files, source_fetch for public URLs), then team_review(review_id={review['id']}, decision=accepted or changes_requested, body=concrete findings). Do not rubber-stamp unsupported claims.\n"
             else:
+                prompt += 'For a linked board question, use questions_get and questions_answer before team_reply; save evidence and limitations on the Questions page and include its ID/link in the reply. For a legacy chat-only question, answer with team_reply so the sender can preserve the finding on resumption.\n'
                 prompt += f"Answer with team_reply(message_id={message_id}, body=your useful response). An assistant response alone does not deliver the reply. Give specific reasoning and identify uncertainties.\n"
             prompt += f'\nYour workspace is {cwd}. Native tools are available for inspecting the assignment and evidence. Use native web search to discover sources and URL fetching for known URLs (websearch and webfetch in OpenCode); record public evidence with source_fetch and local evidence with source_read_file. Read source_get for the cited snapshot. Read shared Swarm Agent procedures with MCP skill_get. Do not repeatedly poll unchanged team_read output.\n'
             prompt += api.shared_skill_context(conn) + '\n' + team.context(conn, tid, recipient, instructions=False)
@@ -875,7 +918,7 @@ class Runner:
                        f"Use ticket_comment for ticket #{tid} when needed, then follow this delivery gate: {result_gate} Ticket ID: {tid}. Your workspace is {cwd}. "
                        "When finished, ensure the requested deliverable has been recorded in the appropriate Swarm Agent record, then summarize the result and verification in your ACP response.")
             if dispatch_only:
-                prompt = (f"You are {agent['name']}, the orchestrator for job #{tid}. This turn is ONLY team staffing and delegation. "
+                prompt = SHARED_COLLABORATION_PROMPT + (f"You are {agent['name']}, the orchestrator for job #{tid}. This turn is ONLY team staffing and delegation. "
                           "Call agents_list to prefer existing specialists. Call team_delegate once per specialty with a distinct personal name, capabilities, title and scope. "
                           "It automatically registers/reuses the teammate, links the child to this job, shares the job requirements and makes it actionable. "
                           "Child tickets default to task for workspace work; set type=research for public-source research. Native tools remain available in all turns. "
@@ -883,7 +926,7 @@ class Runner:
                           "Workers start after you finish. You resume automatically for synthesis after their work and reviews complete. "
                           f"Suggested worker count: {t.get('recommended_workers') or 3}.\n\nJob: {t['title']}\n{t['body']}")
             elif heartbeat:
-                prompt=(f"You are {agent['name']} ({agent['slug']}), the lead for job #{tid}. This is a bounded team heartbeat. "
+                prompt=SHARED_COLLABORATION_PROMPT + (f"You are {agent['name']} ({agent['slug']}), the lead for job #{tid}. This is a bounded team heartbeat. "
                         f"First call team_read(job_id={tid}). Inspect its child tickets, progress snapshots, recent_tools, conversations and pending deliveries. "
                         "Check that teammates are advancing their assignments and that questions or reviews receive responses. "
                         "Answer an existing unanswered question addressed to you with team_reply; inspect linked evidence using wiki_get/source_get when needed. "
@@ -896,6 +939,7 @@ class Runner:
             elif t['type'] != 'job' and team.job_for_ticket(conn, tid):
                 prompt += (f'\n\nCURRENT TURN CONTRACT: You are {agent["name"]}, the specialist assigned ticket #{tid}, NOT the job lead. '
                            'Perform your own scope only. Use existing answered questions instead of asking them again. '
+                           'Post or reuse a durable board question, link it to your assigned ticket, then notify the team before sending a targeted question. Preserve reusable legacy chat answers with questions_answer on resumption. Request the registered orchestrator as your wiki reviewer unless the assignment names another qualified reviewer. '
                            'Native tools are available for reading files and running tests. Record local file evidence with source_read_file and cite its returned URL/ID; this satisfies the source gate even if an older assignment mentions only source_fetch. '
                            'Sending a new question or requesting peer review automatically pauses this turn; you resume with the answer. '
                            f'Use ticket_link and ticket_result only with id {tid}; use team_request_review with ticket_id {tid}. '
@@ -1044,7 +1088,7 @@ class Runner:
                             + json.dumps({'ticket': ticket, 'recent_conversation': history}, ensure_ascii=False)
                             + '\nUser follow-up: ' + text)
             c.on_notification = lambda msg: recorder.notification((msg.get('params') or {}).get('update') or {})
-            c.prompt(skill_context + text,timeout=3600)
+            c.prompt(SHARED_COLLABORATION_PROMPT + '\n' + skill_context + text,timeout=3600)
             recorder.finish('completed', 'Ticket conversation finished')
         except Exception as e:
             self._message(tid,None,'system','error',str(e))
@@ -1448,15 +1492,8 @@ class Runner:
                 x=db.connect(); x.execute('UPDATE orchestrator_sessions SET acp_session_id=?,backend=?,workspace=? WHERE id=?',(acp_id,backend,cwd,sid)); x.commit()
             self._apply_model(c,backend,settings)
             selected_model=settings.get('model_'+backend) or 'ACP default'
-            guide=(f"You are the Swarm Agent main orchestrator, running through the {backend} ACP backend with model {selected_model}. "
-                   "Do not claim to be running through a different provider or model. Help the user plan work and create tickets when asked. "
-                   "When asked to inspect the workspace or run a command, use your available native tools and report the observed output. If execution fails or output is unavailable, explain that clearly. "
-                   "Use native web search to find current sources and URL fetching to read known URLs (websearch and webfetch in OpenCode). Record public team evidence with source_fetch. Correct failed tool arguments or report a blocker; do not repeat unchanged failed calls. "
-                   "Use the attached Swarm Agent MCP tools for all board operations. Read relevant enabled skills with skill_list and skill_get; the orchestrator and all ticket workers can read every root skills/ folder entry. Only the human operator and orchestrator can use skill_put to publish or edit a verified procedure; workers should share methods with the orchestrator. Call agent_templates before creating tickets with ticket_create. Publish documentation with wiki_put/wiki_append and Q&A with questions_ask/questions_answer; use schedule_list/schedule_get/schedule_create/schedule_update and the schedule controls when the user asks to manage recurring agent work. Do not write board records to local files. "
-                   "Choose p0/p1/p2/p3 based on urgency and impact. If the user asked for the work to be completed, set ready=true on actionable tickets so the runner can proceed without another user round trip. Leave a ticket unready only when it is a planning draft, blocked on dependencies, explicitly on hold, awaiting a required approval, or assigned/tagged for a human. "
-                   "When asked to stop or kill a team, call team_stop with its job_id and verify stopped=true. Killing worker processes or posting STOP notes leaves the runner queue eligible and can restart the work. "
-                   "Never assign/tag a human ticket for agent execution. Keep the user informed and report ticket IDs.")
-            guide += (" You are " + agent['name'] + ", the registered orchestrator agent " + agent['slug'] + ". Use agents_list to reuse suitable teammates and agent_ensure to create missing specialists with distinct personal names. For team work, create a ready ticket of type job assigned to the orchestrator, with recommended_workers when specified. Jobs now have team conversations, automatic recipient responses and current-revision peer review. Direct the user to the job's team room to watch actual collaboration. The lead delegates child tickets and resumes for synthesis after worker reviews finish. A completion claim needs a freshly written, linked and peer-reviewed wiki artifact.\n\n" + api.shared_skill_context(db.connect()))
+            guide = orchestrator_system_prompt(agent, backend, selected_model)
+            guide += api.shared_skill_context(db.connect())
             self.orchestrator_context={'sid':sid,'turn_id':turn_id,'connection':c,'acp_session_id':c.session_id,
                                        'transcript':transcript,'stream_enabled':True,'recorder':recorder}
             context=history_before(sid,transcript.user_id) if not restored else ''

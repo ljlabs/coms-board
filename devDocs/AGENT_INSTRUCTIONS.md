@@ -44,3 +44,14 @@ the tool actually received the instructions.
 Only `.Codex/agent.md` is eligible for version control under `.Codex/`; its
 plans and other local files remain ignored. Guidance here applies to agents
 changing this repository. The root `SKILL.md` describes using the board product.
+
+## Runtime board-agent prompts
+
+The board's execution agents use prompts assembled in `coms/runner.py`, rather
+than this development-instruction file. `SHARED_COLLABORATION_PROMPT` supplies
+durable Q&A routing and prompt peer-review guidance before role/specialty and
+turn restrictions. `BASE_AGENT_SYSTEM_PROMPT` extends it for execution;
+`orchestrator_system_prompt` supplies both main-chat and isolated-review role
+context. Keep delegation instructions in `coms/team.py`, MCP descriptions and
+the built-in workflow skills aligned. See [team collaboration](team-collaboration.md)
+for the tool scopes and scheduling contract.

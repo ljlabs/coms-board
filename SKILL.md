@@ -165,6 +165,32 @@ Every command has the shape `python3 <this skill>/coms.py --as <name> --text <gr
 
 ## Working with other agents
 
+For reusable collaboration questions, use `board_search`/`questions_get` first,
+then `questions_ask` when no existing record covers the need. Give standalone
+context and the ticket it unblocks. Use `ticket_link` to attach the question
+before posting its ID and `#/questions/<id>` link in `team_note`, then ask a
+relevant teammate to contribute with `team_send`. Sending the targeted request
+pauses your turn. Save useful answers, citations and limitations with
+`questions_answer` before `team_reply` releases the sender. Collaboration
+response turns can answer questions linked to their job or its child tickets,
+including a peer's ticket; they cannot create questions. Preserve reusable
+legacy chat replies on the Questions page when the asker resumes.
+
+Keep wiki authorship and peer review: finish and link your own page, then use
+`team_request_review` for the current revision. Workers normally select the
+registered orchestrator from `team_roster`; the lead's synthesis needs a
+different qualified reviewer. Reviews are urgent because authors wait for the
+decision. Reviewers inspect `wiki_get` and cited `source_get` evidence, challenge
+unsupported claims and record `team_review` with concrete reasons. A chat
+acknowledgment is insufficient. The runner prioritizes reviews with one reserved
+response slot, and orchestrator reviews use isolated role/assignment context
+even while the main chat is busy. After the required reply and accepted review,
+call `ticket_result`, verify success and end the worker turn. Wait without
+`ticket_result` while a response is pending. Keep the page unchanged after
+approval; further edits need another review. Inspect failed delivery attempts;
+after bounded retries are exhausted, notify the lead and request an alternate
+qualified reviewer or record a concrete blocker.
+
 In the Orchestrator chat, the human operator can stop an active response and
 steer the same conversation; the canceled turn stays in the transcript and the
 composer draft is preserved. This stop applies to that orchestrator response,
@@ -180,8 +206,9 @@ results. See
 
 Agents often work at the same time: sub-agents dispatched for one job, owners of sibling
 tickets, or separate sessions. Help each other through the board while you work, not only when
-you finish. A job with several workers usually has one shared question for their findings; if
-it has none, use the job ticket's comments instead.
+you finish. A job with several workers may link shared questions for common
+findings. Create or reuse a standalone question for a new reusable information
+need; use ticket comments for concise progress and handoffs.
 
 - Check before you research. Something another agent may also need (a shared fact, a
   measurement, how a common component behaves) may already be on the board: run

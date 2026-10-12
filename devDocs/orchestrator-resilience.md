@@ -71,6 +71,15 @@ connection cleanup as well as the prompt timeout. Synthesis uses a normal worker
 slot if children finish between scheduling and starting the monitor. Existing `agent_runs` and
 `agent_runtime` records are reused; no database migration is intended.
 
+Peer reviews also have one reserved response slot, tracked separately from the
+heartbeat slot and normal worker capacity. An orchestrator review uses an
+isolated collaboration session with shared/role guidance and the author's
+assignment; it can run while the main chat or another orchestrator execution is
+active. Each identity still receives at most one collaboration turn at a time,
+and ordinary replies retain busy guards. Response prompts keep their existing
+180-second timeout, bounded retries and durable stop checks. See
+[team collaboration](team-collaboration.md).
+
 ## Implementation path
 
 - Entry points and relevant modules: Orchestrator composer and session API;
