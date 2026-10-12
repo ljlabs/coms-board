@@ -41,6 +41,11 @@ inline in `coms/server.py`. The CLI in `coms/cli.py` calls those
 application operations directly. Keep validation and business rules for writes
 in the shared backend path so that the dashboard, API, and CLI agree on behavior.
 
+Runner configuration reads share `api.runner_settings`: persisted selections
+override Docker bootstrap defaults. Hosted OpenCode models retain their full
+provider/model IDs; unavailable selections fail instead of silently changing
+provider. See [runner model selection](runner-models.md).
+
 When changing a feature, trace all of its entry points. A new operation may
 need a domain implementation, an HTTP route, a CLI command, a dashboard control,
 or more than one of these. Preserve existing API fields, command names, and

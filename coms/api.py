@@ -4,6 +4,7 @@ returns plain dicts so results serialise straight to JSON.
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -35,6 +36,21 @@ class BadRequest(Exception):
 
 def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def runner_settings(conn) -> dict[str, str]:
+    """Saved choices override Docker bootstrap defaults, including empty values."""
+    values = {row[0]: row[1] for row in conn.execute('SELECT key,value FROM runner_settings')}
+    if os.environ.get('COMS_IN_DOCKER') == '1':
+        from .workspace import workspace_path
+        model = os.environ.get('COMS_LLAMACPP_MODEL', 'LFM2.5-2.6B-Q8_0.gguf').strip()
+        values.setdefault('opencode_api_base_url', os.environ.get('COMS_LLAMACPP_BASE_URL', 'http://host.docker.internal:11434/v1'))
+        values.setdefault('opencode_api_model', model)
+        values.setdefault('model_opencode', 'coms-local/' + model)
+        values.setdefault('opencode_api_key', '')
+        try: values['workspace'] = workspace_path({'workspace': values.get('workspace', '/workspace')}, create_default=False)
+        except ValueError: values['workspace'] = '/workspace'
+    return values
 
 
 def _execution_flag(value):

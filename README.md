@@ -67,12 +67,16 @@ docker compose run --rm --no-deps board playwright-cli --help
 docker compose run --rm --no-deps board sh -c "playwright-cli open about:blank && playwright-cli close"
 ```
 
-The container connects to llama.cpp at
+The container defaults to llama.cpp at
 `http://host.docker.internal:11434/v1` with model
 `LFM2.5-2.6B-Q8_0.gguf`. Docker Desktop resolves `host.docker.internal` to the
 Windows host. Keep llama.cpp listening on the host as configured; do not
 publish the Swarm Agent port on a LAN interface. For another local model or
 server port, set `COMS_LLAMACPP_MODEL` and `COMS_LLAMACPP_BASE_URL` in `.env`.
+These variables supply defaults for settings that have not been saved. Choices
+saved on the **Runner** page take precedence and survive container recreation,
+including hosted OpenCode models. Select an advertised OpenCode Zen model to
+use that provider instead of the local API.
 At session startup, Swarm Agent reads llama.cpp's advertised model ID and live
 context window and passes both into OpenCode's provider configuration. When
 llama.cpp omits the live context from `/v1/models`, the runner reads it from
@@ -227,7 +231,11 @@ transcripts, and ACP session IDs are stored in SQLite so chats can be reopened
 after a server restart. Open **Runner** to choose an ACP backend, set the
 maximum parallel agent count, choose a model advertised by that backend, and
 create agent templates. The selected model is applied to new orchestrator and
-ticket sessions.
+ticket sessions. **Use ACP default** retains the backend's configured default;
+the model note identifies its current ID when available. A saved model missing
+from the catalog is shown as unavailable and retained until you choose another
+model. An unavailable hosted OpenCode selection reports an error rather than
+silently using your local model.
 
 Use **Edit message** beside a message you sent to revise an old prompt. **Save
 and regenerate** replaces that message, removes later chat entries, and asks the

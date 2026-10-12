@@ -726,6 +726,66 @@ test('saving Runner settings is not blocked by slow model discovery and shows ac
   });
 });
 
+test('Runner retains hosted OpenCode selection through save and reload', async () => {
+  let selected='opencode/spark';
+  await pageFor('/runner', async page => {
+    await page.waitForFunction(()=>document.querySelector('#model-note')?.textContent.includes('models available from opencode'));
+    assert.equal(await page.locator('#runner-model').inputValue(),selected);
+    const saved=page.waitForResponse(r=>r.url().endsWith('/api/runner/settings')&&r.request().method()==='PUT');
+    const settingsReloaded=page.waitForResponse(r=>r.url().endsWith('/api/runner/settings')&&r.request().method()==='GET');
+    await page.locator('#save-runner').click();
+    assert.equal((await saved).status(),200);
+    await settingsReloaded;
+    await page.waitForFunction(()=>document.querySelector('#model-note')?.textContent.includes('models available from opencode'));
+    await page.reload();
+    await page.waitForFunction(()=>document.querySelector('#model-note')?.textContent.includes('models available from opencode'));
+    assert.equal(await page.locator('#runner-model').inputValue(),selected);
+  },{beforeGoto:async page=>{
+    const data=await(await page.request.get(base+'/api/runner/settings')).json();
+    await page.route('**/api/runner/settings',async route=>{
+      if(route.request().method()==='PUT') {
+        selected=route.request().postDataJSON().model_opencode;
+        return route.fulfill({json:{saved:true}});
+      }
+      await route.fulfill({json:{...data,active_backend:'opencode',model_opencode:selected}});
+    });
+    await page.route('**/api/runner/models?backend=opencode',route=>route.fulfill({json:{backend:'opencode',current:'coms-local/local.gguf',models:[{value:'opencode/spark',name:'Spark (free)'},{value:'coms-local/local.gguf',name:'Local'}]}}));
+  }});
+});
+
+test('Runner shows explicit ACP default without replacing it with current model', async () => {
+  await pageFor('/runner', async page => {
+    await page.waitForFunction(()=>document.querySelector('#model-note').textContent.includes('available from opencode'));
+    assert.equal(await page.locator('#runner-model').inputValue(),'');
+    assert.match(await page.locator('#model-note').textContent(),/ACP default.*coms-local\/local.gguf/);
+  },{beforeGoto:async page=>{
+    const data=await(await page.request.get(base+'/api/runner/settings')).json();
+    await page.route('**/api/runner/settings',async route=>{
+      await route.fulfill({json:{...data,active_backend:'opencode',model_opencode:''}});
+    });
+    await page.route('**/api/runner/models?backend=opencode',route=>route.fulfill({json:{backend:'opencode',current:'coms-local/local.gguf',models:[{value:'coms-local/local.gguf',name:'Local'}]}}));
+  }});
+});
+
+test('Runner displays and preserves unavailable saved model on unrelated settings save', async () => {
+  await pageFor('/runner', async page => {
+    await page.waitForFunction(()=>document.querySelector('#model-note').textContent.includes('unavailable'));
+    assert.equal(await page.locator('#runner-model').inputValue(),'opencode/missing-spark');
+    assert.match(await page.locator('#runner-model option:checked').textContent(),/unavailable/i);
+    const saved=page.waitForResponse(r=>r.url().endsWith('/api/runner/settings')&&r.request().method()==='PUT');
+    await page.locator('#save-runner').click();
+    const response=await saved;
+    assert.equal(response.request().postDataJSON().model_opencode,'opencode/missing-spark');
+  },{beforeGoto:async page=>{
+    const data=await(await page.request.get(base+'/api/runner/settings')).json();
+    await page.route('**/api/runner/settings',async route=>{
+      if(route.request().method()==='PUT')return route.fulfill({json:{saved:true}});
+      await route.fulfill({json:{...data,active_backend:'opencode',model_opencode:'opencode/missing-spark'}});
+    });
+    await page.route('**/api/runner/models?backend=opencode',route=>route.fulfill({json:{backend:'opencode',current:'coms-local/local.gguf',models:[{value:'coms-local/local.gguf',name:'Local'}]}}));
+  }});
+});
+
 test('chat and project delete controls preserve chats and select a surviving chat', async () => {
   await pageFor('/orchestrator?session=browser-chat', async page => {
     page.on('dialog', dialog => dialog.accept());

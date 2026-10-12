@@ -495,17 +495,7 @@ def r_team_stop(conn, m, mm, q, b, actor):
 
 def r_runner_settings(conn, m, _mm, q, b, actor):
     if m == "GET":
-        values = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
-        if os.environ.get("COMS_IN_DOCKER") == "1":
-            model = os.environ.get("COMS_LLAMACPP_MODEL", "LFM2.5-2.6B-Q8_0.gguf").strip()
-            docker_workspace=values.get("workspace", "/workspace")
-            try: docker_workspace=workspace_path({"workspace":docker_workspace},create_default=False)
-            except ValueError: docker_workspace="/workspace"
-            values.update(workspace=docker_workspace,
-                          opencode_api_base_url=os.environ.get("COMS_LLAMACPP_BASE_URL", "http://host.docker.internal:11434/v1"),
-                          opencode_api_model=model,
-                          model_opencode="coms-local/" + model,
-                          opencode_api_key="")
+        values = api.runner_settings(conn)
         values.setdefault("active_backend", "opencode"); values.setdefault("parallel_agents", "2")
         values.setdefault("workspace", str(DEFAULT_WORKSPACE))
         values.setdefault("opencode_api_base_url", "http://localhost:11434/v1")
@@ -535,7 +525,7 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
         if "clear_opencode_api_key" in b and not isinstance(b["clear_opencode_api_key"], bool):
             raise api.BadRequest("clear_opencode_api_key must be a boolean")
         from .runner import RUNNER, backend_command
-        previous = {r[0]: r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+        previous = api.runner_settings(conn)
         previous_backend=previous.get("active_backend","opencode")
         new_backend=b.get("active_backend",previous_backend)
         clear_api_key=b.get("clear_opencode_api_key",False)
@@ -566,7 +556,7 @@ def r_runner_settings(conn, m, _mm, q, b, actor):
                 conn.execute("INSERT OR REPLACE INTO runner_settings(key,value) VALUES(?,?)", (key, str(value)))
             if clear_api_key: conn.execute("DELETE FROM runner_settings WHERE key='opencode_api_key'")
             if runtime_changed:
-                current={r[0]:r[1] for r in conn.execute("SELECT key,value FROM runner_settings")}
+                current=api.runner_settings(conn)
                 active_workspace=workspace_path(current)
                 conn.execute("UPDATE orchestrator_sessions SET backend=?,workspace=?,acp_session_id=''",(current.get("active_backend","opencode"),active_workspace))
             conn.commit()

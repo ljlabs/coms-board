@@ -37,8 +37,11 @@ alongside IDs the server actually advertises. The model ID override is used
 when the API cannot provide a catalog; in that case Swarm Agent leaves context
 unset rather than guessing from training metadata. Known contexts are written
 to OpenCode with an output cap of 32,000 tokens, reduced to the full context if
-the context is smaller. A stale saved OpenCode selection falls back to the
-configured live catalog default; other ACP backends keep their normal
+the context is smaller. A stale saved `coms-local` selection can fall back to an
+advertised local default. Hosted provider selections are passed to OpenCode's
+inline model configuration and reject unavailable IDs instead of changing
+providers. Saved settings override Docker bootstrap defaults; see
+[runner model selection](runner-models.md). Other ACP backends keep their normal
 selection validation.
 
 ### Playwright automation in Docker
@@ -158,7 +161,7 @@ thinking-transcript cases failed. Those failures reproduced before this change.
 OpenCode model-metadata validation on 11 October 2026: 23 focused worker tests
 ran with one platform skip. A later privacy and regression cleanup kept ACP
 thought chunks out of public transcripts and corrected browser checks to match
-the live UI and SSE fallback. The latest full suite passes all 257 Python tests
+the live UI and SSE fallback. That snapshot passed all 257 Python tests
 (two platform skips) and all 31 browser tests.
 
 Docker Playwright validation on 11 October 2026: four focused runtime-contract

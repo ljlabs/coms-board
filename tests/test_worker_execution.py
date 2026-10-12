@@ -142,6 +142,35 @@ class WorkerExecutionTests(unittest.TestCase):
 
         connection.set_config_option.assert_not_called()
 
+    def test_hosted_opencode_model_is_the_configured_default_even_with_a_local_catalog(self):
+        settings = {'model_opencode': 'opencode/spark', 'opencode_api_model': 'local.gguf'}
+        catalog = [{'id': 'local.gguf', 'name': 'Local', 'context': 32768}]
+        with patch('coms.runner._opencode_models', return_value=catalog):
+            config = json.loads(backend_environment('opencode', settings)['OPENCODE_CONFIG_CONTENT'])
+        self.assertEqual(config['model'], 'opencode/spark')
+        self.assertIn('local.gguf', config['provider']['coms-local']['models'])
+
+    def test_unavailable_hosted_opencode_model_errors_instead_of_using_local_default(self):
+        connection = Mock()
+        connection.config_options = [{'id': 'model', 'options': [{'value': 'coms-local/live-id'}]}]
+        connection.current_model.return_value = 'coms-local/live-id'
+        with self.assertRaisesRegex(RuntimeError, 'not offered by the opencode ACP session'):
+            Runner._apply_model(connection, 'opencode', {'model_opencode': 'opencode/spark'})
+        connection.set_config_option.assert_not_called()
+
+    def test_available_hosted_opencode_model_is_applied_to_session(self):
+        connection = Mock()
+        connection.config_options = [{'id': 'model', 'options': [{'value': 'opencode/spark'}]}]
+        Runner._apply_model(connection, 'opencode', {'model_opencode': 'opencode/spark'})
+        connection.set_config_option.assert_called_once_with('model', 'opencode/spark')
+
+    def test_stale_local_model_cannot_fall_back_to_a_hosted_provider(self):
+        connection = Mock()
+        connection.config_options = [{'id': 'model', 'options': [{'value': 'opencode/spark'}]}]
+        connection.current_model.return_value = 'opencode/spark'
+        with self.assertRaisesRegex(RuntimeError, 'not offered'):
+            Runner._apply_model(connection, 'opencode', {'model_opencode': 'coms-local/stale-id'})
+
     def test_stale_non_opencode_model_selection_still_errors(self):
         connection = Mock()
         connection.config_options = [{'id': 'model', 'options': [{'value': 'codex/live-id'}]}]

@@ -1266,7 +1266,35 @@ coms wiki append &lt;slug&gt; --body "…"</pre></div>`;
         <div class="card"><h2>Execution queue</h2><div class="list">${tickets.filter(t=>t.ready_for_execution).map(t=>`<div class="item"><div class="main"><a class="title" href="#/tickets/${t.id}">#${t.id} ${esc(t.title)}</a><div class="meta">${badge(t.status)}${badge(t.priority)} · ${t.assignee?`assignee ${chip(t.assignee)}`:'unassigned'} · ${t.tags.toLowerCase().includes('human')?'human tagged':'ready'}</div></div></div>`).join('')||'<div class="empty">No tickets marked ready.</div>'}</div></div>
       </div><aside class="layout-aside"><div class="card tint-y"><h3>Safety gates</h3><p>Only tickets with <b>Ready for agent execution</b> enabled enter the queue. Tickets assigned to a registered human, with an assignee beginning <code>human</code>, or tagged <code>human</code> are skipped.</p><p>Priority order: p0 → p1 → p2 → p3.</p></div><div class="card"><h3>Monitoring</h3><p>Open a ticket’s <b>Agent runner chat</b> to view live transcript, debug logs and run status.</p></div></aside></div>`);
     let modelRequest=0,modelController=null,loadedModelBackend='';
-    const loadRunnerModels=async()=>{const request=++modelRequest;const backend=$('#rb').value,select=$('#runner-model'),note=$('#model-note');if(modelController)modelController.abort();modelController=new AbortController();const controller=modelController,timeout=setTimeout(()=>controller.abort(),90000);loadedModelBackend='';select.disabled=false;select.innerHTML='<option value="">Use ACP default</option>';note.innerHTML=`<span class="model-spinner" aria-hidden="true"></span> Connecting to ${esc(backend)} ACP… You can save settings while discovery runs.`;try{const response=await fetch(`/api/runner/models?backend=${encodeURIComponent(backend)}`,{headers:{'Content-Type':'application/json','X-Coms-Agent':who()},signal:controller.signal});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||response.statusText);if(request!==modelRequest||!select.isConnected)return;select.innerHTML='<option value="">Use ACP default</option>'+data.models.map(m=>`<option value="${esc(m.value)}">${esc(m.name||m.value)}</option>`).join('');const desired=s['model_'+backend]||data.current||'';if(data.models.some(m=>m.value===desired))select.value=desired;loadedModelBackend=backend;note.textContent=data.models.length?`${data.models.length} model${data.models.length===1?'':'s'} available from ${backend}.`:backend==='opencode'?'No OpenCode models were advertised. Check the API settings or enter a model ID override.':`This backend did not advertise a model selector; it will use its configured default.`;}catch(e){if(request!==modelRequest||!select.isConnected)return;note.textContent=`${e.name==='AbortError'?`${backend} model discovery timed out after 90 seconds`:`Could not load ${backend} models: ${e.message||'check backend command and authentication'}`}. You can still save this backend and use its default model.`;}finally{clearTimeout(timeout);}};
+    const loadRunnerModels=async()=>{
+      const request=++modelRequest;
+      const backend=$('#rb').value,select=$('#runner-model'),note=$('#model-note');
+      if(modelController)modelController.abort();
+      modelController=new AbortController();
+      const controller=modelController,timeout=setTimeout(()=>controller.abort(),90000);
+      loadedModelBackend='';select.disabled=false;
+      select.innerHTML='<option value="">Use ACP default</option>';
+      note.innerHTML=`<span class="model-spinner" aria-hidden="true"></span> Connecting to ${esc(backend)} ACP… You can save settings while discovery runs.`;
+      try{
+        const response=await fetch(`/api/runner/models?backend=${encodeURIComponent(backend)}`,{headers:{'Content-Type':'application/json','X-Coms-Agent':who()},signal:controller.signal});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok)throw new Error(data.error||response.statusText);
+        if(request!==modelRequest||!select.isConnected)return;
+        select.innerHTML='<option value="">Use ACP default</option>'+data.models.map(m=>`<option value="${esc(m.value)}">${esc(m.name||m.value)}</option>`).join('');
+        const key='model_'+backend;
+        const desired=Object.prototype.hasOwnProperty.call(s,key)?s[key]:(data.current||'');
+        const unavailable=!!desired&&!data.models.some(m=>m.value===desired);
+        if(unavailable)select.insertAdjacentHTML('beforeend',`<option value="${esc(desired)}">${esc(desired)} · saved model unavailable</option>`);
+        select.value=desired;
+        loadedModelBackend=backend;
+        note.textContent=data.models.length?`${data.models.length} model${data.models.length===1?'':'s'} available from ${backend}.`:backend==='opencode'?'No OpenCode models were advertised. Check the API settings or enter a model ID override.':`This backend did not advertise a model selector; it will use its configured default.`;
+        if(unavailable)note.textContent+=' The saved model is unavailable; choose an available model before running agents.';
+        else if(!desired&&data.current)note.textContent+=` ACP default currently: ${data.current}.`;
+      }catch(e){
+        if(request!==modelRequest||!select.isConnected)return;
+        note.textContent=`${e.name==='AbortError'?`${backend} model discovery timed out after 90 seconds`:`Could not load ${backend} models: ${e.message||'check backend command and authentication'}`}. Saving keeps the existing model selection.`;
+      }finally{clearTimeout(timeout);}
+    };
     $('#rb').onchange=loadRunnerModels;$('#refresh-models').onclick=loadRunnerModels;loadRunnerModels();
     $('#save-runner').onclick=async()=>{const payload={active_backend:$('#rb').value,parallel_agents:+$('#rp').value,workspace:$('#rw').value,opencode_api_base_url:$('#opencode-api-url').value.trim(),opencode_api_model:$('#opencode-api-model').value.trim(),clear_opencode_api_key:$('#clear-opencode-api-key').checked};const apiKey=$('#opencode-api-key').value;if(apiKey&&!payload.clear_opencode_api_key)payload.opencode_api_key=apiKey;for(const x of ['opencode','codex','claude']) payload[x+'_command']=$('#cmd-'+x).value.trim();if(loadedModelBackend===payload.active_backend)payload['model_'+payload.active_backend]=$('#runner-model').value; try{await api('PUT','/api/runner/settings',payload);toast('runner settings saved');render();}catch(e){fail(e);}};
     $('#template-form').onsubmit=async e=>{e.preventDefault();try{await api('POST','/api/runner/templates',{name:$('#tn').value,prompt:$('#tp').value,backend:$('#tb').value,enabled:$('#te').value==='1'});toast('template saved');render();}catch(err){fail(err);}};

@@ -195,6 +195,7 @@ def backend_environment(name, settings, values=None):
     model_hint = str(settings.get('opencode_api_model', '')).strip()
     selected = str(settings.get('model_opencode', '')).strip()
     prefix = OPENCODE_LOCAL_PROVIDER_ID + '/'
+    hosted_model = selected if '/' in selected and not selected.startswith(prefix) else ''
     if model_hint.startswith(prefix): model_hint = model_hint[len(prefix):]
     if selected.startswith(prefix): selected = selected[len(prefix):]
     elif '/' in selected: selected = ''
@@ -240,7 +241,9 @@ def backend_environment(name, settings, values=None):
     default_model = next((model_id for model_id in (selected, model_hint) if model_id in model_ids), '')
     if not default_model and model_ids:
         default_model = model_ids[0]
-    if default_model:
+    if hosted_model:
+        config['model'] = hosted_model
+    elif default_model:
         config['model'] = OPENCODE_LOCAL_PROVIDER_ID + '/' + default_model
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(config, separators=(',', ':'))
     # OpenCode otherwise hides websearch for custom/local providers. This is
@@ -484,7 +487,9 @@ class Runner:
         options=next((o for o in conn.config_options if o.get('id')=='model'),{})
         allowed={x.get('value') for x in options.get('options') or []}
         if chosen not in allowed:
-            if backend == 'opencode' and conn.current_model() in allowed:
+            current = conn.current_model() or ''
+            prefix = OPENCODE_LOCAL_PROVIDER_ID + '/'
+            if backend == 'opencode' and chosen.startswith(prefix) and current.startswith(prefix) and current in allowed:
                 # The live /models catalog can advertise a new ID that differs
                 # from a saved hint. backend_environment has already selected
                 # the API's real ID as OpenCode's default in that case.
@@ -501,7 +506,7 @@ class Runner:
             if c is not None:
                 option=next((o for o in c.config_options if o.get('id')=='model'),{})
                 return {'backend':backend,'models':c.models(),'current':c.current_model(),'config_id':option.get('id','model')}
-        key=(backend,tuple(cmd),cwd,settings.get('opencode_api_base_url',''),settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
+        key=(backend,tuple(cmd),cwd,settings.get('model_'+backend,''),settings.get('opencode_api_base_url',''),settings.get('opencode_api_key','') if backend=='opencode' else '',settings.get('opencode_api_model','') if backend=='opencode' else '')
         with self.model_lock:
             c=self.model_conns.get(key)
             if c is not None and not c.alive:
@@ -523,16 +528,7 @@ class Runner:
             for c in connections: c.close()
         self._warm_active_backend()
     def settings(self):
-        conn=db.connect(); rows=conn.execute('SELECT key,value FROM runner_settings').fetchall(); settings={r[0]:r[1] for r in rows}
-        if os.environ.get('COMS_IN_DOCKER') == '1':
-            model=os.environ.get('COMS_LLAMACPP_MODEL','LFM2.5-2.6B-Q8_0.gguf').strip()
-            docker_workspace=settings.get('workspace','/workspace')
-            try: docker_workspace=workspace_path({'workspace':docker_workspace},create_default=False)
-            except ValueError: docker_workspace='/workspace'
-            settings.update(opencode_api_base_url=os.environ.get('COMS_LLAMACPP_BASE_URL','http://host.docker.internal:11434/v1'),
-                            opencode_api_model=model, model_opencode=OPENCODE_LOCAL_PROVIDER_ID+'/'+model,
-                            opencode_api_key='', workspace=docker_workspace)
-        return settings
+        return api.runner_settings(db.connect())
     def _message(self, tid, rid, role, kind, body):
         conn=db.connect(); conn.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,rid,role,kind,str(body),now())); conn.commit()
     def _worker(self, key, function, *args):

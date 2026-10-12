@@ -28,6 +28,8 @@ adds durable behavior that needs its own design note.
   team leads.
 - [Worker tools and evidence](worker-execution.md): native tool access,
   workspace source snapshots, bounded team reads and execution deadlines.
+- [Runner model selection](runner-models.md): saved settings, Docker defaults,
+  hosted OpenCode models and picker behavior.
 - [Durable team collaboration](team-collaboration.md): shared question/answer
   routing, staffing ownership, bounded completion and prioritized isolated peer reviews.
 - [Bounded team execution](bounded-team-execution.md): single staffing owner,
