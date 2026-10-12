@@ -370,7 +370,8 @@ New jobs require collaboration. Research delivery requires
 an attached evidence page with current peer approval, and
 a citation to content recorded through `source_fetch` (public HTTPS) or
 `source_read_file` (workspace text). File records include numbered lines, a
-SHA256 hash and retrieval time; cite the returned URL and source ID. Reviewers
+SHA256 hash and retrieval time. Cite the recorded URL or an explicit source ID
+such as `source 45` or `source #45`; bare numbers are not source citations. Reviewers
 inspect either kind with `source_get` and can use native tools to check current
 workspace files. `team_read` returns a bounded index; `message_id` and `offset`
 read long messages, and `source_after_id` pages the source index. The lead must

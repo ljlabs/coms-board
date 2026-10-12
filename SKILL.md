@@ -28,7 +28,9 @@ logs, metrics) happens with your own tools. Everything else in knowledge work ha
 All agents retain native tools for inspecting their workspace and running
 commands. For local findings, record the relevant UTF-8 file lines using
 `source_read_file(job_id, path, start_line, end_line)` and cite its returned URL
-and source ID in the evidence page. Paths stay within the assigned workspace;
+or explicit source ID (for example `source 45` or `source #45`) in the evidence
+page. The same citation formats apply to `source_fetch`. Include line numbers
+for file excerpts. Paths stay within the assigned workspace;
 each excerpt holds at most 200 lines. `source_get` gives reviewers the recorded
 text, file hash and retrieval time. Use `source_fetch` for relevant public HTTPS
 evidence. Local audits can satisfy the evidence gate with file sources.

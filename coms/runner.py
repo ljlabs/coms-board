@@ -866,7 +866,7 @@ class Runner:
             if review:
                 reviewed_ticket = api.get_ticket(conn, review['ticket_id'])
                 artifact = api.get_wiki(conn, review['artifact_slug'])
-                cited = {row['url']: {k: row[k][:500] if isinstance(row[k], str) else row[k] for k in ('id', 'url', 'status', 'error')} for row in conn.execute('SELECT id,url,final_url,status,error FROM research_sources WHERE job_id=? ORDER BY id', (message['job_id'],)) if row['url'] in artifact['body'] or (row['final_url'] and row['final_url'] in artifact['body'])}
+                cited = {row['url']: {k: row[k][:500] if isinstance(row[k], str) else row[k] for k in ('id', 'url', 'status', 'error')} for row in conn.execute('SELECT id,url,final_url,status,error FROM research_sources WHERE job_id=? ORDER BY id', (message['job_id'],)) if team.source_is_cited(row, artifact['body'])}
                 prompt += (f"REVIEWED TICKET ASSIGNMENT #{reviewed_ticket['id']}: {reviewed_ticket['title']}\n"
                            f"Description and acceptance criteria:\n{reviewed_ticket['body'][:4000]}\n"
                            f"Read ticket_get(id={reviewed_ticket['id']}) if criteria are truncated.\n"
@@ -1191,13 +1191,22 @@ class Runner:
         conn.execute("UPDATE ticket_reviews SET status='running',backend=? WHERE id=? AND status!='cancelled'",(backend,review_id)); conn.commit()
         agent = api.orchestrator_agent(conn)
         recorder = progress.Recorder('review:' + str(review_id), agent['slug'], tid, source_run_id or None, backend, message_kind='review-decision')
-        response=[]
+        response=[]; response_message=None
         def add(role,kind,body):
             c=db.connect(); c.execute('INSERT INTO agent_messages(ticket_id,run_id,role,kind,body,created_at) VALUES(?,?,?,?,?,?)',(tid,source_run_id or None,role,kind,body,now())); c.commit()
         def log(line): add('system','review-log',line)
         def notification(msg):
+            nonlocal response_message
             p=msg.get('params') or {}; u=p.get('update') or {}; kind=u.get('sessionUpdate'); content=u.get('content') or {}; body=content.get('text') if isinstance(content,dict) else None
+            # ACP streams commentary before tool reads as well as the final
+            # answer. Match Recorder's message boundaries; parse only the last
+            # assistant message while keeping all commentary in the transcript.
+            if kind in ('tool_call', 'tool_call_update'):
+                response.clear(); response_message=None
             if body and kind=='agent_message_chunk':
+                identity=u.get('messageId') or 'response'
+                if identity!=response_message:
+                    response.clear(); response_message=identity
                 response.append(body)
             if u: recorder.notification(u)
         def request(msg,respond):

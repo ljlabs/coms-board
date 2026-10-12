@@ -20,6 +20,11 @@ snapshots include a SHA256 hash and retrieval time and are inspected with
 `source_get`. Local audits can complete using file evidence; fetch public URLs
 only when they are relevant to the findings. All agent roles keep native tools.
 
+In wiki pages, cite the recorded URL or use an explicit ID such as `source 45`
+or `source #45`. Include dates and file line numbers when applicable. Bare
+numbers are not source citations; reviewers still need to read the cited
+successful record with `source_get` in their review turn.
+
 Distinguish evidence, inference, and claims that could not be verified. When a source fails, record the limitation honestly and try the real starting URLs provided in the job. Peer reviews should challenge unsupported factual claims.
 
 ## Deliver collaborative research

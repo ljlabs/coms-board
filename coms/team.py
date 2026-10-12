@@ -341,6 +341,12 @@ def request_review(conn, job_id, tid, actor, artifact_slug, reviewer):
     return dict(conn.execute('SELECT * FROM peer_reviews WHERE id=?', (rid,)).fetchone())
 
 
+def source_is_cited(source, body):
+    """Recognize recorded URLs or explicit source IDs, never bare numbers."""
+    return (any(url and url in body for url in (source['url'], source['final_url'])) or
+            bool(re.search(r'\bsources?\s+#?' + str(source['id']) + r'\b', body, re.IGNORECASE)))
+
+
 @db.serialized_write
 def review(conn, review_id, actor, decision, body, run_id):
     if decision not in ('accepted', 'changes_requested'): raise api.BadRequest('Review decision must be accepted or changes_requested')
@@ -354,7 +360,7 @@ def review(conn, review_id, actor, decision, body, run_id):
     if not seen: raise api.BadRequest('Read the current artifact with wiki_get before deciding its review')
     if decision == 'accepted':
         evidence = [dict(row) for row in conn.execute("SELECT s.* FROM source_reads r JOIN research_sources s ON s.id=r.source_id WHERE r.agent_slug=? AND r.run_id=? AND s.job_id=? AND s.status='ok'", (actor, run_id, item['job_id']))]
-        if not any(s['url'] in artifact['body'] or (s['final_url'] and s['final_url'] in artifact['body']) for s in evidence):
+        if not any(source_is_cited(s, artifact['body']) for s in evidence):
             raise api.BadRequest('Read a successfully retrieved source cited by the artifact with source_get before accepting the review')
     response = send(conn, item['job_id'], actor, item['author'], decision + ': ' + body, kind='peer_review', reply_to=item['message_id'], commit=False)
     conn.execute('UPDATE peer_reviews SET status=?,reason=?,updated_at=? WHERE id=?', (decision, body, api.now(), review_id))
@@ -427,7 +433,7 @@ def validate_delivery(conn, tid, actor):
         if latest and not any(p['updated_at'] >= latest for p in pages): raise api.BadRequest('Write a fresh synthesis after the teammate results and reviews')
     else:
         sources = [dict(row) for row in conn.execute("SELECT * FROM research_sources WHERE job_id=? AND reader=? AND status='ok'", (job['id'], actor))]
-        if not any(s['url'] in p['body'] or (s['final_url'] and s['final_url'] in p['body']) for s in sources for p in pages):
+        if not any(source_is_cited(s, p['body']) for s in sources for p in pages):
             raise api.BadRequest('Cite at least one source recorded with source_read_file or source_fetch in your linked evidence page')
 
 

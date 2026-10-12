@@ -40,6 +40,11 @@ Reviewers inspect `wiki_get` and cited `source_get` evidence and record
 and self-review checks remain unchanged. Honest access limitations do not
 justify invented verification or unsupported completion claims.
 
+Citations may use the recorded source URL or an explicit board source ID such
+as `source 45` or `source #45`. Acceptance, delivery and the focused reviewer
+source index use the same matcher; an ID reference still requires a successful
+source in that job and the reviewer's actual current-run `source_get` read.
+
 The scheduler considers peer reviews before ordinary replies and ticket work.
 One reserved peer-response slot is available even at full worker capacity,
 in addition to the existing separate heartbeat slot. Other responses use the

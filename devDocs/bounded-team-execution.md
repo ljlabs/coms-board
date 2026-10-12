@@ -40,9 +40,14 @@ lock; rejected operations release their lock.
 
 Workers normally request the orchestrator; leads need an independent reviewer.
 Reviewers read the exact page with `wiki_get` and cited successful evidence with
-`source_get` before `team_review`. Empty redirect URLs cannot qualify uncited
-evidence. Equivalent review requests reuse the message/attempt budget. Each
-revision allows two reviewers (normally one plus an alternate), with six requests
+`source_get` before `team_review`. Review acceptance, worker delivery and focused
+review packets share `team.source_is_cited`: nonempty recorded original/final
+URLs or explicit `source 45` / `source #45` references qualify. IDs match exactly,
+case insensitively; bare numbers do not qualify. Successful retrieval, same-job
+ownership, current-run reads and exact artifact revision remain required.
+Empty URLs cannot qualify uncited evidence. Equivalent review requests reuse
+the message/attempt budget. Each revision allows two reviewers (normally one
+plus an alternate), with six requests
 total per ticket/page across revisions. Each delivery retains its three-attempt
 backoff. Exhaustion requires a blocker instead of repeated fresh requests.
 
@@ -87,8 +92,13 @@ metadata and shared skill index. They omit unrelated room history and full
 triggered skills; procedures remain available through `skill_get`. Other turns
 inject a roughly 10,000-byte team index; `team_read` retains its 31,900-byte budget.
 Final review uses bounded discussion/transcript previews and tools for full
-criteria/artifacts, without recursively copying prior prompts. Response/final
-review retains 180-second deadlines; execution/synthesis retains 900 seconds.
+criteria/artifacts, without recursively copying prior prompts. Its decision is
+parsed only from the final assistant response: tool activity or an explicit ACP
+message ID change separates prior commentary, which remains in the transcript.
+The final response must still be a valid JSON object with `close` or
+`human_review`; prose, malformed JSON and missing decisions fail visibly.
+Response/final review retains 180-second deadlines; execution/synthesis retains
+900 seconds.
 
 The runner checks durable progress and temporary space every 15 seconds before
 dispatch/recovery. `team_progress` stores a fixed start, last progress and high
@@ -163,3 +173,15 @@ Compose configuration and staged whitespace checks passed.
 Windows regression runs used `PYTHONUTF8=1` and normal temporary-directory access
 for existing SQLite fixtures. Unit checks use isolated databases and mock ACP;
 they do not establish the local model's future research quality.
+
+The job #24 investigation found successful source reads rejected because the
+page cited source IDs instead of URLs. Final reviews for two other children
+emitted valid closing JSON after progress commentary, but concatenating all
+messages made that JSON fail validation. `tests/test_review_evidence.py` covers
+both stalls, focused source metadata, exact ID matching, failed/foreign/unread
+evidence rejection, streamed final messages and invalid/missing decisions.
+Existing exhausted attempts remain historical records; deploying a fix does
+not automatically reopen reviews or bypass the explicit retry controls.
+The focused review/collaboration/convergence run passed 49 tests; the full
+Python suite passed 336 tests with two platform skips. No dashboard changes
+required browser tests.
