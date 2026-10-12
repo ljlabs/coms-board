@@ -11,7 +11,7 @@ Use this procedure for collaboration required jobs.
 
 ## Lead
 
-In main chat, create only the ready root job and end the turn. The runner owns staffing; do not create children or delegate from chat. Reuse suitable teammates with `agents_list`. In the assigned staffing turn, use `team_delegate` once per specialty. It registers/reuses a personally named specialist and creates a ready child. Put expertise in capabilities. Reuse an existing active assignment instead of creating a differently titled duplicate. Finish staffing and record the decision with `team_note`; workers start afterwards.
+In main chat, create only the ready root with `type=job` and `recommended_workers`, then end the turn. The runner owns staffing; do not create children or delegate from chat. Reuse suitable teammates with `agents_list`. In the assigned staffing turn, use `team_delegate` once per specialty, never raw `ticket_create`. It registers/reuses a personally named specialist and creates a ready child. Put expertise in capabilities. Reuse active and completed assignments instead of creating differently titled duplicates. Finish staffing and record the decision with `team_note`; workers start afterwards.
 
 Delegation defaults to `task` for workspace work and inherits the job workspace.
 Set `type=research` for public-source research. Every agent keeps native tools;
@@ -25,7 +25,7 @@ kinds with `source_get` and can check current files with native tools.
 for full evidence. Repeatedly polling unchanged output does not advance work;
 perform the assignment or record a concrete blocker and finish the turn.
 
-The lead delegates child tickets and waits for worker results and reviews. Only the lead owns the synthesis. After all workers finish, write a fresh combined wiki page, link it to the job, obtain a current revision peer review, and deliver with `ticket_result`.
+The lead delegates child tickets and waits for worker results and reviews. Only the lead owns the synthesis. On resumption, read the delivered results; the original task description is context, not a request to delegate again. An unmet acceptance criterion can justify one follow-up per teammate/job through `team_delegate(followup_reason=...)`; state the specific gap. After all workers finish, write a fresh combined wiki page, link it to the job, obtain a current revision peer review, and deliver with `ticket_result`. Success moves active work to review and ends execution. End immediately; do not create more work or restart research.
 
 Treat pending reviews as urgent: the author cannot deliver until a real
 `team_review` decision arrives. Workers normally request the registered

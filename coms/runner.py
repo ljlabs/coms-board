@@ -271,6 +271,7 @@ def board_servers(actor, ticket_id=None, run_id=None, readonly=False, collaborat
 # sessions. Team messages notify people; board records preserve their findings.
 SHARED_COLLABORATION_PROMPT = """SHARED COLLABORATION RULES
 Own your assigned scope and finish it. Research your topic yourself; ask a teammate only for a specific unresolved evidence gap or decision. Questions and new skills are optional, never completion quotas. Reuse existing findings instead of expanding scope or researching for each other indefinitely.
+Team roots use type=job. Main chat creates the root only; assigned leads staff with team_delegate. Synthesis reads completed child results instead of repeating delegation from the original request. A completed scope can receive at most one follow-up per teammate/job, with followup_reason naming an unmet acceptance criterion. Successful ticket_result ends execution and moves active work to review; never create more tickets or restart the assignment after delivery.
 Reusable questions belong on the Questions page so future tasks benefit. Search with board_search and read questions_get first. Create questions_ask only for a real gap. Use ticket_link(kind=question, ref=the question ID) before team_send. Announce the ID/link with team_note, then team_send(question_id=that ID) to the appropriate teammate. This pauses your turn. Use team_note for scheduling, guidance, handoffs and review failure notices; these do not need new knowledge questions.
 Responders read questions_get and save evidence, citations and limitations with questions_answer before team_reply. Reply with the question ID/link and a short summary. Reuse your existing answer when adequate. Legacy chat-only requests remain answerable with team_reply. Scoped response/monitor turns cannot create new questions or delegate work.
 Finish your own wiki evidence page, link it, then team_request_review for its exact revision. Workers normally choose the registered orchestrator from team_roster; the lead's synthesis needs an independent peer. Review promptly: wiki_get, cited source_get, then team_review with accepted or changes_requested and concrete reasons. Stay within the assigned page and criteria; do not survey unrelated artifacts. Report limitations honestly, never invent verification.
@@ -429,6 +430,12 @@ class Runner:
                         # yield. Pause after the durable request is recorded so
                         # the recipient can take its response turn immediately.
                         c.cancel()
+                    if payload.get('status') == 'completed' and payload.get('title', '').endswith('ticket_result'):
+                        delivered = self._result_delivered(db.connect(), run_id)
+                        if delivered:
+                            # Delivery is the execution boundary, even if the
+                            # backend model keeps following its original task.
+                            c.cancel()
                 return
             text=update.get('content',{}).get('text') if isinstance(update.get('content'),dict) else None
             if text: self._message(ticket_id, run_id, 'system', 'acp-response', text)
@@ -634,20 +641,41 @@ class Runner:
         if recorder: recorder.finish('cancelled', reason)
         return True
 
+    @staticmethod
+    def _result_delivered(conn, run_id):
+        return any(json.loads(row['body']).get('tool') == 'ticket_result' for row in
+                   conn.execute("SELECT body FROM agent_messages WHERE run_id=? AND kind='board-delivery'", (run_id,)))
+
+    def _complete_delivery(self, tid, rid, recorder):
+        conn = db.connect()
+        conn.execute("UPDATE agent_runs SET status='completed',finished_at=?,error='' WHERE id=? AND status!='cancelled'", (now(), rid))
+        conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'", (now(), tid))
+        schedules.mark_ticket(conn, tid, 'completed')
+        conn.commit()
+        self._message(tid, rid, 'system', 'status', 'Deliverable recorded; ticket is awaiting review.')
+        recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
+
     def _resume_waiting(self):
         conn = db.connect()
         team.retire_obsolete_reviews(conn)
         conn.commit()
         resumed = []
-        rows = conn.execute("SELECT r.id AS run_id,r.ticket_id,r.agent_slug,t.type,t.collaboration_required FROM agent_runs r JOIN tickets t ON t.id=r.ticket_id WHERE r.status='waiting' AND t.ready_for_execution=1 AND t.status IN ('open','in_progress')").fetchall()
+        rows = conn.execute("SELECT r.id AS run_id,r.ticket_id,r.agent_slug,t.result,t.collaboration_required FROM agent_runs r JOIN tickets t ON t.id=r.ticket_id WHERE r.status='waiting' AND t.ready_for_execution=1 AND t.status IN ('open','in_progress')").fetchall()
         for row in rows:
             if team.pending(conn, row['ticket_id'], row['agent_slug']): continue
             ready = api.children_resolved if row['collaboration_required'] else api.children_delivered
-            if row['type'] == 'job' and not ready(conn, row['ticket_id']): continue
+            if not ready(conn, row['ticket_id']): continue
+            delivered = bool(row['result'].strip() and self._result_delivered(conn, row['run_id']))
+            if delivered:
+                # Recover legacy waiting runs that already published, without
+                # replaying their assignment or repeating staffing.
+                try: api.deliver_ticket(conn, row['ticket_id'], row['agent_slug'], row['result'])
+                except api.BadRequest: delivered = False  # Revalidate/revise superseded evidence during synthesis.
             conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=? AND status='waiting'", (now(), row['run_id']))
-            conn.execute("UPDATE agent_runtime SET state='completed',phase='completed',summary='Teammate replies or results are ready; agent queued to resume.',updated_at=?,finished_at=? WHERE key=? AND state!='cancelled'", (now(), now(), 'run:' + str(row['run_id'])))
-            api.log_activity(conn, row['agent_slug'], 'runner.resume', f"ticket:{row['ticket_id']}", 'Teammate replies or results are ready; agent resuming')
-            resumed.append(row['ticket_id'])
+            summary = 'Previously delivered result queued for review.' if delivered else 'Teammate replies or results are ready; agent queued to resume.'
+            conn.execute("UPDATE agent_runtime SET state='completed',phase='completed',summary=?,updated_at=?,finished_at=? WHERE key=? AND state!='cancelled'", (summary, now(), now(), 'run:' + str(row['run_id'])))
+            api.log_activity(conn, row['agent_slug'], 'runner.resume', f"ticket:{row['ticket_id']}", summary)
+            if not delivered: resumed.append(row['ticket_id'])
         conn.commit()
         return resumed
 
@@ -916,7 +944,7 @@ class Runner:
             # Children finished after scheduling: synthesis uses a normal slot.
             conn.rollback()
             return
-        stage = 'heartbeat' if heartbeat else 'synthesize' if t['type'] == 'job' and children else 'execute'
+        stage = 'heartbeat' if heartbeat else 'synthesize' if children else 'execute'
         template=conn.execute('SELECT * FROM agent_templates WHERE id=? AND enabled=1',(t.get('agent_template_id'),)).fetchone() if t.get('agent_template_id') else None
         if template and template['backend']: backend=template['backend']
         cur=conn.execute("INSERT INTO agent_runs(ticket_id,template_id,backend,status,started_at,agent_slug,stage) VALUES(?,?,?,'running',?,?,?)",(tid,template['id'] if template else None,backend,now(),agent['slug'],stage)); rid=cur.lastrowid
@@ -930,7 +958,7 @@ class Runner:
                 team.hold(conn, tid, 'Unassigned, unready dependency blocks team completion; assign, enable or explicitly retire that draft')
                 self._finish_stopped_run(tid, rid, recorder)
                 return
-            if t['type']=='job' and children and not children_ready(conn,tid) and not heartbeat:
+            if children and not children_ready(conn,tid) and not heartbeat:
                 conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=? AND status!='cancelled'",(rid,)); schedules.mark_ticket(conn,tid,'waiting'); conn.commit()
                 recorder.finish('waiting','Waiting for existing teammates; heartbeat will check their progress')
                 return
@@ -954,11 +982,11 @@ class Runner:
             prompt += api.shared_skill_context(conn) + '\n\n'
             prompt += api.triggered_skill_context(conn, t['title'] + '\n' + t['body'], agent['slug'])
             prompt += team.context(conn, tid, agent['slug']) + '\n\n'
-            if t['type'] == 'job':
-                prompt += ("ORCHESTRATION JOB\nYou are the lead orchestrator for this job. Prefer reusing teammates from agents_list; agent_ensure creates a named specialist only when needed. Create child tickets with explicit assignees and parent_id matching this job. Workers deliver findings on their own tickets; only the lead owns the combined wiki page. After delegation, finish your dispatch turn without ticket_result; the runner waits for worker results and resumes you automatically for synthesis. Reserve ticket_result for the final synthesis after your teammates deliver.\n"
+            if t['type'] == 'job' or children:
+                prompt += ("ORCHESTRATION JOB\nYou are the lead for this parent ticket. Prefer reusing teammates and completed findings. Staffing uses team_delegate from an assigned job, never raw ticket_create. Workers deliver findings on their own tickets; only the lead owns the combined wiki page. After delegation, finish your dispatch turn without ticket_result; the runner waits for worker results and resumes you automatically for synthesis. Reserve ticket_result for the final synthesis after your teammates deliver.\n"
                            f"Suggested workers: {t.get('recommended_workers') or 'choose the number yourself'}. Maximum concurrent ticket slots: {settings.get('parallel_agents', '2')}. Choose distinct personal names for new specialists and put expertise in their descriptions. Register the whole team BEFORE making their tickets ready. Record your staffing decision with team_note. Workers use native tools for their assignments, record local file evidence with source_read_file or relevant public evidence with source_fetch, exchange questions and obtain peer review.\n\n")
             if stage == 'synthesize':
-                prompt += 'SYNTHESIS: Read delivered worker results and verify evidence. Own the combined page. Create a targeted follow-up only for an unmet acceptance criterion, never duplicate completed scopes. Otherwise publish/link the synthesis, obtain independent peer review, call ticket_result and end. Publish a new shared skill only if a verified reusable method emerged; it is optional.\n'
+                prompt += 'SYNTHESIS: Staffing has already happened. Read delivered worker results and verify evidence; do not replay delegation from the original description. Own the combined page. Only a job can use team_delegate for one targeted follow-up per teammate, with followup_reason naming an unmet acceptance criterion. Never duplicate completed scopes. Otherwise publish/link the synthesis, obtain independent peer review, call ticket_result and END THE TASK. A successful result ends execution and queues final review. Publish a new shared skill only if a verified reusable method emerged; it is optional.\n'
                 prompt += '\n'.join(f"Child #{child['id']} ({child['assignee']}), {child['status']}: {child['title']}\nResult: {child['result']}" for child in children) + '\n\n'
             if template and template['prompt'].strip():
                 prompt += 'AGENT TEMPLATE INSTRUCTIONS (follow these within the shared Swarm Agent requirements above):\n'+template['prompt'].strip()+'\n\n'
@@ -1026,15 +1054,15 @@ class Runner:
                 conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=? AND status!='cancelled'",(now(),rid)); conn.commit()
                 recorder.finish('completed', 'Team heartbeat complete; all child work is ready for synthesis')
                 return
-            if children and (stage != 'synthesize' or not children_ready(db.connect(), tid)):
+            delivered = self._result_delivered(db.connect(), rid)
+            if not delivered and children and (stage != 'synthesize' or not children_ready(db.connect(), tid)):
                 conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=? AND status!='cancelled'", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 recorder.finish('waiting', 'Waiting for teammate results; synthesis will resume automatically')
                 api.comment_ticket(conn, tid, agent['slug'], 'Waiting for child ticket results. The lead will resume automatically for synthesis once they are delivered.')
                 waiting = self.conns.pop(tid, None)
                 if waiting: waiting.close()
                 return
-            delivery=db.connect().execute("SELECT body FROM agent_messages WHERE run_id=? AND kind='board-delivery'",(rid,)).fetchall()
-            if not any(json.loads(row['body']).get('tool')=='ticket_result' for row in delivery):
+            if not delivered:
                 if team.pending(db.connect(), tid, agent['slug']):
                     conn.execute("UPDATE agent_runs SET status='waiting' WHERE id=? AND status!='cancelled'", (rid,)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                     recorder.finish('waiting', 'Waiting for teammate replies or peer review; will resume automatically')
@@ -1042,16 +1070,20 @@ class Runner:
                     if waiting: waiting.close()
                     return
                 raise RuntimeError('Agent finished without publishing ticket_result through the Swarm Agent tools. Record the deliverable on the board and update the ticket to retry.')
-            conn=db.connect(); conn.execute("UPDATE agent_runs SET status='completed',finished_at=? WHERE id=? AND status!='cancelled'",(now(),rid)); conn.execute("UPDATE tickets SET status='review',updated_at=? WHERE id=? AND status='in_progress'",(now(),tid)); schedules.mark_ticket(conn, tid, 'completed'); conn.commit()
-            self._message(tid,rid,'system','status','Agent turn finished; ticket moved to review.')
-            recorder.finish('completed', 'Deliverable recorded; ticket is awaiting review')
+            self._complete_delivery(tid, rid, recorder)
         except Exception as e:
             if self._finish_stopped_run(tid, rid, recorder):
                 stopped = self.conns.pop(tid, None)
                 if stopped: stopped.close()
                 elif c: c.close()
                 return
-            if t['type']=='job' and api.list_tickets(db.connect(), parent_id=tid, include_closed=True) and not children_ready(db.connect(), tid):
+            if self._result_delivered(db.connect(), rid):
+                self._complete_delivery(tid, rid, recorder)
+                finished = self.conns.pop(tid, None)
+                if finished: finished.close()
+                elif c: c.close()
+                return
+            if api.list_tickets(db.connect(), parent_id=tid, include_closed=True) and not children_ready(db.connect(), tid):
                 conn=db.connect(); conn.execute("UPDATE agent_runs SET status='waiting',error=? WHERE id=? AND status!='cancelled'",(str(e),rid)); schedules.mark_ticket(conn, tid, 'waiting'); conn.commit()
                 self._message(tid,rid,'system','warning','Lead turn stopped while child work remained active; a team heartbeat will restart supervision: '+str(e))
                 recorder.finish('waiting', 'Lead turn stopped; heartbeat will resume team supervision')

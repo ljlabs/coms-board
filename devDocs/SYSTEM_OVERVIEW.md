@@ -57,6 +57,10 @@ actions. Team replies and reviews can pause and resume work. Shared collaboratio
 guidance routes reusable questions/answers to Q&A before team notifications;
 peer reviews receive a reserved response slot and isolated orchestrator role
 context. Main chat creates the root job; runner dispatch owns staffing.
+Team size is a job-only field; MCP normalizes team-sized root requests to jobs.
+All parents wait for child results and resume in synthesis. Successful agent
+result delivery atomically moves active work to review and ends execution.
+Delegation reuses completed scopes and bounds explicit criterion-based follow-ups.
 Structured question notifications require a linked question and originating
 ticket; artifacts have ticket ownership and bounded revision reviews.
 Persisted team progress/lifetime budgets hold nonconverging jobs. ACP processes

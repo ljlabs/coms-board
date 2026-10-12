@@ -61,8 +61,11 @@ class TestTeamRuntime(unittest.TestCase):
 
     def test_delegated_ticket_has_a_registered_identity(self):
         lead = api.create_ticket(self.conn, 'Research job', '', 'admin', type_='job')
-        with patch.dict(os.environ, {'COMS_AGENT': 'orchestrator', 'COMS_TICKET_ID': str(lead['id'])}):
-            mcp.call_tool('ticket_create', {'title': 'Research market mechanics', 'parent_id': lead['id'], 'ready': True})
+        agent = api.resolve_ticket_agent(self.conn, lead)
+        with patch.dict(os.environ, {'COMS_AGENT': agent['slug'], 'COMS_TICKET_ID': str(lead['id'])}):
+            mcp.call_tool('team_delegate', {'job_id': lead['id'], 'name': 'Market specialist',
+                                          'capabilities': 'Market mechanics', 'title': 'Research market mechanics',
+                                          'body': 'Inspect market evidence'})
         child = api.list_tickets(self.conn, parent_id=lead['id'])[0]
         self.assertTrue(child['assignee'])
         self.assertEqual(api.get_agent(self.conn, child['assignee'])['role'], 'expert')

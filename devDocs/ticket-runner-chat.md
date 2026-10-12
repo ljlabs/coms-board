@@ -20,6 +20,13 @@ available in the opt-in Debug logs section. Progress entries identify their
 stage and source run, so an execution and its review are visibly distinct even
 when the same agent handles both. Schedule history has a View chat link.
 
+Execution ends when `ticket_result` succeeds: active tickets move to review and
+the runner cancels the model turn after observing durable delivery. Errors after
+publication cannot rerun the original assignment. All parents wait for children
+and resume in synthesis, including legacy task/research parents. Stored waiting
+results recover into review after validation rather than replaying delegation.
+See [bounded team execution](bounded-team-execution.md).
+
 Follow-ups reuse a live ticket session or restore the latest completed execution
 session after a restart. Session replay is suppressed because local rows are
 canonical. If loading is unsupported or fails, a new session receives the ticket

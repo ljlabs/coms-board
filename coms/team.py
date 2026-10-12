@@ -158,11 +158,13 @@ def validate_artifact_write(conn, slug, actor, ticket_id):
 
 
 @db.serialized_write
-def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='task'):
+def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='task', followup_reason=''):
     require_running(conn, job_id)
     job = api.get_ticket(conn, job_id)
     if job['type'] != 'job' or job['assignee'] != actor:
         raise api.BadRequest('Only the assigned job lead can delegate teammates')
+    if job['status'] in ('review', 'done', 'wontfix'):
+        raise api.BadRequest('This job has ended execution; reuse the delivered results instead of delegating again')
     if not name.strip() or not capabilities.strip() or not body.strip():
         raise api.BadRequest('Provide a distinct personal name, capabilities and an actionable scope')
     if type_ not in ('task', 'research'):
@@ -180,8 +182,13 @@ def delegate(conn, job_id, actor, name, capabilities, title, body, *, type_='tas
     if active:
         conn.rollback()
         raise api.BadRequest(f'Teammate already owns active ticket #{active[0]}; read and reuse that scope before assigning more work')
+    prior = conn.execute('SELECT count(*) FROM tickets WHERE parent_id=? AND assignee=?', (job_id, agent['slug'])).fetchone()[0]
+    if prior >= 2:
+        raise api.BadRequest('Follow-up budget exhausted for this teammate/job; synthesize existing results or report the unmet criterion')
+    if prior and not followup_reason.strip():
+        raise api.BadRequest('A completed scope must be reused; followup_reason must name a specific unmet acceptance criterion')
     urls = list(dict.fromkeys(re.findall(r'https://[^\s<>]+', job['body'])))
-    assignment = (body.strip() + f'\n\nParent job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\n' +
+    assignment = (body.strip() + (f'\n\nUnmet acceptance criterion: {followup_reason.strip()}' if prior else '') + f'\n\nParent job #{job_id}: {job["title"]}. Perform only your assigned specialty; the lead handles staffing and synthesis.\n' +
                   ('Starting source URLs:\n' + '\n'.join(urls) + '\n' if urls else '') +
                   f'\nYour team room belongs to job #{job_id}. Do your assigned research yourself using native tools. Record local evidence with source_read_file or public HTTPS evidence with source_fetch, then cite it and report limitations. Questions are optional: only for a real unresolved gap, search board_search/questions_get or create questions_ask, ticket_link it, announce it with team_note, then team_send(question_id=the ID) to a relevant teammate and end this turn while waiting. Save answers with questions_answer before team_reply. Publish and link your own evidence page, finish edits, and request current-revision review from the registered orchestrator unless another qualified reviewer is named. Keep the page unchanged during review. On acceptance, immediately call ticket_result and end. Revise only concrete changes_requested findings; do not restart failed reviews indefinitely. Do not invent verification. Share a reusable method only if one emerged; new skills are optional. The lead owns the combined synthesis.')
     ticket = api.create_ticket(conn, title, assignment, actor, type_=type_, assignee=agent['slug'], parent_id=job_id, ready_for_execution=True, collaboration_required=True, workspace=job.get('workspace', ''))

@@ -42,7 +42,11 @@ unchanged failed call. Web search uses an external search service even when
 model inference is local.
 
 `team_delegate` creates a child `task` by default and inherits the job workspace;
-choose `type=research` for public-source research. `team_read` is a bounded index,
+choose `type=research` for public-source research. Team roots use `type=job`;
+`recommended_workers` selects a job through MCP and is valid only on jobs in the
+shared API. Assigned team staffing uses `team_delegate`, never `ticket_create`.
+Completed scopes are reused. One follow-up per teammate/job requires
+`followup_reason` naming an unmet acceptance criterion. `team_read` is a bounded index,
 including pending requests. Read a specific message with `message_id` and page
 long bodies with `offset`; page sources with `source_after_id`, then use
 `source_get` for the full record. Act on the assignment when reads stop revealing
@@ -188,7 +192,11 @@ acknowledgment is insufficient. The runner prioritizes reviews with one reserved
 response slot, and orchestrator reviews use isolated role/assignment context
 even while the main chat is busy. Review only the assigned artifact and its
 cited evidence. As soon as the page is accepted and no real question is pending,
-call `ticket_result`, verify success and end the worker turn. No question or new
+call `ticket_result`, verify success and end the worker turn. Success moves active
+work to review and ends execution; do not create more tickets or restart research.
+Parents wait for child results and resume in synthesis, including legacy parents
+created with a different type. Read their results instead of repeating the
+original staffing request. No question or new
 skill is required to finish. Wait without
 `ticket_result` while a response is pending. Keep the page unchanged after
 approval; address concrete changes_requested findings before another review.

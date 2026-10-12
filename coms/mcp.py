@@ -34,7 +34,7 @@ TOOLS = [
     tool("wiki_append", "Append knowledge to a board wiki page.", {"slug": S, "body": S}, ["slug", "body"], True),
     tool("ticket_list", "List tickets, including completed tickets."),
     tool("ticket_get", "Read a ticket, its result, comments and links.", {"id": I}, ["id"]),
-    tool("ticket_create", "Create prioritized work. Set ready only for actionable agent work.",
+    tool("ticket_create", "Create prioritized root work. Team requests use type=job and recommended_workers (which selects job automatically). Chat creates the root only; assigned team staffing must use team_delegate. Set ready only for actionable agent work.",
          {"title": S, "body": S, "priority": {"type": "string", "enum": list(api.PRIORITIES)},
           "assignee": S, "tags": S, "parent_id": I, "template_id": I, "ready": B,
           "type": {"type": "string", "enum": list(api.TICKET_TYPES)}, "recommended_workers": I, "workspace": S}, ["title"], True),
@@ -42,7 +42,7 @@ TOOLS = [
     tool("ticket_link", "Attach a wiki page, question, ticket or URL to a ticket.",
          {"id": I, "kind": {"type": "string", "enum": ["wiki", "question", "ticket", "url"]},
           "ref": S, "note": S}, ["id", "kind", "ref"], True),
-    tool("ticket_result", "Deliver your assigned scope with board links and verification once its cited current wiki revision has accepted peer review. Questions are optional. After acceptance, deliver immediately and end; finish a pending-review turn without this tool.",
+    tool("ticket_result", "Publish the final result with board links and verification; success ends execution and moves active work to review. Parent tickets must wait for child results, and collaborative evidence needs current peer approval. End immediately after success; finish pending-review turns without this tool.",
          {"id": I, "result": S}, ["id", "result"], True),
     tool("questions_list", "List questions."),
     tool("questions_get", "Read a question and its answers.", {"id": I}, ["id"]),
@@ -86,7 +86,7 @@ TOOLS = [
     tool("schedule_run_now", "Queue an immediate run of a scheduled task, even when its recurrence is paused.", {"id": I}, ["id"], True),
     tool("schedule_delete", "Delete a recurring schedule while retaining its execution history.", {"id": I}, ["id"], True),
     tool("team_roster", "List teammates on a job, with distinct names, identities, capabilities and assigned tickets.", {"job_id": I}, ['job_id']),
-    tool("team_delegate", "Delegate one specialty to a named teammate. Creates a ready child task with inherited workspace and collaboration requirements. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
+    tool("team_delegate", "Delegate one specialty from the assigned job. Reuses existing scopes. A differently titled follow-up after completion requires followup_reason naming an unmet acceptance criterion; at most one follow-up per teammate/job. Set type=research for public-source research.", {"job_id": I, "name": S, "capabilities": S, "title": S, "body": S, "followup_reason": S, "type": {"type": "string", "enum": ['task', 'research']}}, ['job_id', 'name', 'capabilities', 'title', 'body'], True),
     tool("team_stop", "Stop a job and all descendant workers durably. Disables execution, retries, queued replies and heartbeats; preserves tickets and results. Use when asked to stop or kill a team. Only the operator, orchestrator or job lead may call this. STOP notes and process kills alone do not stop queued work.", {'job_id': I}, ['job_id'], True),
     tool("team_read", "Read a bounded job index with recent messages, pending requests, progress, reviews and sources. Use message_id for a full message (offset pages long bodies), source_after_id for more sources, and source_get/wiki_get for evidence. Act on the assignment instead of repeatedly polling unchanged output.", {"job_id": I, "after_id": I, "message_id": I, "offset": I, "source_after_id": I}, ['job_id']),
     tool("team_send", "Ask for an actual evidence gap on your linked Questions record, using question_id. Include its link in body. The runner pauses your turn. Reuse answers; perform your own research instead of handing off your scope. Use team_note for coordination.", {"job_id": I, "to": S, "body": S, "question_id": I, "ticket_id": I}, ['job_id', 'to', 'body', 'question_id'], True),
@@ -183,17 +183,22 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "ticket_list": result = api.list_tickets(conn, include_closed=True)
     elif name == "ticket_get": result = api.get_ticket(conn, args["id"])
     elif name == "ticket_create":
+        if assigned:
+            origin = api.get_ticket(conn, int(assigned))
+            if origin['type'] == 'job' or origin['parent_id'] or origin['children']:
+                raise ValueError('Use team_delegate from your assigned job for staffing; do not recreate team work with ticket_create')
         if args.get('parent_id'):
-            parent = team.job_for_ticket(conn, args['parent_id'])
-            if parent and parent.get('collaboration_required') and parent['assignee'] == actor and not assigned:
+            api.get_ticket(conn, args['parent_id'])
+            if not assigned:
                 raise ValueError('The runner owns team staffing; create only the job in chat and let its dispatch turn delegate')
+            raise ValueError('Use team_delegate from your assigned job for child staffing; standalone workers cannot delegate')
         # The shared orchestrator ACP/MCP process serves successive chats. Resolve
         # its current durable turn here instead of freezing a session in its env.
         source_session = None
         if not assigned and conn.execute("SELECT 1 FROM agents WHERE slug=? AND role='orchestrator'", (actor,)).fetchone():
             source_session = conn.execute("SELECT session_id FROM orchestrator_turns WHERE status='running' ORDER BY started_at DESC LIMIT 1").fetchone()
         result = api.create_ticket(conn, args["title"], args.get("body", ""), actor,
-                                   type_=args.get('type', 'task'), priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
+                                   type_='job' if args.get('recommended_workers') is not None else args.get('type', 'task'), priority=args.get("priority", "p2"), assignee=args.get("assignee", ""),
                                    tags=args.get("tags"), parent_id=args.get("parent_id"),
                                    ready_for_execution=args.get("ready", False), agent_template_id=args.get("template_id"), recommended_workers=args.get('recommended_workers'), workspace=args.get('workspace', ''),
                                    source_ticket_id=int(assigned) if assigned else None,
@@ -205,8 +210,7 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
     elif name == "ticket_link": result = api.link_ticket(conn, args["id"], args["kind"], args["ref"], actor, args.get("note", ""))
     elif name == "ticket_result":
         if not args["result"].strip(): raise ValueError("a nonempty result is required")
-        team.validate_delivery(conn, args['id'], actor)
-        result = api.update_ticket(conn, args["id"], actor, result=args["result"])
+        result = api.deliver_ticket(conn, args["id"], actor, args["result"])
     elif name == "questions_list": result = api.list_questions(conn)
     elif name == "questions_get": result = api.get_question(conn, args["id"], actor)
     elif name == "questions_ask": result = api.ask_question(conn, args["title"], args["body"], actor)
@@ -253,7 +257,7 @@ def call_tool(name, args, *, readonly=False, collaboration=False, dispatch_only=
         if not assigned:
             raise ValueError('The runner owns team staffing; team_delegate requires an assigned job turn')
         if assigned and int(assigned) != args['job_id']: raise ValueError('Delegate within your assigned job only')
-        result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'], type_=args.get('type', 'task'))
+        result = team.delegate(conn, args['job_id'], actor, args['name'], args['capabilities'], args['title'], args['body'], type_=args.get('type', 'task'), followup_reason=args.get('followup_reason', ''))
     elif name == 'team_stop':
         if assigned and int(assigned) != args['job_id']: raise ValueError('Stop your assigned job only')
         result = team.stop(conn, args['job_id'], actor)

@@ -336,7 +336,7 @@ board selector. The task page shows the next run and execution history, with
 links to each ticket transcript. Pause, resume, run now and delete controls are
 available in the dashboard.
 
-Main chat creates the ready root job and ends; the runner owns staffing in a
+Main chat creates the ready root with `type=job` and ends; the runner owns staffing in a
 separate turn exposing delegation tools only. `team_delegate` reuses a
 suitable specialist or registers a named teammate and creates a ready child
 task with the job's workspace, source URLs and collaboration requirements;
@@ -345,6 +345,11 @@ finishes, so they can see the complete team roster. Every agent retains native
 tools for workspace inspection, commands and assigned work; the runner never
 disables tool support by role or ticket type. Board deliverables use MCP tools.
 An identity cannot receive two active child assignments for the same job.
+Completed scopes are reused. A differently titled follow-up requires
+`followup_reason` naming an unmet acceptance criterion, with at most one follow-up
+per teammate/job. Assigned team turns use `team_delegate`; raw ticket creation
+cannot bypass staffing by omitting the parent. `recommended_workers` selects a
+job in MCP and is valid only on jobs in the shared HTTP/CLI API.
 An active ticket owns its artifact even if another ticket uses the same agent.
 Pages stay unchanged during review and after approval; manual edits cancel
 obsolete pending reviews. Equivalent review requests reuse their existing
@@ -364,6 +369,10 @@ read long messages, and `source_after_id` pages the source index. The lead must
 wait for child reviews, write and attach a
 fresh synthesis and obtain its peer approval. After acceptance, agents call
 `ticket_result` and end; a question or new shared procedure is optional.
+Successful result publication moves active work to review immediately and ends
+execution. All parent tickets wait for child results and resume in synthesis,
+including legacy research/task parents. Completed results cannot restart the
+original staffing instructions.
 These checks verify recorded actions; factual quality still
 depends on the research and peer critique.
 

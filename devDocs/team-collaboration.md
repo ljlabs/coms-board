@@ -30,6 +30,11 @@ teammate for their own synthesis. Authors finish and link the page before
 requesting review, keep it unchanged while waiting, and deliver with
 `ticket_result` immediately after accepted current-revision review and any
 real pending question is resolved. Questions and skills are optional.
+Successful `ticket_result` moves active work to review and ends execution under
+a shared write lock. All parent types wait for children and resume in synthesis;
+legacy non-job parents cannot replay staffing after publication. Raw MCP team
+staffing is rejected, and completed scopes permit one explicitly justified
+follow-up per teammate/job. See bounded team execution for the tool contract.
 Reviewers inspect `wiki_get` and cited `source_get` evidence and record
 `team_review` with concrete findings. Existing revision, evidence, authorship
 and self-review checks remain unchanged. Honest access limitations do not

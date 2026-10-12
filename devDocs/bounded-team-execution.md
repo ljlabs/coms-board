@@ -6,8 +6,17 @@ Main chat creates the ready root job and ends. Runner dispatch is the single
 staffing owner and uses `team_delegate` once per specialty before workers start.
 MCP rejects child staffing/delegation from unassigned chat. Delegation serializes
 its checks and creation: an identical scope returns its prior ticket, and a
-differently titled scope for an agent with an active child is rejected. The lead
+differently titled scope for an agent with an active child is rejected. Completed
+scopes are reused; a new title needs `followup_reason` naming an unmet acceptance
+criterion, and each teammate/job allows one follow-up. The reason is recorded in
+the child assignment. MCP assigned team turns cannot create raw tickets, including
+orphan copies that omit `parent_id`. Chat cannot create parented work. The lead
 owns synthesis; workers perform their own assignments.
+
+Team requests use `type=job`. MCP `ticket_create` normalizes a request with
+`recommended_workers` to a collaborative job, even if a model specifies another
+type. Shared API/HTTP/CLI reject team size on non-job creation/type changes;
+legacy malformed parents can still be paused/reviewed without rewriting history.
 
 Questions are optional and address actual information gaps. Search/read existing
 Q&A, create or reuse a standalone question, link it to the assigned ticket, and
@@ -38,10 +47,22 @@ total per ticket/page across revisions. Each delivery retains its three-attempt
 backoff. Exhaustion requires a blocker instead of repeated fresh requests.
 
 Once the unchanged linked evidence page is accepted and no real request remains
-pending, call `ticket_result`, verify success and end. No answered question or new
+pending, call `ticket_result`, verify success and end. `api.deliver_ticket`
+serializes readiness/evidence validation and result/status writes. Success moves
+open/in-progress work to review immediately; MCP provenance rejects subsequent
+execution work from reviewed/ended tickets. A successful delivery event cancels
+the model turn. Backend errors after recorded delivery still complete the run.
+No answered question or new
 skill is required. Leads still wait for completed child reviews, write a fresh
 synthesis and obtain independent current-revision approval. An unassigned,
 unready unfinished child causes a visible hold before ACP startup.
+
+Child readiness and synthesis routing apply to every parent type, including
+legacy research/task parents. Waiting parents remain quiet until children are
+ready. Successful result delivery takes precedence over the dispatch child-wait
+branch. Legacy waiting runs with a recorded result revalidate and enter review
+without replay; superseded evidence resumes synthesis for correction. Final
+review continues to require resolved children.
 
 ## Scheduling, context and budgets
 
@@ -108,6 +129,13 @@ capacity leakage. Existing collaboration, monitor, worker, stop, skill and
 orchestrator regressions preserve tool/evidence/lifecycle contracts. No dashboard
 changes require browser tests.
 
+`tests/test_parent_completion.py` reproduces the ticket #10 replay: main chat
+created `research`, collaboration disabled, but team size three. Repeated execute
+turns created three sets of the same destinations despite successful results.
+Cases cover legacy parent waiting/synthesis, delivery before waiting, stored
+result recovery, terminal publication, child gates, MCP/API team shape, structured
+staffing including orphan bypass, bounded follow-ups and model cancellation/errors.
+
 The 12 October job #1 audit found duplicate staffing scopes, an unassigned draft
 dependency, stale accepted/pending revisions, no delivered result across dozens
 of runs and review retry budgets reset by new requests. Most communication was
@@ -116,9 +144,10 @@ the board. Native extractions filled the 128 MiB Docker tmpfs; early review
 timeouts predated exhaustion. The operator stopped the job durably and will
 resubmit after deployment; its records are preserved.
 
-Validation on 12 October 2026: the full Python suite ran 302 checks successfully
-with two platform skips. The focused collaboration/lifecycle run passed 102
-checks with one skip. Compose configuration and staged whitespace checks passed.
+Validation on 12 October 2026: the full Python suite ran 316 tests successfully
+with two platform skips, including fourteen completion/replay regression cases.
+The earlier collaboration/lifecycle run passed 102 checks with one skip.
+Compose configuration and staged whitespace checks passed.
 Windows regression runs used `PYTHONUTF8=1` and normal temporary-directory access
 for existing SQLite fixtures. Unit checks use isolated databases and mock ACP;
 they do not establish the local model's future research quality.

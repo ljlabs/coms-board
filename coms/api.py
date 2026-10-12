@@ -1094,6 +1094,8 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
     ready_for_execution = _execution_flag(ready_for_execution)
     agent_template_id = _template_id(conn, agent_template_id)
     recommended_workers = _worker_count(recommended_workers)
+    if recommended_workers is not None and type_ != 'job':
+        raise BadRequest('recommended_workers requires a job ticket')
     collaboration_required = _execution_flag(type_ == 'job' if collaboration_required is None else collaboration_required)
     if workspace:
         from .workspace import workspace_path
@@ -1106,6 +1108,10 @@ def create_ticket(conn, title: str, body: str, requester: str, type_: str = "tas
         try:
             for origin in (parent_id, source_ticket_id):
                 if origin is not None: team.require_running(conn, origin)
+            if source_ticket_id is not None:
+                source = get_ticket(conn, source_ticket_id)
+                if source['status'] in ('review', 'done', 'wontfix'):
+                    raise BadRequest('Execution has delivered or ended; do not create more work while awaiting review')
         except Exception:
             conn.rollback()
             raise
@@ -1155,6 +1161,8 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
             try: data["workspace"] = workspace_path({"workspace": data["workspace"]}, create_default=False)
             except ValueError as exc: raise BadRequest(str(exc))
     if 'recommended_workers' in data: data['recommended_workers'] = _worker_count(data['recommended_workers'])
+    if ('type' in data or 'recommended_workers' in data) and data.get('recommended_workers', t['recommended_workers']) is not None and data.get('type', t['type']) != 'job':
+        raise BadRequest('recommended_workers requires a job ticket')
     if "parent_id" in data:
         pid = data["parent_id"]
         if pid in ("", "none", "null", 0, "0"):
@@ -1208,6 +1216,20 @@ def update_ticket(conn, tid: int, actor: str, **fields) -> dict:
         if kids:
             out["open_children_warning"] = kids
     return out
+
+
+@db.serialized_write
+def deliver_ticket(conn, tid: int, actor: str, result: str) -> dict:
+    """Publish a validated result and end execution under the same write lock."""
+    from . import team
+    if not result.strip(): raise BadRequest('a nonempty result is required')
+    team.require_running(conn, tid)
+    ticket = get_ticket(conn, tid)
+    ready = children_resolved if ticket['collaboration_required'] else children_delivered
+    if not ready(conn, tid): raise BadRequest('Wait for child ticket results before delivering the synthesis')
+    team.validate_delivery(conn, tid, actor)
+    status = 'review' if ticket['status'] in ('open', 'in_progress') else ticket['status']
+    return update_ticket(conn, tid, actor, result=result, status=status)
 
 
 def claim_ticket(conn, tid: int, actor: str) -> dict:
