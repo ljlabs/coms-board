@@ -1,4 +1,4 @@
-"""Reproduce ticket #10's non-job parent replay without a live backend."""
+"""Regression cases for parent completion and non-job work recovery."""
 import json
 import os
 import tempfile

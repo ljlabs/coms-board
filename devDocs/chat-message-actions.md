@@ -50,14 +50,8 @@ stable edits, suffix removal, ACP restoration, full replay, routes, invalid
 inputs, busy state, and ticket regeneration without another execution.
 Browser regressions cover edit/cancel/reload, composer and editor drafts,
 fork/sidebar behavior, failed saves, busy controls, and ticket-only editing.
-Interactive review is left to the user as requested; no browser tools are used.
-
-On 2026-10-11, all 16 new backend checks and four new browser checks passed.
-The initial full-checkout runs exposed four transcript and nine browser
-regressions. The transcript now keeps ACP thoughts in opt-in logs, and browser
-checks follow the current SSE, dialog, and tool-panel contracts. Latest full
-verification passed: 257 Python tests with two platform skips, and all 31
-browser tests. JavaScript syntax and Git whitespace checks also pass.
+Fixtures use isolated databases and fake ACP processes; they do not need a live
+agent backend.
 
 ## Maintenance notes
 

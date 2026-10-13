@@ -48,8 +48,9 @@ Project board data contracts are covered by `tests/test_ticket_boards.py`,
 including legacy migration, scoped search, hierarchy, validation, deletion,
 and retained shared resources. CLI behavior is covered by `tests/test_cli.py`,
 and HTTP routes by `tests/test_server.py`. Browser regression coverage in
-`tests/browser.test.cjs` checks List and Board switching, ticket moves,
-failed-save recovery, filter retention, keyboard focus, and drag/drop no-ops.
+`tests/browser.test.cjs` checks List and Board switching, failed native moves
+and retry, status persistence with filter and focus retention, same-column and
+external-drop no-ops, and successful drag/drop persistence.
 
 ## Maintenance notes
 

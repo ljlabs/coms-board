@@ -136,7 +136,7 @@ while preserving board and agent-state volumes. See
 - Built-in workflow skills, root `SKILL.md` and `README.md` match completion
   rules. Skill folders remain authoritative; database copies are imported once.
 
-## Verification and investigation
+## Verification
 
 `tests/test_team_convergence.py` covers staffing, structured Q&A and migration,
 artifact freeze/ownership, stale retirement, review budgets across revisions,
@@ -147,41 +147,11 @@ capacity leakage. Existing collaboration, monitor, worker, stop, skill and
 orchestrator regressions preserve tool/evidence/lifecycle contracts. No dashboard
 changes require browser tests.
 
-`tests/test_parent_completion.py` reproduces the ticket #10 replay: main chat
-created `research`, collaboration disabled, but team size three. Repeated execute
-turns created three sets of the same destinations despite successful results.
-Cases cover legacy parent waiting/synthesis, delivery before waiting, stored
-result recovery, terminal publication, child gates, MCP/API team shape, structured
-staffing including orphan bypass, bounded follow-ups and model cancellation/errors.
-Scheduler ticks verify held parents do not queue child final reviews or consume
-their attempts, while unrelated eligible reviews still run at capacity one.
-The real retry API plus a scheduler tick verifies an exhausted final review is
-dispatched after an explicit retry instead of remaining queued indefinitely.
-
-The 12 October job #1 audit found duplicate staffing scopes, an unassigned draft
-dependency, stale accepted/pending revisions, no delivered result across dozens
-of runs and review retry budgets reset by new requests. Most communication was
-coordination, while a real research question was correctly saved and answered on
-the board. Native extractions filled the 128 MiB Docker tmpfs; early review
-timeouts predated exhaustion. The operator stopped the job durably and will
-resubmit after deployment; its records are preserved.
-
-Validation on 12 October 2026: the full Python suite ran 319 tests successfully
-with two platform skips, including seventeen completion/replay/hold regression cases.
-The earlier collaboration/lifecycle run passed 102 checks with one skip.
-Compose configuration and staged whitespace checks passed.
-Windows regression runs used `PYTHONUTF8=1` and normal temporary-directory access
-for existing SQLite fixtures. Unit checks use isolated databases and mock ACP;
-they do not establish the local model's future research quality.
-
-The job #24 investigation found successful source reads rejected because the
-page cited source IDs instead of URLs. Final reviews for two other children
-emitted valid closing JSON after progress commentary, but concatenating all
-messages made that JSON fail validation. `tests/test_review_evidence.py` covers
-both stalls, focused source metadata, exact ID matching, failed/foreign/unread
-evidence rejection, streamed final messages and invalid/missing decisions.
-Existing exhausted attempts remain historical records; deploying a fix does
-not automatically reopen reviews or bypass the explicit retry controls.
-The focused review/collaboration/convergence run passed 49 tests; the full
-Python suite passed 336 tests with two platform skips. No dashboard changes
-required browser tests.
+`tests/test_parent_completion.py` covers legacy parent waiting/synthesis,
+delivery before waiting, stored result recovery, terminal publication, child
+gates, MCP/API team shape, structured staffing, bounded follow-ups, and model
+cancellation/errors. Scheduler cases cover held parents, review budgets and
+explicit retries. `tests/test_review_evidence.py` covers focused source
+metadata, exact ID matching, failed/foreign/unread evidence rejection, streamed
+final messages and invalid/missing decisions. These unit tests use isolated
+databases and mock ACP connections.

@@ -100,17 +100,11 @@ foreign/unlinked/unassigned/stopped answer rejection, prompt/context injection,
 full-capacity/busy-orchestrator review scheduling, single-recipient limits,
 reserved-slot cleanup and visible bounded retries. Existing worker/team/stop/
 monitor/skill/orchestrator suites preserve evidence and lifecycle coverage.
-On 12 October 2026, the focused run passed 101 tests with one platform skip.
-After four additional guard cases, the full Python suite passed all 271 tests
-with two platform skips. Windows runs used normal temporary-directory access
-because existing fixtures cannot open SQLite files under sandbox `AC/Temp`.
-No dashboard/browser changes required a browser-suite run.
 
 Written-skill dry runs compare old/new procedures for a research question, a
 board-linked answer and a timed-out review. They evaluate instructions, not
 actual ACP backend performance. Updated skills explicitly cover the ordering
-absent from the old guidance. No live board, agent backend or deployed service
-is used by these checks.
+absent from the old guidance.
 
 ## Maintenance notes
 

@@ -24,6 +24,11 @@ agent-workspace/*
 .Codex/*
 !.Codex/agent.md
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
 
 # --- Python ---
 __pycache__/

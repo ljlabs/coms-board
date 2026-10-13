@@ -101,6 +101,40 @@ class TestServer(unittest.TestCase):
         self.assertIn('queued', state['reason'])
         self.assertEqual(state['kind'], 'agent run')
 
+    def test_scheduled_task_http_lifecycle_and_history(self):
+        from coms import api
+        from coms import schedules
+        conn = db.connect()
+        api.upsert_agent(conn, 'http-scheduler', 'HTTP scheduler', role='expert')
+        workspace = Path(self._tmp.name) / 'schedule-workspace'
+        workspace.mkdir(exist_ok=True)
+        with patch('coms.schedules.workspace_path', return_value=str(workspace)):
+            created = self.req('POST', '/api/scheduled-tasks', {
+                'name': 'HTTP report', 'prompt': 'Write a report.',
+                'schedule_type': 'interval', 'schedule_config': {'every': 1, 'unit': 'hours'},
+                'timezone': 'UTC', 'agent_slug': 'http-scheduler', 'workspace': str(workspace),
+            })
+            self.assertEqual(created['status'], 'active')
+            self.assertEqual(created['schedule_config'], {'every': 1, 'unit': 'hours'})
+            task_id = created['id']
+            paused = self.req('POST', f'/api/scheduled-tasks/{task_id}/pause', {})
+            self.assertEqual(paused['status'], 'paused')
+            manual = self.req('POST', f'/api/scheduled-tasks/{task_id}/run-now', {})
+            self.assertEqual(manual['status'], 'queued')
+            self.assertEqual(manual['is_manual'], 1)
+            runs = self.req('GET', f'/api/scheduled-tasks/{task_id}/runs')
+            self.assertEqual([row['id'] for row in runs], [manual['id']])
+            resumed = self.req('POST', f'/api/scheduled-tasks/{task_id}/resume', {})
+            self.assertEqual(resumed['status'], 'active')
+            edited = self.req('PATCH', f'/api/scheduled-tasks/{task_id}', {'name': 'HTTP report edited'})
+            self.assertEqual(edited['name'], 'HTTP report edited')
+            deleted = self.req('DELETE', f'/api/scheduled-tasks/{task_id}')
+            self.assertEqual(deleted, {'deleted': task_id})
+            self.assertEqual(self.req('GET', '/api/scheduled-tasks'), [])
+            retained = self.req('GET', '/api/scheduled-tasks?all=1')
+            self.assertEqual(retained[0]['status'], 'deleted')
+            self.assertEqual(retained[0]['run_count'], 1)
+
     def test_links_over_http(self):
         t = self.req("POST", "/api/tickets", {"title": "linked work"})
         self.req("POST", "/api/wiki", {"title": "Note Page", "body": "b"})

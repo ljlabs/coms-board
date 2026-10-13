@@ -1,4 +1,4 @@
-"""Regression cases for the source-ID and final-response stalls in job #24."""
+"""Regression cases for source evidence and streamed final-review decisions."""
 import json
 import os
 import tempfile

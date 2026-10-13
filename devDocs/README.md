@@ -81,6 +81,9 @@ the documentation updates for one cohesive change together in the same commit.
    described in the root `README.md` (`npm ci`, install Playwright Chromium if
    needed, then `npm run test:browser`). Fix failures caused by the change; if a
    check cannot be run, record that clearly rather than reporting it as passed.
+   GitHub Actions runs the Python suite on Python 3.10 and 3.13 and the browser
+   suite on Chromium for pushes and pull requests; workflow changes should keep
+   those commands aligned with the local instructions.
 5. **Record and maintain the design docs — every change updates them.** The
    `devDocs/` notes are the living record of the full system and all its
    features. Update the relevant note in the same commit whenever behavior,

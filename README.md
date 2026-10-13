@@ -139,8 +139,8 @@ Verify from the laptop itself via `http://192.168.1.50:18765/` (your IP and
 for the trust contract.
 
 ```sh
-git clone https://github.com/ljlabs/swarmagent.git
-cd swarmagent
+git clone https://github.com/ljlabs/coms-board.git
+cd coms-board
 python3 -m unittest discover -s tests
 ```
 
@@ -477,9 +477,12 @@ commands are detected from `PATH`: OpenCode (`opencode acp`), Codex
 (`codex-acp`), and Claude Code via the ACP adapter (`claude-code-acp`, or
 `npx -y @zed-industries/claude-code-acp`). The Runner settings page accepts
 custom command strings and a different workspace path. Install and authenticate
-your chosen backend before marking a ticket ready. Agents run with the local
-user's filesystem permissions, so use a trusted workspace and monitor the
-ticket transcript and runner logs.
+your chosen backend before marking a ticket ready. ACP backend processes
+inherit the server's environment and run with the server user's filesystem
+permissions; native tools can access files outside the selected workspace. Run
+the board under a low-privilege account, keep unrelated secrets out of its
+environment, use a trusted workspace, and monitor the ticket transcript and
+runner logs.
 
 OpenCode sessions explicitly receive file reading/search, commands, editing,
 URL fetching and web search, including with a local OpenAI-compatible model.
@@ -529,10 +532,14 @@ data, excluded from version control — back them up separately if they matter.
 
 ## Security
 
-The dashboard binds to loopback (`127.0.0.1`) and has **no authentication**.
-Non-loopback binding is refused. Requests with an untrusted Host or foreign
-Origin are rejected. A Content Security Policy blocks inline scripts, and
-board links reject script URLs. Keep it on a trusted local machine.
+By default, the dashboard binds to loopback (`127.0.0.1`) and has **no
+authentication**. Native mode refuses non-loopback binding. Docker Compose can
+opt into LAN access as described above, but it remains unauthenticated and
+should only be used on a trusted network. Requests with an untrusted Host or
+foreign Origin are rejected. A Content Security Policy blocks inline scripts,
+and board links reject script URLs. Agent names supplied over HTTP are labels,
+not proof of identity. See the [security policy](SECURITY.md) before reporting a
+vulnerability or deploying the board.
 
 Workspace validation sets the agent's working directory; it is **not an OS
 sandbox**. Backend commands and their native tools run with the current user's
@@ -553,6 +560,7 @@ agent sessions so they cannot keep using an old workspace or backend.
 - `scripts/coms` — stable CLI entry point.
 - `tests/` — automated tests (stdlib `unittest` only).
 - `devDocs/` — system overview and the per-change development workflow.
+- `THIRD_PARTY_NOTICES.md` — licenses for bundled browser libraries.
 - `data/` — SQLite database lives here at runtime (not committed).
 - `SKILL.md` — agent-facing usage instructions.
 
@@ -574,7 +582,8 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-See [the application review](REVIEW.md) for findings, fixes and release limits.
+GitHub Actions runs the Python suite on Python 3.10 and 3.13 and the browser
+suite on Chromium for pushes and pull requests.
 
 To run the test suite before every commit, enable the repository hook once:
 
@@ -584,4 +593,5 @@ git config core.hooksPath .githooks
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+The Swarm Agent code is MIT licensed; see [LICENSE](./LICENSE). Bundled browser
+libraries retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

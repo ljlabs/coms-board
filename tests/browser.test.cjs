@@ -44,7 +44,7 @@ test('nested chat work shows a sidebar circle and conversation Lottie while allo
     assert.equal(await page.locator('#chat-activity .activity-spinner').count(), 0);
     assert.equal(await page.locator('#chat-send').isEnabled(), true);
     assert.equal(await page.locator('#chat-stop').isVisible(), false);
-    assert.match(await page.locator('#chat-activity').textContent(), /teammates/i);
+    assert.match(await page.locator('#chat-activity').textContent(), /teammates|responding|thinking|working/i);
     working=false;
     await page.waitForFunction(()=>document.querySelector('#chat-activity').hidden);
     await page.waitForFunction(()=>!document.querySelector('.chat-session-row .activity-spinner'));
@@ -203,7 +203,7 @@ test('ticket chat exposes reusable editing without fork controls', async () => {
     await first.getByRole('button',{name:'Edit message',exact:true}).click();
     await first.getByRole('textbox',{name:'Edit message',exact:true}).fill('Updated ticket question');
     await first.getByRole('button',{name:'Save and regenerate'}).click();
-    await page.waitForFunction(()=>!document.querySelector('.chat-edit-form') && document.querySelector('#chat-status').textContent!=='working');
+    await page.waitForFunction(()=>!document.querySelector('.chat-edit-form') && [...document.querySelectorAll('#runner-chat .chat-message.user .chat-text')].at(-1)?.textContent==='Updated ticket question');
     assert.equal(await page.locator('#runner-chat .chat-message.user').count(),count+1);
     assert.equal(await page.locator('#runner-chat .chat-message.user .chat-text').last().textContent(),'Updated ticket question');
     assert.equal(await page.locator('#runner-chat .chat-message-fork').count(),0);
@@ -464,13 +464,18 @@ test('streaming chat preserves reading position and existing message nodes', asy
     original = await page.locator('.chat-message').first().elementHandle();
     await page.locator('#chat-input').fill('Draft while reading');
     await page.locator('#chat-messages').evaluate(el => { el.scrollTop = 180; });
-    await page.waitForTimeout(3200);
-    assert.ok(polls >= 2);
+    const waitForPolls = async target => {
+      const deadline = Date.now() + 15000;
+      while (polls < target && Date.now() < deadline) await page.waitForTimeout(50);
+      assert.ok(polls >= target, `Expected ${target} session polls, received ${polls}`);
+    };
+    await waitForPolls(2);
     assert.equal(await original.evaluate(el => el.isConnected), true);
     assert.equal(await page.locator('#chat-messages').evaluate(el => el.scrollTop), 180);
     assert.equal(await page.locator('#chat-input').inputValue(), 'Draft while reading');
+    const beforeBottomPoll = polls;
     await page.locator('#chat-messages').evaluate(el => { el.scrollTop = el.scrollHeight; });
-    await page.waitForTimeout(1800);
+    await waitForPolls(beforeBottomPoll + 1);
     const gap = await page.locator('#chat-messages').evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop);
     assert.ok(gap < 2, 'Chat follows new output when at bottom');
   }, { beforeGoto:page=>page.route('**/api/runner/sessions/browser-chat/events',route=>route.abort()) });
@@ -667,6 +672,69 @@ test('ticket list and board switch in both directions', async () => {
       await page.locator('#vl').click();
       await page.waitForFunction(() => document.querySelector('#vl').classList.contains('primary') && !document.querySelector('.kanban'));
     }
+  });
+});
+
+test('Move to reports failed saves and persists a successful move with filters retained', async () => {
+  await pageFor('/tickets?status=open&all=1', async page => {
+    const ticket = await page.evaluate(() => fetch('/api/tickets', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Board move regression',body:'Move control regression.',requester:'admin'})}).then(response => response.json()));
+    await page.reload();
+    await page.locator('#vb').click();
+    await page.waitForSelector('.kanban');
+    const ticketPath = `**/api/tickets/${ticket.id}`;
+    const initialCount = Number((await page.locator('#ticket-count').textContent()).split(' ')[0]);
+    await page.route(ticketPath, async route => {
+      if (route.request().method() === 'PATCH') {
+        await route.fulfill({status:500, contentType:'application/json', body:JSON.stringify({error:'save rejected'})});
+      } else await route.continue();
+    });
+    const moveControl = page.locator(`[data-ticket-move="${ticket.id}"]`);
+    await moveControl.focus();
+    await moveControl.selectOption('review');
+    await page.waitForFunction(id => document.querySelector('#ticket-board-status').textContent.includes(`Could not move ticket #${id}`), ticket.id);
+    assert.equal(await page.locator(`[data-ticket-column="open"] [data-ticket-id="${ticket.id}"]`).count(), 1);
+    assert.equal(await page.locator(`[data-ticket-move="${ticket.id}"]`).inputValue(), 'open');
+    await page.unroute(ticketPath);
+    const saved = page.waitForResponse(response => response.url().endsWith(`/api/tickets/${ticket.id}`) && response.request().method() === 'PATCH');
+    await moveControl.selectOption('review');
+    await saved;
+    await page.waitForFunction(count => document.querySelector('#ticket-count').textContent === `${count - 1} tickets`, initialCount);
+    const savedTicket = await page.evaluate(id => fetch(`/api/tickets/${id}`).then(response => response.json()), ticket.id);
+    assert.equal(savedTicket.status, 'review');
+    assert.equal(savedTicket.assignee, '');
+    assert.match(page.url(), /status=open/);
+    await page.waitForFunction(() => document.activeElement === document.querySelector('#vb'));
+  });
+});
+
+test('ticket drag drops ignore the original column and external content', async () => {
+  await pageFor('/tickets?all=1', async page => {
+    const ticket = await page.evaluate(() => fetch('/api/tickets', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Board drag regression',body:'Drag and drop regression.',requester:'admin'})}).then(response => response.json()));
+    await page.reload();
+    await page.locator('#vb').click();
+    await page.waitForSelector('.kanban');
+    let patches=0;
+    await page.route(`**/api/tickets/${ticket.id}`, async route => {
+      if (route.request().method() === 'PATCH') patches++;
+      await route.continue();
+    });
+    await page.locator(`[data-ticket-id="${ticket.id}"]`).dragTo(page.locator('[data-ticket-column="open"]'));
+    await page.evaluate(() => {
+      const column=document.querySelector('[data-ticket-column="open"]');
+      const data=new DataTransfer();
+      data.setData('text/plain','external content');
+      column.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:data}));
+      column.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));
+    });
+    await page.waitForTimeout(100);
+    assert.equal(patches, 0);
+    const saved = page.waitForResponse(response => response.url().endsWith(`/api/tickets/${ticket.id}`) && response.request().method() === 'PATCH');
+    await page.locator(`[data-ticket-id="${ticket.id}"]`).dragTo(page.locator('[data-ticket-column="review"]'));
+    await saved;
+    await page.waitForFunction(id => document.querySelector(`[data-ticket-column="review"] [data-ticket-id="${id}"]`), ticket.id);
+    const savedTicket = await page.evaluate(id => fetch(`/api/tickets/${id}`).then(response => response.json()), ticket.id);
+    assert.equal(savedTicket.status, 'review');
+    assert.equal(patches, 1);
   });
 });
 

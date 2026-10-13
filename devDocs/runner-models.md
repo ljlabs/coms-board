@@ -39,6 +39,8 @@ Discovery failures and pending discovery do not overwrite the saved model.
 
 No CLI or MCP model-setting operation is added. Persistent HTTP setting names
 and stored model IDs retain their existing format.
+The Docker image pins `opencode-ai` to the version recorded in `Dockerfile` so
+rebuilds do not silently pick up a different ACP implementation.
 
 ## Verification
 
@@ -49,17 +51,10 @@ session application, invalid hosted selections and local-only recovery.
 `tests/browser.test.cjs` covers hosted save/reload, explicit default display and
 preservation of missing saved models.
 
-Validation on 12 October 2026: all 329 Python checks passed (two platform
-skips), all 34 browser checks passed, JavaScript syntax and Git whitespace
-checks passed, and the Docker image built successfully. The live database
-already contained `opencode/muse-spark-1.3-contributor-free`; both settings reads
-had been replacing it with the Docker llama.cpp default. Deployment preserves
-that saved value and the existing volumes, with a database backup taken while
-the board had no active runs, reviews or reply deliveries.
-After recreation, `/api/runner/settings` and `/api/runner/models` both reported
-the saved Spark ID, with the latter confirming the live ACP session's current
-model. The container was healthy. Verification selected the model without
-sending an inference prompt.
+These tests cover Docker defaults, saved model selections, hosted configuration,
+HTTP save/reload, picker behavior, and the active-worker guard. Docker image
+builds and installed-backend acceptance remain separate checks from the Python
+and browser suites.
 
 ## Maintenance notes
 

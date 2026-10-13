@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 ca-certificates \
-    && npm install --global --no-audit --no-fund opencode-ai @playwright/cli@0.1.22 playwright@1.64.0-alpha-1790635538000 \
+    && npm install --global --no-audit --no-fund opencode-ai@1.19.0 @playwright/cli@0.1.22 playwright@1.64.0-alpha-1790635538000 \
     && playwright install --with-deps chromium \
     && mkdir -p /app /data /workspace /home/board/playwright-output /home/board/.cache \
     && chown -R 10001:10001 /app /data /workspace /home/board \

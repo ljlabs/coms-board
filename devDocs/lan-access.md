@@ -44,18 +44,8 @@
   `tests/test_server.py::test_listed_trusted_host_accepted_others_rejected`
   (listed host allowed; unlisted host, wrong port, and foreign origin
   rejected; unlisted hosts still rejected without the variable).
-- Regression commands and results: `python3 -m unittest discover -s tests`
-  (244 tests). Five pre-existing problems unrelated to this change, each
-  reproduced identically on the unmodified checkout via `git stash`:
-  `test_structured_chat_api_keeps_errors_visible_and_logs_opt_in` (extra
-  `thinking` chunk),
-  `test_orchestrator_keeps_one_codex_process_and_overrides_stale_chat_backend`,
-  `test_orchestrator_restores_history_when_backend_cannot_load`,
-  `test_private_thoughts_and_unknown_events_are_diagnostics`, and
-  `test_schedule_source_and_activity_propagate_to_grandchildren` (error).
-  All trust tests, including the pre-existing
-  `test_cross_origin_and_untrusted_host_rejected`, pass.
-- Checks not run: browser suite (no dashboard change).
+- `tests/test_server.py::test_cross_origin_and_untrusted_host_rejected` covers
+  foreign origins, untrusted hosts, cross-site fetches and malformed hosts.
 
 ## Maintenance notes
 

@@ -36,11 +36,12 @@ time.
 
 ## Verification
 
-- Focused tests: not added or run under the session instruction to avoid tests
-  unless requested.
-- Regression checks: Python module compilation, JavaScript syntax check, and
-  `git diff --check` passed. The automated Python and browser suites were not
-  run.
+`tests/test_schedules.py` covers recurrence validation and calculations,
+non-human agent validation, task editing and status changes, manual runs,
+missed-run coalescing, dispatch ticket contents, and terminal run transitions.
+`tests/test_server.py` covers the HTTP lifecycle; the MCP lifecycle is covered
+through `mcp.call_tool` in the focused schedule tests. `tests/test_agent_activity.py`
+covers propagation of scheduled-task provenance into nested activity.
 
 ## Maintenance notes
 

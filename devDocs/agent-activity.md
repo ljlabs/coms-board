@@ -54,19 +54,11 @@ The response-only Stop control retains its existing semantics; see
 
 ## Verification
 
-Focused backend regressions cover nested work, schedule/chat isolation,
+`tests/test_agent_activity.py` covers nested work, schedule/chat isolation,
 waiting/completion, queued work, source recording without a hierarchy parent,
 legacy outputs, cycles, schema migration, and activity beyond 80 progress rows.
-JavaScript syntax is checked. Browser regression cases are provided but are
-left for user testing under the explicit instruction not to run browser tools
-or browser tests.
-
-The 48 focused backend checks pass; the Lottie correction also reran all ten
-activity regressions successfully. An earlier 11 October full-suite snapshot
-had four existing thinking-transcript assertions failing on unchanged HEAD
-`016eac5`. The latest full checkout run passes all 257 Python tests (two
-platform skips) and all 31 browser tests, including nested chat activity and
-Stop visibility while child work continues.
+`tests/browser.test.cjs` covers nested chat activity and Stop visibility while
+child work continues.
 
 ## Maintenance notes
 

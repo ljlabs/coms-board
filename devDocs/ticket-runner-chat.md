@@ -51,17 +51,8 @@ persisted visibly and the slot is released.
   diagnostics, progress stages, and follow-ups after loss of the live connection.
 - Ticket browser regressions cover shared rendering, replies and reloads,
   scroll/draft preservation, and deep links.
-- On 2026-10-10, all six ticket backend checks and six selected browser checks
-  passed, including the three ticket checks and orchestrator send/mobile/delete
-  regressions. JavaScript syntax and whitespace checks passed. The Docker board
-  was rebuilt and verified healthy; ticket #9's stored reply was verified in UI.
-- The broad Python run (UTF-8 enabled) had four failures in existing thinking
-  transcript assertions, and the broad browser run had seven failures in older
-  polling/dialog/tool expectations. All eleven failures reproduced on unchanged
-  HEAD `e20a8ca`. Tests use temporary databases and a fake ACP process.
-- The latest full checkout run passes all 257 Python tests (two platform skips)
-  and all 31 browser tests, including ticket polling, drafts, and shared chat
-  rendering.
+- Fixtures use temporary databases and a fake ACP process; they do not need a
+  live agent backend.
 
 ## Maintenance notes
 

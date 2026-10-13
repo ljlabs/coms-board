@@ -11,6 +11,12 @@ workers, collaboration, dispatch, monitoring, model discovery and orchestrator
 sessions. Scoped MCP writes still enforce board identity and turn
 responsibilities; workspace filesystem permissions still govern commands.
 
+ACP child processes inherit the server process environment plus explicit
+backend and board settings. Native tools run with the server user's filesystem
+permissions and can read environment values and files outside the selected
+workspace. Run the server as a low-privilege account and avoid placing
+unrelated secrets in its environment.
+
 The runner sets `OPENCODE_ENABLE_EXA=1`: OpenCode otherwise omits native
 `websearch` for a custom provider such as `coms-local`, even with permissive
 tool settings. Search uses a hosted search service (Exa by default) while model
@@ -119,15 +125,6 @@ the durable budget bounds the entire job. ACP children use private temporary
 directories cleaned after process exit; startup rejects less than 16 MiB free.
 Docker recreation clears old tmpfs leakage without erasing volumes.
 
-## Investigation evidence
-
-Job #10 delegated all 12 local code-audit assignments as `research`, with native
-tools denied and instructions requiring HTTPS evidence. The persisted tool
-history includes 404 source fetches and hundreds of repeated `team_read` and
-`source_get` calls. One worker made 710 team reads. Some room responses exceeded
-180 KB and were truncated into backend files that the policy also prevented
-agents from reading. Ticket timestamps did not demonstrate useful delivery.
-
 ## Implementation and verification
 
 `coms/runner.py` owns native-tool configuration, turn prompts, workspace selection
@@ -137,36 +134,6 @@ source recording. `coms/mcp.py` exposes the new source and pagination contracts.
 `tests/test_worker_execution.py` covers enabled tools, delegation, isolated file
 evidence, workspace boundaries, exact-revision review, large room/message
 pagination and failed-turn cleanup. Existing runner/team/monitor regression
-suites cover coordination and recovery.
-
-On 10 October 2026, 51 focused checks passed with one platform skip. The full
-suite ran 185 checks with four existing thinking-transcript failures and two
-platform skips; all four failures also reproduced on unchanged HEAD `f46abd9`.
-Git whitespace checks and the Docker build passed. The deployed service is
-healthy; job #10's 12 existing workers and 21 failed response deliveries were
-requeued after a database backup. Its deployed team index is approximately
-26 KB rather than the earlier truncated 180+ KB responses.
-
-The required-tool regression also checks every connection role and confirms
-other backends receive no OpenCode overrides. An isolated OpenCode 1.18.35
-session with stale project/agent denials exposed the actual required tool
-inventory. The configured `LFM2.5-2.6B-Q8_0.gguf` model completed a native web
-search and returned a result URL. This small capability check does not establish
-reliability for the earlier 12-worker audit, which remains on hold.
-
-Validation on 11 October 2026: 49 focused checks passed with one platform skip.
-The full suite ran 243 checks: 237 passed, two skipped and the same four existing
-thinking-transcript cases failed. Those failures reproduced before this change.
-
-OpenCode model-metadata validation on 11 October 2026: 23 focused worker tests
-ran with one platform skip. A later privacy and regression cleanup kept ACP
-thought chunks out of public transcripts and corrected browser checks to match
-the live UI and SSE fallback. That snapshot passed all 257 Python tests
-(two platform skips) and all 31 browser tests.
-
-Docker Playwright validation on 11 October 2026: four focused runtime-contract
-tests pass; Compose configuration and image build pass. A non-root, read-only
-container opened Chromium, saved snapshots and a screenshot to `/home/board`,
-and a newly created container confirmed the output and browser binary persisted.
-The running board service was recreated from the image with its named volumes
-preserved and passed its health check and a second browser launch.
+suites cover coordination and recovery. Docker browser automation is covered by
+`tests/test_docker_playwright.py`; these automated checks do not substitute for
+acceptance with each supported real ACP backend.

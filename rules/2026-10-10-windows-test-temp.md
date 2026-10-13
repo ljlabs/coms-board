@@ -2,15 +2,15 @@
 
 ## Symptom
 SQLite fixtures failed with `unable to open database file`; temporary-directory
-cleanup then reported `WinError 5` under the sandbox's `AC/Temp` directory.
+cleanup also failed because the system temporary directory was not writable.
 
 ## Failed approaches
-Rerunning the full suite and separate focused suites with the default temp
+Rerunning the full suite and separate focused suites with the default temporary
 location reproduced permission errors unrelated to the application change.
 
 ## Fix
 Use a project-root `TemporaryDirectory` for new isolated unit fixtures. Existing
-HTTP/subprocess suites run with the required local-server permissions; enable
+HTTP/subprocess suites need permission to bind a local server; enable
 `PYTHONUTF8=1` for repository source reads on Windows.
 
 ## Signal

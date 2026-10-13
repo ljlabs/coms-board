@@ -112,11 +112,7 @@ the existing content version. New entries respect the 1 MiB file, 8 MiB skill,
   into orchestrator, worker, teammate and resumed ticket conversations.
 - Headless browser tests exercise file creation, rename, folder and root
   drops, persistence after reload, and unsaved draft retention. They use the
-  real HTTP routes and never open a visible web preview.
-- Earlier Windows checks passed the focused Skills Python and browser cases but
-  recorded failures in unrelated transcript and chat checks. The latest full
-  checkout run passes all 257 Python tests (two platform skips) and all 31
-  browser tests, including the built-in skill read-only controls.
+  real HTTP routes and a temporary database.
 
 ## Maintenance notes
 

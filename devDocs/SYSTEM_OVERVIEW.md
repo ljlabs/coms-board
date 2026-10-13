@@ -14,7 +14,7 @@ for setup, user-facing behavior, configuration, and security limits.
 | `coms/api.py` | Shared application operations and validation over a database connection. |
 | `coms/server.py` | Local HTTP server, JSON API routes, static dashboard assets, and live orchestrator events. |
 | `coms/cli.py` | Command-line interface; invokes the same application operations as the HTTP API (the read-only `agent templates` list queries the database directly). |
-| `web/` | Browser dashboard. It calls the server API and presents wiki, tickets, Q&A, runner, and orchestrator features. |
+| `web/` | Browser dashboard and vendored assets. It presents wiki, tickets, Q&A, runner, and orchestrator features. |
 | `coms/runner.py` | Agent queue, ACP sessions, ticket execution and review, orchestrator sessions, retries, and scheduled-task dispatch. |
 | `coms/acp.py` | ACP process connection and protocol handling for configured agent backends. |
 | `coms/turn_queue.py` | Bounded OpenCode inference queue with review priority and cancellation. |
@@ -28,6 +28,9 @@ for setup, user-facing behavior, configuration, and security limits.
 
 Runtime records live in `data/coms.db` by default. Tests should use a temporary
 database rather than changing that developer data.
+
+Vendored browser libraries and their license files live under `web/vendor/`.
+See the root [third-party notices](../THIRD_PARTY_NOTICES.md) for the inventory.
 
 ## Request and execution paths
 

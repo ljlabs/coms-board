@@ -112,38 +112,13 @@ budgets, artifact freeze and configuration defaults.
 
 ## Verification
 
-`tests/test_team_stop.py` adds 16 regressions for recursive/provenance holds,
-cycle handling, permissions, idempotence, HTTP/MCP access, run/delivery/review
-cancellation, startup and cleanup races, ancestor holds and restart persistence.
-The focused recovery/tool/activity run passed 52 checks with one platform skip.
-An earlier full-suite snapshot had four thinking-transcript failures and nine
-browser failures. ACP thought chunks now stay in opt-in diagnostics, legacy
-thought rows are hidden from public chat responses, and browser coverage follows
-the current UI and SSE fallback behavior. That full checkout snapshot passed
-all 257 Python tests (two platform skips) and all 31 browser tests.
-
-On 11 October 2026, the live audit job #10 and its twelve worker tickets were
-backed up and held. Its waiting runs and pending deliveries were cancelled.
-The subsequent database inspection showed no active audit runs or deliveries
-and no other running jobs before deployment.
-
-- Twenty new backend checks pass. Coverage exercises Stop, startup/ignored cancellation,
-  transcript and worker preservation, timer scoping, EOF cleanup, model
-  discovery, dead-connection recovery, stale/failed lead wakeups, full-capacity
-  monitor scheduling, and scoped MCP tools.
-- JavaScript syntax and Git whitespace checks pass. The current test run used
-  isolated temporary databases; it did not change the running Docker service.
-
-## Investigation evidence
-
-The stored Orchestrator turns on 10 October 2026 match the reported
-`rc=None` and `rc=-15` errors. EOF could mark a connection closed before the
-process exited, causing the old cleanup method to skip termination and reaping.
-Refreshing models could also replace a busy project connection with a root
-workspace connection and terminate its process. Both paths have regression
-coverage. The retained logs do not identify the original sender of SIGTERM;
-these fixes address reproducible failure paths rather than proving which path
-caused each historical exit.
+`tests/test_team_stop.py` covers recursive/provenance holds, cycle handling,
+permissions, idempotence, HTTP/MCP access, run/delivery/review cancellation,
+startup and cleanup races, ancestor holds and restart persistence. Runner and
+orchestrator tests cover transcript preservation, timer scoping, EOF cleanup,
+model discovery, dead-connection recovery, stale/failed lead wakeups,
+full-capacity monitor scheduling and scoped MCP tools. Fixtures use isolated
+temporary databases and fake ACP connections.
 
 ## Maintenance notes
 

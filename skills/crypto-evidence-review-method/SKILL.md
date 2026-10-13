@@ -6,7 +6,7 @@ trigger_words: ["crypto", "cryptocurrency", "backtest"]
 
 # Crypto Strategy Evidence & Review Method
 
-A verified procedure for retrieving, verifying, and reviewing evidence for cryptocurrency strategy research. Grounded in methods this team successfully used (Job #1, ticket #1).
+A verified procedure for retrieving, checking, and reviewing evidence for cryptocurrency strategy research. Grounded in source-backed analysis methods.
 
 ## 1. Source retrieval (source_fetch)
 - Use only real primary-source URLs from the job brief. Do not guess nonexistent URLs.

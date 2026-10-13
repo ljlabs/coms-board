@@ -1,4 +1,4 @@
-"""Regression cases from the job #1 runtime audit; no live backend or data."""
+"""Regression cases for team convergence and bounded collaboration."""
 import json
 import os
 import sqlite3
