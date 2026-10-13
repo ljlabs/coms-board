@@ -44,12 +44,12 @@ Acceptance cases: status persistence, same-column/cancel/external no-ops,
 failed saves and retry, duplicate-save prevention, filter retention, keyboard
 focus, capped-column visibility, and route changes during a request.
 
-Existing browser regression coverage in `tests/browser.test.cjs` checks
-switching between List and Board views. No automated tests were added or run
-for this change because the active instruction requires a user request for
-tests. JavaScript syntax, source/diff review, Docker build and deployed asset
-checks are the validation steps for this revision. The web preview remains
-closed.
+Project board data contracts are covered by `tests/test_ticket_boards.py`,
+including legacy migration, scoped search, hierarchy, validation, deletion,
+and retained shared resources. CLI behavior is covered by `tests/test_cli.py`,
+and HTTP routes by `tests/test_server.py`. Browser regression coverage in
+`tests/browser.test.cjs` checks List and Board switching, ticket moves,
+failed-save recovery, filter retention, keyboard focus, and drag/drop no-ops.
 
 ## Maintenance notes
 

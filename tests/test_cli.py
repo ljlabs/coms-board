@@ -39,6 +39,21 @@ class TestCli(unittest.TestCase):
         self.assertTrue(shim.exists())
         self.assertTrue(os.access(shim, os.X_OK))
 
+    def test_project_boards(self):
+        self.run_coms("wiki", "put", "codebase", "--title", "Codebase", "--body", "docs")
+        board = self.jout(self.run_coms("ticket-board", "create", "CLI project", "--wiki-page", "codebase"))
+        bid = str(board["id"])
+        t = self.jout(self.run_coms("ticket", "create", "cliboardword", "--board", bid))
+        self.run_coms("ticket", "create", "cliboardword default")
+        self.assertEqual([x["id"] for x in self.jout(self.run_coms("ticket", "list", "--board", bid))], [t["id"]])
+        self.assertEqual([x["id"] for x in self.jout(self.run_coms("ticket", "search", "cliboardword", "--board", bid))], [t["id"]])
+        updated = self.jout(self.run_coms("ticket-board", "update", bid, "Renamed CLI project"))
+        self.assertEqual(updated["wiki_slug"], "codebase")
+        self.assertEqual(len(self.jout(self.run_coms("ticket-board", "list"))), 2)
+        self.run_coms("ticket-board", "delete", bid)
+        self.assertEqual(len(self.jout(self.run_coms("ticket-board", "list"))), 1)
+        self.assertEqual(self.jout(self.run_coms("wiki", "get", "codebase"))["body"], "docs")
+
     def test_create_with_parent_and_tree(self):
         s = self.jout(self.run_coms("ticket", "create", "the story", "--type", "story"))
         j = self.jout(self.run_coms("ticket", "create", "the job", "--type", "job",
