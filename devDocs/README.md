@@ -99,6 +99,14 @@ the documentation updates for one cohesive change together in the same commit.
 6. **Review the commit as a unit.** Before committing, inspect the complete
    staged diff and complete the checklist below. Stage the intended files or
    hunks explicitly when other work is present in the checkout.
+   Treat every commit and its metadata as public: use the project's GitHub
+   noreply address, and keep secrets, personal or corporate addresses, local
+   machine paths, incident details, temporary plans, and review/readiness
+   reports out of tracked files and commit messages. Keep those working notes
+   local or ignored. Fix shareability findings in the project itself; do not
+   commit a review note or status update saying the system is not shareable.
+   Commit durable, sanitized documentation only when it describes the system
+   or its intended operation.
 
 For changes limited to documentation or instruction configuration, validate
 local links, configured file paths, and whitespace. These changes need no new
@@ -115,6 +123,9 @@ suite at commit time.
    affected setup and agent instructions are updated too.
 - [ ] `git diff --cached` contains the intended code, tests, and docs, and
   `git diff --cached --check` passes.
+- [ ] The staged files, commit message, and configured author/committer
+  identity are safe for public history; no temporary review or “not shareable”
+  assessment is being committed.
 
 Use the commit summary to record what changed, why, which checks ran and their
 results, and the relevant documentation pages. Keep feature notes as living
